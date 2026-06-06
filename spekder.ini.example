@@ -1,0 +1,12 @@
+# Spekder door config. Copy to "spekder.ini" next to the door binary to enable
+# networked multiplayer. With NO spekder.ini (or no "server" line), the door
+# runs LOCAL single-player against bots -- so an unconfigured install just works.
+# (The legacy name "door.ini" is also still read, for older installs.)
+#
+# Read at launch, so edits apply to the next caller with no BBS restart.
+
+# Arena server to connect to. Remove/comment "server" for offline play.
+# If set but unreachable, the door waits briefly then falls back to local play.
+# server = spekder.example.com
+# port   = 7700
+# token  = CHANGE_ME      ; must match the arena server's -token

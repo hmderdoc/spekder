@@ -1,0 +1,20 @@
+[Unit]
+Description=Spekder arena server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Adjust user/paths to your install.
+User=sbbs
+Group=sbbs
+WorkingDirectory=/sbbs/xtrn/spectre
+# token must match each door's spekder.ini; keep the box's local users trusted
+# (the token is visible in `ps`/this unit). The server is a persistent lobby
+# that rotates/votes modes between matches; -mode sets the starting mode
+# (dm | flag | ctf | survival).
+ExecStart=/sbbs/xtrn/spectre/spekder-server -addr :7700 -token CHANGE_ME -mode dm -bots 4 -tick 20
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

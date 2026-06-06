@@ -1,0 +1,17 @@
+# Build artifacts (anchored: the binaries share names with the repo, so anchor
+# to the repo root rather than ignoring a like-named source file anywhere).
+/spekder
+/spekder.exe
+/spekder-server
+/spekder-server.exe
+/dist/
+
+# Legacy binary names (kept on disk for an in-place install, never committed).
+/door
+/server
+
+# Runtime / per-install (spekder.ini.example is committed; the live config is not)
+/spekder.log
+/door.log
+/spekder.ini
+/door.ini
