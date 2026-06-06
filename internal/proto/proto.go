@@ -1,4 +1,4 @@
-// Package proto is the Spectre wire protocol: length-prefixed binary messages
+// Package proto is the Spekder wire protocol: length-prefixed binary messages
 // carrying game STATE and INPUT (never pixels). Framing: uint32 big-endian
 // length + payload; payload[0] is the message type.
 package proto
