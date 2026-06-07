@@ -650,24 +650,19 @@ func drawHPBar(w *bufio.Writer, p *gm.TankSnap) {
 func drawStatus(w *bufio.Writer, cols int, v viewState, p *gm.TankSnap) {
 	var b strings.Builder
 	b.WriteString("\x1b[2;1H\x1b[0;37m")
-	b.WriteString(v.mode.String())
-	if v.mode != gm.ModeSurvival { // survival has no match clock
+	r := gm.RulesetFor(v.mode)
+	b.WriteString(r.Name)
+	if r.TimeLimit > 0 { // endless modes (survival) have no match clock
 		t := int(v.timer)
 		if t < 0 {
 			t = 0
 		}
 		fmt.Fprintf(&b, "  %d:%02d", t/60, t%60)
 	}
-	switch v.mode {
-	case gm.ModeFlagRun:
+	switch r.Objective {
+	case gm.ObjNeutralFlags:
 		fmt.Fprintf(&b, "  FLAGS %d/%d", v.flagsTotal-v.flagsLeft, v.flagsTotal)
-	case gm.ModeSurvival:
-		lv := p.Lives
-		if lv < 0 {
-			lv = 0
-		}
-		fmt.Fprintf(&b, "  WAVE %d  LIVES %d", v.wave, lv)
-	case gm.ModeCTF:
+	case gm.ObjTeamFlags:
 		mark0, mark1 := " ", " "
 		if v.myTeam == 0 {
 			mark0 = ">"
@@ -680,6 +675,16 @@ func drawStatus(w *bufio.Writer, cols int, v viewState, p *gm.TankSnap) {
 		if p.Carrying {
 			b.WriteString("  \x1b[93m*FLAG*\x1b[0;37m")
 		}
+	}
+	if r.Bots == gm.BotWaves {
+		fmt.Fprintf(&b, "  WAVE %d", v.wave)
+	}
+	if r.Lives > 0 { // lives-based modes (survival, elimination)
+		lv := p.Lives
+		if lv < 0 {
+			lv = 0
+		}
+		fmt.Fprintf(&b, "  LIVES %d", lv)
 	}
 	b.WriteString("\x1b[0m")
 	w.WriteString(b.String())
@@ -748,13 +753,14 @@ func runMenu(w *bufio.Writer, cols, rows int, ip *input, note string) menuChoice
 	if !haveArena {
 		onlineBlurb = "No arena server configured (ask the sysop)."
 	}
-	items := []entry{
-		{"DEATHMATCH", "Solo vs bots: frag the most tanks before time runs out.", false, gm.ModeDeathmatch, true},
-		{"FLAG RUN", "Solo vs bots: grab every flag before the clock runs out.", false, gm.ModeFlagRun, true},
-		{"CAPTURE THE FLAG", "Team up vs bots: steal their flag, defend yours.", false, gm.ModeCTF, true},
-		{"SURVIVAL", "Solo vs bots: endless waves of hunters.", false, gm.ModeSurvival, true},
-		{"ONLINE ARENA", onlineBlurb, true, 0, haveArena},
+	// Single-player items are built straight from the ruleset table, so a new mode
+	// appears here just by being added to gm.Rulesets (Phase B: modes are data).
+	var items []entry
+	for m := 0; m < len(gm.Rulesets); m++ {
+		rs := gm.Rulesets[m]
+		items = append(items, entry{name: rs.Name, blurb: rs.Desc, mode: gm.Mode(m), ready: true})
 	}
+	items = append(items, entry{name: "ONLINE ARENA", blurb: onlineBlurb, online: true, ready: haveArena})
 	sel := 0
 	titleF, _ := tdf.Fit("SPEKDER", cols-2, "block", "union", "untx")
 	draw := func() {

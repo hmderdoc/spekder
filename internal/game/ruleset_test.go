@@ -52,6 +52,58 @@ func TestTimeoutPicksLeader(t *testing.T) {
 	}
 }
 
+// TestEliminationLastStanding proves a brand-new mode works almost entirely from
+// its Ruleset table entry: ELIMINATION gives every tank lives (BotFill + Lives>0),
+// ends when one remains, and the survivor wins.
+func TestEliminationLastStanding(t *testing.T) {
+	w := NewWorld(2, ModeElimination)
+	me := w.AddPlayer([3]float64{}, 1)
+	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{me: {}})
+	if w.Phase != PhaseActive {
+		t.Fatalf("expected active, got %v", w.Phase)
+	}
+	if w.Tanks[me].lives != 3 {
+		t.Fatalf("player should start with 3 lives, got %d", w.Tanks[me].lives)
+	}
+	botGotLives := false
+	for i := range w.Tanks {
+		if w.Tanks[i].Bot && !w.Tanks[i].gone {
+			if w.Tanks[i].lives == 3 {
+				botGotLives = true // elimination bots get lives too (unlike survival waves)
+			}
+			w.Tanks[i].Dead, w.Tanks[i].lives = true, 0 // eliminate them
+		}
+	}
+	if !botGotLives {
+		t.Fatal("elimination bots (BotFill + Lives>0) should start with lives")
+	}
+	w.checkEnd()
+	if w.Phase != PhaseEnded {
+		t.Fatalf("elimination should end when one tank remains, got %v", w.Phase)
+	}
+	if w.WinnerID != me {
+		t.Fatalf("the survivor should win, got winner %d", w.WinnerID)
+	}
+}
+
+// TestEliminationRespawnGate: an out-of-lives tank stays dead; one with lives left
+// still respawns. (Survival shares this path; this guards the generalization.)
+func TestEliminationRespawnGate(t *testing.T) {
+	w := NewWorld(1, ModeElimination)
+	me := w.AddPlayer([3]float64{}, 1)
+	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{me: {}})
+	w.Tanks[me].Dead, w.Tanks[me].lives, w.Tanks[me].respawn = true, 0, -1
+	w.respawns(1.0 / 30)
+	if !w.Tanks[me].Dead {
+		t.Fatal("out of lives: must not respawn")
+	}
+	w.Tanks[me].lives, w.Tanks[me].respawn = 1, -1
+	w.respawns(1.0 / 30)
+	if w.Tanks[me].Dead {
+		t.Fatal("with a life left: should respawn")
+	}
+}
+
 // TestEndlessModeNoTimeout: a ruleset with TimeLimit 0 (survival) does not end on
 // the clock — only its win condition can end it.
 func TestEndlessModeNoTimeout(t *testing.T) {
