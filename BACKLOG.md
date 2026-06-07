@@ -74,6 +74,13 @@ the projectile (and authorable per weapon / per turret). Pairs with the
 ammo/weapon-type and difficulty work; turrets and pickups could grant alternate
 "ammo" with different payloads. Hit-detection already resolves the target tank;
 this is about what happens on hit beyond `hurt()`.
+- **Team support / healer**: a heal payload that restores a friendly tank's HP
+  enables a medic/support role in team modes (CTF and future team modes). Implies
+  friendly-target resolution (today friendly fire is ignored in CTF) and a
+  positive `hurt()` counterpart (e.g. `heal()`).
+- **Projectile types**: eventually distinct shot kinds (visuals + speed/arc +
+  payload) rather than one bullet — e.g. heal beam, slow round, knockback shell.
+  The payload work is the foundation; types are the authorable presets on top.
 
 ### Map / entity / trait schema docs
 Write reference docs for the map JSON format (obstacles, ramps, scenery, spawns,
