@@ -16,6 +16,9 @@ they capture intent so nothing is lost between sessions. Newest themes first.
   camera tilts with aim. C recenters and levels.
 - **Offline map pin** — `map = <name|index>` in spekder.ini/door.ini (or
   `SPEKDER_MAP` env) pins single-player to one map. Stopgap until a real picker.
+- **Verticality (partial)** — `bounce` trait (trampoline / jump pad, fixed launch
+  impulse) added to the palette; ramps authored into a map for the first time
+  (`08-ascent.json`, which also showcases vertical aim against a rooftop turret).
 
 ## Backlog
 
@@ -40,12 +43,13 @@ verticality — pairs with the verticality item and the difficulty tiers
 (decision-making axis). Likely lands as one "bot brain" pass.
 
 ### Verticality content
-- **Ramps** — the `Ramp` type and ramp collision/ground already exist in the sim
-  but **no map uses them yet**. Author some in.
-- **Trampoline / bounce trait** — new entity trait that launches a tank upward on
-  contact. Slots into the trait palette beside hazard/teleport.
-- **Landing on obstacle tops** — already supported via `GroundHeight`; make sure
-  it reads/feels right with the new content.
+- **Ramps** — DONE: authored into `08-ascent.json`. More maps could use them.
+- **Trampoline / bounce trait** — DONE (fixed launch impulse).
+- **Landing on obstacle tops** — supported via `GroundHeight`; still want a
+  play-test pass to confirm it reads/feels right with ramps + trampolines now in.
+- **Open question**: trampolines/jumps only move tanks with vertical physics
+  (players). Bots snap to ground each tick, so they ignore launches — revisit
+  when bot-jump / bot vertical movement lands.
 
 ### Map selection UX
 Replace the `SPEKDER_MAP` / `map=` stopgap with a real picker — in-door map
@@ -61,6 +65,15 @@ Two independent, additive features:
 - **Finite ammo** — a per-tank counter, refilled by a new `PickAmmo` power-up
   and/or an ammo-crate entity.
 Both should be authorable per-object in the eventual map editor.
+
+### Weapon effects / projectile payloads
+A projectile's effect need not be damage. Generalize the shot's payload so a
+hit can instead (or also): slow the target, teleport them, boost/launch them,
+apply a buff/debuff, push (knockback), etc. Think of it as an effect attached to
+the projectile (and authorable per weapon / per turret). Pairs with the
+ammo/weapon-type and difficulty work; turrets and pickups could grant alternate
+"ammo" with different payloads. Hit-detection already resolves the target tank;
+this is about what happens on hit beyond `hurt()`.
 
 ### Map / entity / trait schema docs
 Write reference docs for the map JSON format (obstacles, ramps, scenery, spawns,
