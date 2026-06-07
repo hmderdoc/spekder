@@ -33,6 +33,13 @@ func (s *winSock) Write(p []byte) (int, error) {
 	total := 0
 	for total < len(p) {
 		n, err := sockSend(s.h, p[total:])
+		// On a non-blocking socket a full send buffer reports WSAEWOULDBLOCK; that
+		// is backpressure, not failure. Wait for the buffer to drain and retry so
+		// a busy frame doesn't kill the session. WSAEINTR is a benign interruption.
+		if err == windows.WSAEWOULDBLOCK || err == windows.WSAEINTR {
+			time.Sleep(2 * time.Millisecond)
+			continue
+		}
 		if err != nil {
 			return total, err
 		}
@@ -45,31 +52,58 @@ func (s *winSock) Write(p []byte) (int, error) {
 }
 
 func (s *winSock) Read(p []byte) (int, error) {
-	n, err := sockRecv(s.h, p)
-	if err != nil {
-		return 0, err
+	for {
+		n, err := sockRecv(s.h, p)
+		// A BBS may hand us a socket already in non-blocking mode (Synchronet
+		// Win32, ELEBBS, ...). WSARecv then returns WSAEWOULDBLOCK with no data
+		// rather than blocking; poll politely instead of treating it as EOF.
+		// WSAEINTR is a benign interruption - just retry.
+		if err == windows.WSAEWOULDBLOCK || err == windows.WSAEINTR {
+			time.Sleep(6 * time.Millisecond)
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		if n == 0 {
+			return 0, io.EOF
+		}
+		return n, nil
 	}
-	if n == 0 {
-		return 0, io.EOF
-	}
-	return n, nil
 }
 
 func (s *winSock) ReadTimeout(p []byte, d time.Duration) (int, error) {
+	// SO_RCVTIMEO covers a blocking socket; for an inherited non-blocking socket
+	// it has no effect and WSARecv returns WSAEWOULDBLOCK immediately, so we also
+	// poll against our own deadline. Either way we never report the absence of
+	// data as a fatal error - the caller (ANSI size probe) wants 0,nil on timeout.
 	ms := int(d / time.Millisecond)
 	if ms <= 0 {
 		ms = 1
 	}
 	windows.SetsockoptInt(s.h, windows.SOL_SOCKET, windows.SO_RCVTIMEO, ms)
 	defer windows.SetsockoptInt(s.h, windows.SOL_SOCKET, windows.SO_RCVTIMEO, 0)
-	n, err := sockRecv(s.h, p)
-	if err == windows.WSAETIMEDOUT {
-		return 0, nil
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		n, err := sockRecv(s.h, p)
+		if n > 0 {
+			return n, nil
+		}
+		if err == windows.WSAEWOULDBLOCK || err == windows.WSAEINTR {
+			time.Sleep(5 * time.Millisecond)
+			continue
+		}
+		if err == windows.WSAETIMEDOUT {
+			return 0, nil
+		}
+		if err != nil {
+			return 0, err
+		}
+		if n == 0 {
+			return 0, io.EOF
+		}
 	}
-	if err != nil {
-		return 0, err
-	}
-	return n, nil
+	return 0, nil
 }
 
 func (s *winSock) Close() error { return windows.Closesocket(s.h) }
