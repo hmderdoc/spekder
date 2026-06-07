@@ -53,6 +53,7 @@ type stamped struct {
 	shots   []gm.V3
 	flags   []gm.FlagSnap
 	pickups []gm.PickupSnap
+	ents    []gm.EntitySnap
 }
 
 // netSession mirrors the server's broadcast and forwards our input. Remote tanks
@@ -72,11 +73,12 @@ type netSession struct {
 	dead      bool
 
 	// prediction state — main goroutine only
-	predPos  gm.V3
-	predHull float64
-	predTur  float64
-	predVy   float64
-	predInit bool
+	predPos   gm.V3
+	predHull  float64
+	predTur   float64
+	predPitch float64
+	predVy    float64
+	predInit  bool
 }
 
 func dialServer(host, port, token, bbsid, handle string, vehicle int) (*netSession, error) {
@@ -128,14 +130,14 @@ func (s *netSession) readLoop() {
 			}
 			continue
 		}
-		_, match, tanks, shots, flags, pickups, ok := proto.DecodeState(msg)
+		_, match, tanks, shots, flags, pickups, ents, ok := proto.DecodeState(msg)
 		if !ok {
 			continue
 		}
 		now := time.Now()
 		s.mu.Lock()
 		s.lastMatch = match
-		s.buf = append(s.buf, stamped{t: now, tanks: tanks, shots: shots, flags: flags, pickups: pickups})
+		s.buf = append(s.buf, stamped{t: now, tanks: tanks, shots: shots, flags: flags, pickups: pickups, ents: ents})
 		// trim history older than snapKeep, but always keep the last two.
 		cut := now.Add(-snapKeep)
 		drop := 0
@@ -167,45 +169,53 @@ func (s *netSession) step(dt float64, in gm.Input) viewState {
 	buf := append([]stamped(nil), s.buf...) // shallow copy of headers (entries immutable)
 	s.mu.Unlock()
 
+	var latestEnts []gm.EntitySnap
+	if len(buf) > 0 {
+		latestEnts = buf[len(buf)-1].ents // entity HP/dead/facing: latest authoritative
+	}
+
 	if !haveSelf {
 		return viewState{me: s.me, ready: false}
 	}
 
 	// --- own-tank prediction + reconciliation (camera) ---
 	if !s.predInit {
-		s.predPos, s.predHull, s.predTur = self.Pos, self.HullYaw, self.TurretYaw
+		s.predPos, s.predHull, s.predTur, s.predPitch = self.Pos, self.HullYaw, self.TurretYaw, self.TurretPitch
 		s.predInit = true
 	}
 	if self.Dead || match.Phase != gm.PhaseActive {
 		// no movement while dead or between matches (countdown/scoreboard); ride
 		// the authoritative spot so prediction doesn't fight a frozen server.
-		s.predPos, s.predHull, s.predTur, s.predVy = self.Pos, self.HullYaw, self.TurretYaw, 0
+		s.predPos, s.predHull, s.predTur, s.predPitch, s.predVy = self.Pos, self.HullYaw, self.TurretYaw, self.TurretPitch, 0
 	} else {
-		s.predPos, s.predHull, s.predTur, s.predVy = gm.Predict(s.predPos, s.predHull, s.predTur, s.predVy, in, dt, gm.Veh(self.Vehicle), cmap)
+		solids := gm.SolidBoxes(cmap, latestEnts) // block on alive solid entities, matching the server
+		s.predPos, s.predHull, s.predTur, s.predPitch, s.predVy = gm.Predict(s.predPos, s.predHull, s.predTur, s.predPitch, s.predVy, in, dt, gm.Veh(self.Vehicle), cmap, solids)
 		dx, dz := self.Pos.X-s.predPos.X, self.Pos.Z-s.predPos.Z
 		if dx*dx+dz*dz > snapDist*snapDist {
-			s.predPos, s.predHull, s.predTur, s.predVy = self.Pos, self.HullYaw, self.TurretYaw, 0 // respawn/teleport
+			s.predPos, s.predHull, s.predTur, s.predPitch, s.predVy = self.Pos, self.HullYaw, self.TurretYaw, self.TurretPitch, 0 // respawn/teleport
 		} else {
 			s.predPos.X += dx * reconcileK
 			s.predPos.Z += dz * reconcileK
 			s.predPos.Y += (self.Pos.Y - s.predPos.Y) * reconcileK
 			s.predHull += angShort(self.HullYaw, s.predHull) * reconcileK
 			s.predTur += angShort(self.TurretYaw, s.predTur) * reconcileK
+			s.predPitch += (self.TurretPitch - s.predPitch) * reconcileK
 		}
 	}
 
 	tanks, shots := interpolate(buf)
 	var flags []gm.FlagSnap
 	var pickups []gm.PickupSnap
+	ents := latestEnts // entity facing/HP: snap to latest (no interp)
 	if len(buf) > 0 {
 		flags = buf[len(buf)-1].flags     // flags follow carriers but need no interpolation
 		pickups = buf[len(buf)-1].pickups // static until grabbed
 	}
 	return viewState{
 		ready: true, tanks: tanks, shots: shots, me: s.me, self: self,
-		camPos: s.predPos, camYaw: s.predHull + s.predTur, viewTurret: s.predTur,
+		camPos: s.predPos, camYaw: s.predHull + s.predTur, viewTurret: s.predTur, viewPitch: s.predPitch,
 		mode: match.Mode, phase: match.Phase, timer: match.Timer, winnerID: match.WinnerID,
-		flags: flags, pickups: pickups, flagsLeft: match.FlagsLeft, flagsTotal: match.FlagsTotal, votes: match.Votes,
+		flags: flags, pickups: pickups, ents: ents, flagsLeft: match.FlagsLeft, flagsTotal: match.FlagsTotal, votes: match.Votes,
 		mapIdx: match.MapIdx, wave: match.Wave, teamScore: match.TeamScore,
 		winnerTeam: match.WinnerTeam, myTeam: self.Team, gmap: cmap,
 	}

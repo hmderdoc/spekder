@@ -20,8 +20,11 @@ func TestRecenterZerosTurretSim(t *testing.T) {
 // server snap.
 func TestRecenterZerosTurretPredict(t *testing.T) {
 	m := Map{}
-	_, _, turret, _ := Predict(V3{}, 0, 1.5, 0, Input{Recenter: true}, 1.0/30, Veh(1), m)
+	_, _, turret, pitch, _ := Predict(V3{}, 0, 1.5, 0.4, 0, Input{Recenter: true}, 1.0/30, Veh(1), m, nil)
 	if math.Abs(turret) > 1e-9 {
 		t.Fatalf("Predict recenter should zero the turret, got %v", turret)
+	}
+	if math.Abs(pitch) > 1e-9 {
+		t.Fatalf("Predict recenter should also level the gun, got pitch %v", pitch)
 	}
 }

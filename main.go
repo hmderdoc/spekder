@@ -10,8 +10,9 @@
 // The platform specifics (raw tty + fd socket on unix, console VT + Winsock on
 // Windows) live in io_unix.go / io_windows.go.
 //
-// Controls: W/S drive, A/D turn hull, ,/. or arrows aim turret, SPACE fire,
-// ENTER jump, C recenter turret, TAB top-down, Q or Ctrl-C quit.
+// Controls: W/S drive, A/D turn hull, ,/. or left/right arrows aim turret,
+// up/down arrows elevate/depress the gun, SPACE fire, ENTER jump, C recenter
+// turret (and level the gun), TAB top-down, Q or Ctrl-C quit.
 package main
 
 import (
@@ -448,7 +449,9 @@ const (
 	aTurretR         // aim turret right
 	aFire            // fire main gun (gated by cooldown)
 	aJump            // jump (ENTER)
-	aRecenter        // snap turret to hull-forward (C)
+	aRecenter        // snap turret to hull-forward + level (C)
+	aAimUp           // elevate the gun (up arrow)
+	aAimDown         // depress the gun (down arrow)
 	aCount
 )
 
@@ -471,6 +474,8 @@ func (in *input) snapshot() gm.Input {
 		Fire:     in.held(aFire),
 		Jump:     in.held(aJump),
 		Recenter: in.held(aRecenter),
+		AimUp:    in.held(aAimUp),
+		AimDown:  in.held(aAimDown),
 		Vote:     -1, // overridden by the loop during the lobby
 	}
 }
@@ -495,11 +500,11 @@ func (in *input) reader(t Term) {
 				iac = 2
 			case csi:
 				switch c {
-				case 'A': // up arrow -> drive
-					in.hit(aThrottle)
+				case 'A': // up arrow -> elevate gun (aim up)
+					in.hit(aAimUp)
 					in.pushKey(mkUp)
-				case 'B': // down arrow -> reverse
-					in.hit(aReverse)
+				case 'B': // down arrow -> depress gun (aim down)
+					in.hit(aAimDown)
 					in.pushKey(mkDown)
 				case 'C': // right arrow -> aim turret right
 					in.hit(aTurretR)
@@ -1052,9 +1057,9 @@ func splash(w *bufio.Writer, cols, rows int, ip *input) {
 	}
 	sub := "T A N K   A R E N A"
 	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;1;36m%s\x1b[0m", bannerRows+1, (cols-len(sub))/2+1, sub)
-	ctl := "W/S drive  A/D turn  ,/. aim  C recenter  SPACE fire  ENTER jump  TAB map  Q quit"
+	ctl := "W/S drive  A/D turn  ,/. aim  up/down elevate  C recenter  SPACE fire  ENTER jump  TAB map  Q quit"
 	if len(ctl) > cols {
-		ctl = "WASD move  ,/. aim  C recenter  SPACE fire  TAB map  Q quit"
+		ctl = "WASD move  arrows aim/elevate  C recenter  SPACE fire  Q quit"
 	}
 	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;90m%s\x1b[0m", bannerRows+3, (cols-len(ctl))/2+1, ctl)
 	hint := "press any key"
@@ -1305,7 +1310,7 @@ loop:
 			// First-person: ride our tank (predicted in net mode), look along the turret.
 			cam.pos = v.camPos.Add(V3{0, gm.EyeHeight, 0})
 			cam.yaw = v.camYaw
-			cam.pitch = 0
+			cam.pitch = -v.viewPitch // gun up (+pitch) tilts the view up (cam.pitch<0 looks up)
 		}
 
 		// Crosshair color doubles as the reload gauge: red while reloading, amber
@@ -1319,7 +1324,7 @@ loop:
 		case p.Rapid:
 			reticle = [3]byte{230, 170, 40}
 		}
-		rnd.renderWorld(cam, now.Sub(start).Seconds(), v.tanks, v.shots, v.flags, v.pickups, v.me, flash, topdown, reticle, v.viewTurret)
+		rnd.renderWorld(cam, now.Sub(start).Seconds(), v.tanks, v.shots, v.flags, v.pickups, v.gmap.Entities, v.ents, v.me, flash, topdown, reticle, v.viewTurret)
 		frame, cur := encode(rnd, cols, rows3d, prev)
 		prev = cur
 		w.Write(frame)

@@ -1,6 +1,11 @@
 package main
 
-import gm "spekder/internal/game"
+import (
+	"os"
+	"strconv"
+
+	gm "spekder/internal/game"
+)
 
 // viewState is what one tick of a session yields: the tanks/projectiles to draw,
 // our own authoritative tank (for HUD + flash), and the camera pose. Offline and
@@ -19,6 +24,9 @@ type viewState struct {
 	// mode, authoritative offline). The body-direction pip = -viewTurret, so it
 	// never lags the camera.
 	viewTurret float64
+	// viewPitch is the gun elevation (+ up) consistent with the camera; the
+	// first-person view tilts to -viewPitch (positive cam.pitch looks down).
+	viewPitch float64
 
 	// match lifecycle + Flag Run / CTF state
 	mode       gm.Mode
@@ -27,6 +35,7 @@ type viewState struct {
 	winnerID   int
 	flags      []gm.FlagSnap   // flags to draw (Flag Run pickups / CTF team flags)
 	pickups    []gm.PickupSnap // power-up drops to draw
+	ents       []gm.EntitySnap // per-tick dynamic state of gmap.Entities (aligned by index)
 	flagsLeft  int
 	flagsTotal int
 	votes      [4]int // lobby vote tally per mode index
@@ -54,12 +63,35 @@ type offlineSession struct {
 
 func newOfflineSession(numBots int, mode gm.Mode, vehicle int) *offlineSession {
 	w := gm.NewWorld(numBots, mode)
+	// Pin offline play to a specific map (no rotation) so a layout can be reached
+	// deterministically. Source order: the SPEKDER_MAP env var overrides a
+	// "map = <name|index>" key in spekder.ini/door.ini. Until there's an in-game
+	// map picker (TODO), this is how you choose a single-player map.
+	want := loadINI(defaultINIPath())["map"]
+	if env := os.Getenv("SPEKDER_MAP"); env != "" {
+		want = env
+	}
+	if want != "" {
+		idx := gm.FindMap(want)
+		if idx < 0 {
+			if n, err := strconv.Atoi(want); err == nil {
+				idx = n
+			}
+		}
+		if idx < 0 {
+			logf("offline: map %q not found; using a random map", want)
+		} else {
+			w.PinMap(idx)
+			logf("offline: pinned to map %q (index %d)", want, idx)
+		}
+	}
 	return &offlineSession{w: w, me: w.AddPlayer([3]float64{}, vehicle)}
 }
 
 func (s *offlineSession) step(dt float64, in gm.Input) viewState {
 	s.w.Update(dt, map[int]gm.Input{s.me: in})
 	tanks, shots, flags, pickups := s.w.Snapshot()
+	ents := s.w.Entities()
 	var self gm.TankSnap
 	for i := range tanks {
 		if tanks[i].ID == s.me {
@@ -70,9 +102,9 @@ func (s *offlineSession) step(dt float64, in gm.Input) viewState {
 	m := s.w.Match()
 	return viewState{
 		ready: true, tanks: tanks, shots: shots, me: s.me, self: self,
-		camPos: self.Pos, camYaw: self.HullYaw + self.TurretYaw, viewTurret: self.TurretYaw,
+		camPos: self.Pos, camYaw: self.HullYaw + self.TurretYaw, viewTurret: self.TurretYaw, viewPitch: self.TurretPitch,
 		mode: m.Mode, phase: m.Phase, timer: m.Timer, winnerID: m.WinnerID,
-		flags: flags, pickups: pickups, flagsLeft: m.FlagsLeft, flagsTotal: m.FlagsTotal, mapIdx: m.MapIdx,
+		flags: flags, pickups: pickups, ents: ents, flagsLeft: m.FlagsLeft, flagsTotal: m.FlagsTotal, mapIdx: m.MapIdx,
 		wave: m.Wave, teamScore: m.TeamScore, winnerTeam: m.WinnerTeam, myTeam: self.Team,
 		gmap: s.w.ActiveMap(),
 	}

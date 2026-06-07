@@ -47,6 +47,9 @@ func appendTank(dst []Tri, t *gm.TankSnap) []Tri {
 	sa, ca := math.Sin(t.HullYaw+t.TurretYaw), math.Cos(t.HullYaw+t.TurretYaw)
 	xfHull := func(l V3) V3 { return rotY(l, sh, ch).Add(t.Pos) }
 	xfTur := func(l V3) V3 { return rotY(l, sa, ca).Add(t.Pos) }
+	// The gun barrel also pitches: rotate about the turret pivot (local Y = 1.05*s)
+	// in the YZ plane, then yaw, then translate. +pitch raises the muzzle.
+	sp, cp := math.Sin(t.TurretPitch), math.Cos(t.TurretPitch)
 	col := t.Color
 	if t.Shield { // spawn-protected: washed-out so it reads as invulnerable
 		col = [3]float64{(col[0] + 0.6) / 2, (col[1] + 0.6) / 2, (col[2] + 0.6) / 2}
@@ -56,10 +59,16 @@ func appendTank(dst []Tri, t *gm.TankSnap) []Tri {
 	}
 	bright := [3]float64{math.Min(col[0]*1.25, 1), math.Min(col[1]*1.25, 1), math.Min(col[2]*1.25, 1)}
 	gun := [3]float64{0.22, 0.22, 0.26}
-	s := gm.Veh(t.Vehicle).Scale                                                            // vehicle class sizes the model
-	dst = box(dst, V3{0, 0.45 * s, 0}, V3{0.9 * s, 0.45 * s, 1.3 * s}, col, xfHull)         // hull
-	dst = box(dst, V3{0, 1.05 * s, 0}, V3{0.55 * s, 0.32 * s, 0.55 * s}, bright, xfTur)     // turret
-	dst = box(dst, V3{0, 1.05 * s, 1.05 * s}, V3{0.12 * s, 0.12 * s, 0.85 * s}, gun, xfTur) // barrel
+	s := gm.Veh(t.Vehicle).Scale // vehicle class sizes the model
+	pivotY := 1.05 * s
+	xfBarrel := func(l V3) V3 {
+		ly := l.Y - pivotY
+		pp := V3{l.X, ly*cp + l.Z*sp + pivotY, -ly*sp + l.Z*cp}
+		return rotY(pp, sa, ca).Add(t.Pos)
+	}
+	dst = box(dst, V3{0, 0.45 * s, 0}, V3{0.9 * s, 0.45 * s, 1.3 * s}, col, xfHull)            // hull
+	dst = box(dst, V3{0, 1.05 * s, 0}, V3{0.55 * s, 0.32 * s, 0.55 * s}, bright, xfTur)        // turret
+	dst = box(dst, V3{0, 1.05 * s, 1.05 * s}, V3{0.12 * s, 0.12 * s, 0.85 * s}, gun, xfBarrel) // barrel (pitches)
 	return dst
 }
 
@@ -169,6 +178,50 @@ func appendPickup(dst []Tri, p gm.PickupSnap) []Tri {
 	return dst
 }
 
+// appendEntity builds a map trait-object from its static template (e) merged
+// with its current dynamic state (st from the wire). A turret is a base plus a
+// head+barrel that rotates to st.Yaw; other kinds render as a solid block.
+// Destructibles redden as their HP falls; a dead entity draws nothing.
+func appendEntity(dst []Tri, e gm.Entity, st gm.EntitySnap) []Tri {
+	if st.Dead {
+		return dst
+	}
+	col := e.Color
+	if col == ([3]float64{}) {
+		col = [3]float64{0.55, 0.57, 0.62}
+	}
+	if e.Destruct != nil && e.Destruct.MaxHP > 0 { // damage tint: fade toward red
+		if f := float64(st.HP) / float64(e.Destruct.MaxHP); f < 1 {
+			if f < 0 {
+				f = 0
+			}
+			col = [3]float64{col[0] + (0.90-col[0])*(1-f), col[1] * f, col[2] * f}
+		}
+	}
+	switch e.Kind {
+	case "turret":
+		baseXf := func(l V3) V3 { return l.Add(e.Pos) }
+		dst = box(dst, V3{}, e.Half, col, baseXf) // base, centered on Pos like an obstacle
+		s, c := math.Sin(st.Yaw), math.Cos(st.Yaw)
+		top := V3{e.Pos.X, e.Pos.Y + e.Half.Y, e.Pos.Z}
+		headXf := func(l V3) V3 { return rotY(l, s, c).Add(top) }
+		sp, cp := math.Sin(st.Pitch), math.Cos(st.Pitch)
+		barXf := func(l V3) V3 { // pitch the barrel about the head pivot (local Y = 0.3)
+			ly := l.Y - 0.3
+			pp := V3{l.X, ly*cp + l.Z*sp + 0.3, -ly*sp + l.Z*cp}
+			return rotY(pp, s, c).Add(top)
+		}
+		bright := [3]float64{math.Min(col[0]*1.2, 1), math.Min(col[1]*1.2, 1), math.Min(col[2]*1.2, 1)}
+		gun := [3]float64{0.20, 0.20, 0.24}
+		dst = box(dst, V3{0, 0.3, 0}, V3{0.45, 0.3, 0.45}, bright, headXf) // rotating head
+		dst = box(dst, V3{0, 0.3, 0.55}, V3{0.1, 0.1, 0.55}, gun, barXf)   // barrel (pitches)
+	default:
+		xf := func(l V3) V3 { return l.Add(e.Pos) }
+		dst = box(dst, V3{}, e.Half, col, xf) // generic solid block (wall, cover, ...)
+	}
+	return dst
+}
+
 // ---------------------------------------------------------------------------
 // world rendering
 // ---------------------------------------------------------------------------
@@ -252,7 +305,7 @@ func (r *Renderer) drawReticle(col [3]byte, turret float64) {
 
 // renderWorld draws the arena, every tank except our own (me) and the dead, all
 // projectiles, then the damage flash and aiming reticle.
-func (r *Renderer) renderWorld(cam Cam, t float64, tanks []gm.TankSnap, shots []gm.V3, flags []gm.FlagSnap, pickups []gm.PickupSnap, me int, flash float64, topdown bool, reticle [3]byte, selfTurret float64) {
+func (r *Renderer) renderWorld(cam Cam, t float64, tanks []gm.TankSnap, shots []gm.V3, flags []gm.FlagSnap, pickups []gm.PickupSnap, entT []gm.Entity, entS []gm.EntitySnap, me int, flash float64, topdown bool, reticle [3]byte, selfTurret float64) {
 	r.clear()
 	r.drawTris(cam, arena, t)
 	var dyn []Tri
@@ -275,6 +328,13 @@ func (r *Renderer) renderWorld(cam Cam, t float64, tanks []gm.TankSnap, shots []
 	for _, p := range pickups {
 		dyn = appendPickup(dyn, p)
 	}
+	for i := range entT {
+		var st gm.EntitySnap
+		if i < len(entS) {
+			st = entS[i]
+		}
+		dyn = appendEntity(dyn, entT[i], st)
+	}
 	r.drawTris(cam, dyn, 0)
 	if flash > 0 {
 		r.tintRed(flash / hitFlashTime * 0.6)
@@ -282,7 +342,7 @@ func (r *Renderer) renderWorld(cam Cam, t float64, tanks []gm.TankSnap, shots []
 	if topdown {
 		return // overhead view is its own map; no radar/reticle
 	}
-	r.drawRadar(cam, tanks, flags, pickups, me)
+	r.drawRadar(cam, tanks, flags, pickups, entT, entS, me)
 	r.drawReticle(reticle, selfTurret)
 }
 
@@ -305,7 +365,7 @@ var radarRange = 42.0 // world units shown from center to edge (set per-map in b
 // drawRadar paints the radar contents into the framebuffer's top-right: just the
 // player at center (facing up) and a blip per other live tank, floating over the
 // empty sky (no disc/box). The corner brackets are drawn separately as text.
-func (r *Renderer) drawRadar(cam Cam, tanks []gm.TankSnap, flags []gm.FlagSnap, pickups []gm.PickupSnap, me int) {
+func (r *Renderer) drawRadar(cam Cam, tanks []gm.TankSnap, flags []gm.FlagSnap, pickups []gm.PickupSnap, entT []gm.Entity, entS []gm.EntitySnap, me int) {
 	c0, c1, r0, r1 := radarRect(r.W)
 	pcx := (c0 + c1) / 2
 	pcy := ((r0-1)*2 + r1*2 - 1) / 2
@@ -337,6 +397,16 @@ func (r *Renderer) drawRadar(cam Cam, tanks []gm.TankSnap, flags []gm.FlagSnap, 
 	for _, p := range pickups {
 		c := pickupColor(p.Kind)
 		blip(p.Pos.X, p.Pos.Z, [3]byte{clampB(c[0] * 255), clampB(c[1] * 255), clampB(c[2] * 255)})
+	}
+	// live turret emplacements show as orange threat blips
+	for i := range entT {
+		if entT[i].Turret == nil {
+			continue
+		}
+		if i < len(entS) && entS[i].Dead {
+			continue
+		}
+		blip(entT[i].Pos.X, entT[i].Pos.Z, [3]byte{245, 150, 40})
 	}
 	// player marker + short heading tick pointing up
 	r.putPx(pcx, pcy, [3]byte{130, 205, 255})

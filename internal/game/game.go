@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 //go:embed maps/*.json
@@ -37,8 +38,71 @@ type Ramp struct {
 	Color [3]float64
 }
 
+// Entity is an authored, placeable map object assembled from a fixed palette of
+// behavior traits (turret, hazard, teleporter, destructible, respawn). It is the
+// static template stored in a Map; per match the World instantiates a runtime
+// copy (NewEntities) whose dynamic state (HP/dead/facing/cooldowns) rides
+// MsgState to clients. A single object composes any mix of traits - e.g. a
+// turret that is also Destruct+Respawn is a shootable gun emplacement that
+// rebuilds itself. nil trait pointer = trait absent.
+type Entity struct {
+	Kind  string     // archetype / render selector: "turret","wall","hazard","teleporter"
+	Pos   V3         // center
+	Half  V3         // box half-extent (collision + default visual)
+	Color [3]float64 // base tint
+	Yaw   float64    // facing: authored = initial; runtime = current (turret tracks)
+	Pitch float64    // gun elevation (turret): runtime, + = aim up
+	Solid bool       // collides like an obstacle while alive
+
+	Turret   *TurretTrait
+	Hazard   *HazardTrait
+	Teleport *TeleportTrait
+	Destruct *DestructTrait
+	Respawn  *RespawnTrait
+
+	// --- runtime instance state (set in the World copy, not authored) ---
+	HP       int     // current hit points (Destruct); 0/unused otherwise
+	Dead     bool    // destroyed; awaiting respawn or gone for good
+	cooldown float64 // turret fire / teleport debounce timer
+	respawnT float64 // sec until respawn while Dead (Respawn trait)
+}
+
+// TurretTrait makes an entity track and shoot the nearest live enemy tank in
+// range, firing the same projectiles tanks use.
+type TurretTrait struct {
+	Range     float64 // engagement radius
+	FireDelay float64 // sec between shots
+	Dmg       int     // projectile damage (0 -> default projDmg)
+	TurnRate  float64 // rad/sec the barrel tracks toward its target
+}
+
+// HazardTrait damages any tank standing within the entity's footprint (lava,
+// spikes). DPS is applied continuously while inside.
+type HazardTrait struct {
+	DPS float64
+}
+
+// TeleportTrait warps a tank that drives into the footprint to Dest, then
+// debounces for Cooldown sec so it doesn't immediately bounce back.
+type TeleportTrait struct {
+	Dest     V3
+	Cooldown float64
+}
+
+// DestructTrait gives an entity hit points; projectiles whittle it down and it
+// is destroyed at 0 (pair with RespawnTrait to have it return).
+type DestructTrait struct {
+	MaxHP int
+}
+
+// RespawnTrait makes a destroyed entity come back after Delay sec.
+type RespawnTrait struct {
+	Delay float64
+}
+
 // Map is a static arena layout. Size is the arena half-extent (0 = default).
-// Pickups reserves power-up spawn spots for a later drop system.
+// Pickups reserves power-up spawn spots for a later drop system. Entities are
+// authored trait-objects (turrets, hazards, ...) instantiated each match.
 type Map struct {
 	Name      string
 	Size      float64
@@ -47,6 +111,23 @@ type Map struct {
 	Scenery   []Prop
 	Spawns    []V3
 	Pickups   []V3
+	Entities  []Entity
+}
+
+// NewEntities returns a fresh runtime copy of the map's authored entities with
+// instance state initialized (HP from Destruct, alive). Called at match start.
+// Trait pointers are shared with the template - they are read-only params; only
+// the value fields (HP/Dead/cooldown/respawnT/Yaw) are mutated at runtime.
+func (m Map) NewEntities() []Entity {
+	out := make([]Entity, len(m.Entities))
+	for i, e := range m.Entities {
+		out[i] = e // value copy; trait pointers shared, fine (params are read-only)
+		out[i].Dead, out[i].cooldown, out[i].respawnT = false, 0, 0
+		if e.Destruct != nil {
+			out[i].HP = e.Destruct.MaxHP
+		}
+	}
+	return out
 }
 
 // MapHalf is the play boundary (just inside the walls) for a map.
@@ -80,6 +161,38 @@ type jramp struct {
 	Dir   string     `json:"dir"`
 	Color [3]float64 `json:"color"`
 }
+type jturret struct {
+	Range     float64 `json:"range"`
+	FireDelay float64 `json:"fireDelay"`
+	Dmg       int     `json:"dmg"`
+	TurnRate  float64 `json:"turnRate"`
+}
+type jhazard struct {
+	DPS float64 `json:"dps"`
+}
+type jteleport struct {
+	Dest     [3]float64 `json:"dest"`
+	Cooldown float64    `json:"cooldown"`
+}
+type jdestruct struct {
+	MaxHP int `json:"maxHp"`
+}
+type jrespawn struct {
+	Delay float64 `json:"delay"`
+}
+type jentity struct {
+	Kind     string     `json:"kind"`
+	Pos      [3]float64 `json:"pos"`
+	Half     [3]float64 `json:"half"`
+	Color    [3]float64 `json:"color"`
+	Yaw      float64    `json:"yaw"`
+	Solid    bool       `json:"solid"`
+	Turret   *jturret   `json:"turret"`
+	Hazard   *jhazard   `json:"hazard"`
+	Teleport *jteleport `json:"teleport"`
+	Destruct *jdestruct `json:"destruct"`
+	Respawn  *jrespawn  `json:"respawn"`
+}
 type jmap struct {
 	Name      string       `json:"name"`
 	Size      float64      `json:"size"`
@@ -88,6 +201,27 @@ type jmap struct {
 	Scenery   []jprop      `json:"scenery"`
 	Spawns    [][2]float64 `json:"spawns"`
 	Pickups   [][2]float64 `json:"pickups"`
+	Entities  []jentity    `json:"entities"`
+}
+
+func (je jentity) toEntity() Entity {
+	e := Entity{Kind: je.Kind, Pos: v3(je.Pos), Half: v3(je.Half), Color: je.Color, Yaw: je.Yaw, Solid: je.Solid}
+	if je.Turret != nil {
+		e.Turret = &TurretTrait{Range: je.Turret.Range, FireDelay: je.Turret.FireDelay, Dmg: je.Turret.Dmg, TurnRate: je.Turret.TurnRate}
+	}
+	if je.Hazard != nil {
+		e.Hazard = &HazardTrait{DPS: je.Hazard.DPS}
+	}
+	if je.Teleport != nil {
+		e.Teleport = &TeleportTrait{Dest: v3(je.Teleport.Dest), Cooldown: je.Teleport.Cooldown}
+	}
+	if je.Destruct != nil {
+		e.Destruct = &DestructTrait{MaxHP: je.Destruct.MaxHP}
+	}
+	if je.Respawn != nil {
+		e.Respawn = &RespawnTrait{Delay: je.Respawn.Delay}
+	}
+	return e
 }
 
 func rampDir(s string) int {
@@ -172,6 +306,9 @@ func (jm jmap) toMap() Map {
 	for _, s := range jm.Pickups {
 		m.Pickups = append(m.Pickups, v3xz(s))
 	}
+	for _, e := range jm.Entities {
+		m.Entities = append(m.Entities, e.toEntity())
+	}
 	return m
 }
 
@@ -181,6 +318,9 @@ const (
 	hullTurnRate     = 1.9
 	turretRate       = 2.6 // bot turret tracking speed
 	playerTurretRate = 1.3 // player aim speed (slower = finer aim, less overshoot)
+	pitchRate        = 1.1  // player gun-elevation speed (rad/sec)
+	pitchMax         = 0.70 // max elevation (aim up), ~40 deg
+	pitchMin         = -0.50 // max depression (aim down), ~-29 deg
 	fireDelay        = 0.55
 	jumpSpeed        = 8.5  // upward launch velocity (units/sec)
 	gravity          = 24.0 // downward acceleration (units/sec^2)
@@ -189,6 +329,7 @@ const (
 	projDmg          = 34
 	tankMaxHP        = 100
 	hitRadius        = 1.15
+	tankBodyTop      = 1.9 // top of a tank's hittable body above its feet (×vehicle scale)
 
 	ArenaA = 22.0 // default playfield half-extent (maps may override via Size)
 
@@ -200,6 +341,8 @@ const (
 	botAimTol    = 0.12
 	botKeepDist  = 7.0
 	botFireDelay = 1.2
+
+	turretAimHeight = 0.9 // aim point above a target tank's feet (body center)
 )
 
 // Mode is a game mode; Phase is the match lifecycle state.
@@ -255,6 +398,7 @@ const (
 	flagReturnTime  = 15.0 // CTF: sec a dropped flag waits before returning home
 	ctfCaptureBonus = 5    // CTF: personal frags awarded for a capture
 
+	teleDebounce   = 0.8 // sec a tank is immune to teleporters after warping
 	pickupRadius   = 1.9 // how close you drive to grab a power-up
 	pickupInterval = 9.0 // sec between drop spawns
 	pickupMax      = 4   // max drops on the map at once
@@ -321,15 +465,17 @@ func (a V3) Norm() V3 {
 // mode vote (mode index, or -1 for none); only read during PhaseLobby.
 type Input struct {
 	Throttle, Reverse, HullL, HullR, TurretL, TurretR, Fire, Jump bool
-	Recenter                                                      bool // snap turret to hull-forward
-	Vote                                                          int
+	AimUp, AimDown                                                bool // elevate / depress the gun
+	Recenter                                                     bool // snap turret to hull-forward + level
+	Vote                                                         int
 }
 
 type Tank struct {
-	Pos       V3
-	HullYaw   float64
-	TurretYaw float64 // relative to hull
-	HP        int
+	Pos         V3
+	HullYaw     float64
+	TurretYaw   float64 // relative to hull
+	TurretPitch float64 // gun elevation: + = aim up, - = aim down (radians)
+	HP          int
 	Color     [3]float64
 	Vehicle   int
 	Bot       bool
@@ -350,16 +496,20 @@ type Tank struct {
 	rapidT   float64 // power-up: rapid-fire remaining (sec)
 	cloakT   float64 // power-up: cloak/invisibility remaining (sec)
 	gone     bool    // player left; slot inert and reusable
+
+	hazardDebt float64 // hazard-trait: fractional HP damage carried between ticks
+	teleT      float64 // teleporter debounce remaining (sec); 0 = can teleport
 }
 
 // TankSnap is the renderable/transmittable view of a tank: exported, flat, no
 // sim internals. ID is the stable world index (so the viewer matches by ID even
 // as the snapshot omits vacated slots).
 type TankSnap struct {
-	ID                     int
-	Pos                    V3
-	HullYaw, TurretYaw     float64
-	HP                     int
+	ID                      int
+	Pos                     V3
+	HullYaw, TurretYaw      float64
+	TurretPitch             float64 // gun elevation (+ up)
+	HP                      int
 	Color                  [3]float64
 	Dead, Bot, Shield, Hit bool
 	Kills, Deaths          int
@@ -394,11 +544,23 @@ type PickupSnap struct {
 	Kind int
 }
 
+// EntitySnap is the per-tick dynamic view of a map entity, positionally aligned
+// to the active map's authored Entities (index i in the snap == map entity i).
+// The client merges it with the static template it already holds from MsgMap:
+// the template gives shape/kind/traits, the snap gives current HP/dead/facing.
+type EntitySnap struct {
+	HP    int
+	Dead  bool
+	Yaw   float64
+	Pitch float64 // turret gun elevation (+ up)
+}
+
 type Projectile struct {
 	Pos   V3
 	vel   V3
 	life  float64
-	owner int
+	owner int // firing tank index; <0 = a map entity (e.g. a turret), no kill credit
+	dmg   int // 0 -> default projDmg
 }
 
 // Flag is a Flag Run pickup, or (in CTF) a team flag that can be carried,
@@ -474,13 +636,29 @@ type World struct {
 	rotIdx   int     // rotation cursor (fallback when no votes)
 	MapIdx   int     // active map (index into Maps)
 	wave     int     // Survival: current wave number
+	pinned   bool    // map locked (no rotation) - offline testing/preview
 
 	teamScore  [2]int // CTF: captures per team
 	winnerTeam int    // CTF: winning team set at match end (-1 none)
 
 	pickups     []Pickup // active power-up drops on the map
 	pickupTimer float64  // sec until the next drop spawns
+
+	entities []Entity // runtime trait-objects, instanced from ActiveMap().Entities
 }
+
+// Entities returns per-tick dynamic snapshots of the world's entities, aligned
+// to ActiveMap().Entities by index (for the wire and the server's own renderer).
+func (w *World) Entities() []EntitySnap {
+	out := make([]EntitySnap, len(w.entities))
+	for i := range w.entities {
+		out[i] = EntitySnap{HP: w.entities[i].HP, Dead: w.entities[i].Dead, Yaw: w.entities[i].Yaw, Pitch: w.entities[i].Pitch}
+	}
+	return out
+}
+
+// resetEntities re-instantiates the active map's entities for a new match.
+func (w *World) resetEntities() { w.entities = w.ActiveMap().NewEntities() }
 
 // ActiveMap returns the world's current map.
 func (w *World) ActiveMap() Map {
@@ -490,15 +668,81 @@ func (w *World) ActiveMap() Map {
 	return Maps[w.MapIdx%len(Maps)]
 }
 
-func (w *World) collide(p *V3) { CollideMap(w.ActiveMap(), p) }
+// FindMap returns the index of the map whose name matches (case-insensitive), or
+// -1. Useful for forcing a specific map (e.g. a testing/preview hook).
+func FindMap(name string) int {
+	for i := range Maps {
+		if strings.EqualFold(Maps[i].Name, name) {
+			return i
+		}
+	}
+	return -1
+}
 
-// CollideMap pushes a point out of any solid obstacle's SIDE (horizontal AABB
-// inflated by the tank radius). If the point is at/above a box's top (within
-// stepUp), it isn't blocked — you ride over/stand on the top. Shared by the
-// server and the client predictor.
-func CollideMap(m Map, p *V3) {
+// PinMap forces the active map to idx and stops the per-match rotation, so the
+// world stays on one layout. Used by offline testing/preview; ignored if out of
+// range.
+func (w *World) PinMap(idx int) {
+	if idx < 0 || idx >= len(Maps) {
+		return
+	}
+	w.MapIdx, w.pinned = idx, true
+}
+
+// collide pushes a point out of the world's live collidables (static obstacles
+// plus alive solid entities), so a destructible wall blocks until destroyed.
+func (w *World) collide(p *V3) { CollideBoxes(w.collidables(), p) }
+
+// collidables is the set a tank/shot collides with this tick: the map's static
+// obstacles plus a box per alive, solid entity. Returns the map slice directly
+// when there are no solid entities (the common case, no allocation).
+func (w *World) collidables() []Box {
+	m := w.ActiveMap()
+	boxes := m.Obstacles
+	allocated := false
+	for i := range w.entities {
+		e := &w.entities[i]
+		if !e.Solid || e.Dead {
+			continue
+		}
+		if !allocated { // copy-on-first-write so we never mutate the embedded map
+			boxes = append([]Box(nil), m.Obstacles...)
+			allocated = true
+		}
+		boxes = append(boxes, Box{Pos: e.Pos, Half: e.Half, Color: e.Color})
+	}
+	return boxes
+}
+
+// SolidBoxes returns collision boxes for the alive, solid entities of a map
+// given their per-tick state (ents aligned to m.Entities by index). The net
+// client builds this from the snapshot so its predictor matches the server's
+// dynamic collision (a destroyed wall stops blocking immediately).
+func SolidBoxes(m Map, ents []EntitySnap) []Box {
+	var out []Box
+	for i := range m.Entities {
+		e := m.Entities[i]
+		if !e.Solid {
+			continue
+		}
+		if i < len(ents) && ents[i].Dead {
+			continue
+		}
+		out = append(out, Box{Pos: e.Pos, Half: e.Half, Color: e.Color})
+	}
+	return out
+}
+
+// CollideMap pushes a point out of a map's static obstacles only (no entities).
+func CollideMap(m Map, p *V3) { CollideBoxes(m.Obstacles, p) }
+
+// CollideBoxes pushes a point out of any box's SIDE (horizontal AABB inflated by
+// the tank radius). If the point is at/above a box's top (within stepUp), it
+// isn't blocked — you ride over/stand on the top. Shared by the server and the
+// client predictor.
+func CollideBoxes(boxes []Box, p *V3) {
 	const rad = 1.0
-	for _, b := range m.Obstacles {
+	for _, b := range boxes {
 		if p.Y >= b.Pos.Y+b.Half.Y-stepUp {
 			continue // on top of / above it: no side block
 		}
@@ -535,20 +779,32 @@ func CollideMap(m Map, p *V3) {
 // at feetY: the top of any box/ramp it's over and can reach (feet within stepUp
 // of the surface), else 0 (the floor). This is how tanks stand on objects.
 func GroundHeight(m Map, x, z, feetY float64) float64 {
+	return GroundBoxes(m.Obstacles, m.Ramps, x, z, feetY)
+}
+
+// GroundBoxes is GroundHeight over an explicit box set (so the caller can fold in
+// dynamic solid entities), plus the map's ramps.
+func GroundBoxes(boxes []Box, ramps []Ramp, x, z, feetY float64) float64 {
 	h := 0.0
-	for _, b := range m.Obstacles {
+	for _, b := range boxes {
 		if math.Abs(x-b.Pos.X) < b.Half.X && math.Abs(z-b.Pos.Z) < b.Half.Z {
 			if top := b.Pos.Y + b.Half.Y; feetY >= top-stepUp && top > h {
 				h = top
 			}
 		}
 	}
-	for _, r := range m.Ramps {
+	for _, r := range ramps {
 		if rh, ok := rampHeight(r, x, z); ok && feetY >= rh-stepUp && rh > h {
 			h = rh
 		}
 	}
 	return h
+}
+
+// ground is GroundHeight over the world's live collidables (obstacles + alive
+// solid entities) so tanks can stand on a solid crate/turret base.
+func (w *World) ground(x, z, feetY float64) float64 {
+	return GroundBoxes(w.collidables(), w.ActiveMap().Ramps, x, z, feetY)
 }
 
 // rampHeight returns the ramp surface height at (x,z) and whether (x,z) is on it.
@@ -639,6 +895,22 @@ func (w *World) humanCount() int {
 func fwd(yaw float64) V3           { return V3{math.Sin(yaw), 0, math.Cos(yaw)} }
 func angDiff(a, b float64) float64 { return math.Atan2(math.Sin(a-b), math.Cos(a-b)) }
 
+// aimDir is the unit firing direction for a yaw + gun pitch (+pitch = up).
+func aimDir(yaw, pitch float64) V3 {
+	cp := math.Cos(pitch)
+	return V3{math.Sin(yaw) * cp, math.Sin(pitch), math.Cos(yaw) * cp}
+}
+
+func clampPitch(p float64) float64 {
+	if p > pitchMax {
+		return pitchMax
+	}
+	if p < pitchMin {
+		return pitchMin
+	}
+	return p
+}
+
 func turnToward(cur, target, step float64) float64 {
 	d := angDiff(target, cur)
 	if math.Abs(d) <= step {
@@ -668,11 +940,11 @@ func (w *World) half() float64 { return MapHalf(w.ActiveMap()) }
 
 func (w *World) fire(owner int) {
 	t := &w.Tanks[owner]
-	aim := t.HullYaw + t.TurretYaw
-	f := fwd(aim)
+	d := aimDir(t.HullYaw+t.TurretYaw, t.TurretPitch)
 	w.Shots = append(w.Shots, Projectile{
-		Pos:   t.Pos.Add(V3{f.X * 1.7, EyeHeight, f.Z * 1.7}),
-		vel:   V3{f.X * projSpeed, 0, f.Z * projSpeed},
+		// muzzle: gun height above the tank's feet, offset forward along the aim.
+		Pos:   V3{t.Pos.X + d.X*1.7, t.Pos.Y + EyeHeight + d.Y*1.7, t.Pos.Z + d.Z*1.7},
+		vel:   V3{d.X * projSpeed, d.Y * projSpeed, d.Z * projSpeed},
 		life:  projLife,
 		owner: owner,
 	})
@@ -725,7 +997,7 @@ func (w *World) afterEnded() {
 
 func (w *World) startCountdown(mode Mode) {
 	w.Mode, w.Phase, w.Timer, w.WinnerID = mode, PhaseCountdown, countdownTime, -1
-	if len(Maps) > 1 {
+	if len(Maps) > 1 && !w.pinned {
 		w.MapIdx = (w.MapIdx + 1) % len(Maps) // rotate the map each match
 	}
 }
@@ -786,6 +1058,7 @@ func (w *World) startMatch() {
 		t.TurretYaw = 0
 	}
 	w.pickups, w.pickupTimer = nil, pickupInterval
+	w.resetEntities()
 	w.flags = nil
 	if w.Mode == ModeFlagRun {
 		for i := 0; i < flagCount; i++ {
@@ -1078,6 +1351,144 @@ func (w *World) stepPickups(dt float64) {
 	}
 }
 
+// stepEntities advances the world's trait-objects each tick: turrets track and
+// shoot, hazards burn tanks standing in them, teleporters warp tanks that drive
+// in, and destroyed entities with a Respawn trait tick back to life.
+func (w *World) stepEntities(dt float64) {
+	for i := range w.entities {
+		e := &w.entities[i]
+		if e.cooldown > 0 {
+			e.cooldown -= dt
+		}
+		if e.Dead {
+			if e.Respawn != nil && e.respawnT > 0 {
+				e.respawnT -= dt
+				if e.respawnT <= 0 {
+					e.Dead = false
+					if e.Destruct != nil {
+						e.HP = e.Destruct.MaxHP
+					}
+				}
+			}
+			continue
+		}
+		if e.Turret != nil {
+			w.stepTurret(e, dt)
+		}
+		if e.Hazard != nil {
+			w.stepHazard(e, dt)
+		}
+		if e.Teleport != nil {
+			w.stepTeleport(e)
+		}
+	}
+}
+
+// stepHazard burns tanks standing within a hazard's footprint at its DPS. A
+// per-tank fractional accumulator turns the float DPS*dt into whole-HP hits so
+// integer HP still drains at the authored rate. Shield/spawn-guard protect you.
+func (w *World) stepHazard(e *Entity, dt float64) {
+	for ti := range w.Tanks {
+		t := &w.Tanks[ti]
+		if t.Dead || t.gone || t.guard > 0 || t.shieldT > 0 {
+			continue
+		}
+		if math.Abs(t.Pos.X-e.Pos.X) >= e.Half.X || math.Abs(t.Pos.Z-e.Pos.Z) >= e.Half.Z {
+			continue
+		}
+		if t.Pos.Y > e.Pos.Y+e.Half.Y+0.5 {
+			continue // jumped clear / standing above it
+		}
+		t.hazardDebt += e.Hazard.DPS * dt
+		if whole := int(t.hazardDebt); whole > 0 {
+			t.hazardDebt -= float64(whole)
+			w.hurt(ti, whole, -1)
+		}
+	}
+}
+
+// stepTeleport warps the first live tank in a teleporter's footprint to Dest,
+// arming the pad's Cooldown and a per-tank debounce so it can't immediately
+// bounce back through the destination pad.
+func (w *World) stepTeleport(e *Entity) {
+	if e.cooldown > 0 {
+		return
+	}
+	for ti := range w.Tanks {
+		t := &w.Tanks[ti]
+		if t.Dead || t.gone || t.teleT > 0 {
+			continue
+		}
+		if math.Abs(t.Pos.X-e.Pos.X) >= e.Half.X || math.Abs(t.Pos.Z-e.Pos.Z) >= e.Half.Z {
+			continue
+		}
+		d := e.Teleport.Dest
+		t.Pos = V3{d.X, d.Y, d.Z}
+		t.teleT = teleDebounce
+		e.cooldown = e.Teleport.Cooldown
+		break
+	}
+}
+
+// stepTurret aims a turret entity at the nearest eligible tank and fires when
+// lined up and off cooldown. Cloaked tanks are invisible to it (like radar).
+func (w *World) stepTurret(e *Entity, dt float64) {
+	tr := e.Turret
+	best, bestD2 := -1, tr.Range*tr.Range
+	for ti := range w.Tanks {
+		t := &w.Tanks[ti]
+		if t.Dead || t.gone || t.guard > 0 || t.cloakT > 0 {
+			continue
+		}
+		dx, dz := t.Pos.X-e.Pos.X, t.Pos.Z-e.Pos.Z
+		if d2 := dx*dx + dz*dz; d2 < bestD2 {
+			bestD2, best = d2, ti
+		}
+	}
+	if best < 0 {
+		return // nothing in range; hold current facing
+	}
+	t := &w.Tanks[best]
+	want := math.Atan2(t.Pos.X-e.Pos.X, t.Pos.Z-e.Pos.Z)
+	// Elevation toward the target's body center, from the muzzle height. Computed
+	// (not clamped) so an elevated emplacement can depress onto ground tanks.
+	muzzleY := e.Pos.Y + e.Half.Y + 0.3
+	horiz := math.Sqrt(bestD2)
+	wantPitch := math.Atan2((t.Pos.Y + turretAimHeight) - muzzleY, horiz)
+	rate := tr.TurnRate
+	if rate <= 0 {
+		rate = turretRate
+	}
+	e.Yaw = turnToward(e.Yaw, want, rate*dt)
+	e.Pitch = turnToward(e.Pitch, wantPitch, rate*dt)
+	if e.cooldown <= 0 && math.Abs(angDiff(want, e.Yaw)) < botAimTol && math.Abs(wantPitch-e.Pitch) < botAimTol {
+		w.fireEntity(e)
+		delay := tr.FireDelay
+		if delay <= 0 {
+			delay = botFireDelay
+		}
+		e.cooldown = delay
+	}
+}
+
+// fireEntity launches a projectile from a turret entity along its yaw+pitch
+// (owner <0 = no kill credit; dmg from the trait, 0 -> default projDmg).
+func (w *World) fireEntity(e *Entity) {
+	d := aimDir(e.Yaw, e.Pitch)
+	muzzleY := e.Pos.Y + e.Half.Y + 0.3
+	dmg := 0
+	if e.Turret != nil {
+		dmg = e.Turret.Dmg
+	}
+	w.Shots = append(w.Shots, Projectile{
+		Pos:   V3{e.Pos.X + d.X*1.2, muzzleY + d.Y*1.2, e.Pos.Z + d.Z*1.2},
+		vel:   V3{d.X * projSpeed, d.Y * projSpeed, d.Z * projSpeed},
+		life:  projLife,
+		owner: -1,
+		dmg:   dmg,
+	})
+}
+
 // spawnPickup drops a random power-up at a free authored spawn spot (or a random
 // open tile if the map defines none).
 func (w *World) spawnPickup() {
@@ -1230,6 +1641,9 @@ func (w *World) simulate(dt float64, inputs map[int]Input) {
 		if w.Tanks[i].hitFlash > 0 {
 			w.Tanks[i].hitFlash -= dt
 		}
+		if w.Tanks[i].teleT > 0 {
+			w.Tanks[i].teleT -= dt
+		}
 	}
 	for i := range w.Tanks {
 		t := &w.Tanks[i]
@@ -1250,6 +1664,7 @@ func (w *World) simulate(dt float64, inputs map[int]Input) {
 		w.stepCTF(dt)
 	}
 	w.stepPickups(dt)
+	w.stepEntities(dt)
 	w.respawns(dt)
 	if w.Mode == ModeSurvival && w.activeBots() == 0 {
 		w.spawnWave() // wave cleared -> next, bigger wave
@@ -1278,12 +1693,18 @@ func (w *World) applyInput(i int, in Input, dt float64) {
 	if in.TurretR {
 		t.TurretYaw += v.AimTurn * dt
 	}
+	if in.AimUp {
+		t.TurretPitch = clampPitch(t.TurretPitch + pitchRate*dt)
+	}
+	if in.AimDown {
+		t.TurretPitch = clampPitch(t.TurretPitch - pitchRate*dt)
+	}
 	if in.Recenter {
-		t.TurretYaw = 0 // snap turret to hull-forward (re-align view with movement)
+		t.TurretYaw, t.TurretPitch = 0, 0 // snap turret to hull-forward and level
 	}
 	clampArena(&t.Pos, w.half())
 	w.collide(&t.Pos)
-	support := GroundHeight(w.ActiveMap(), t.Pos.X, t.Pos.Z, t.Pos.Y)
+	support := w.ground(t.Pos.X, t.Pos.Z, t.Pos.Y)
 	stepVertical(&t.Pos, &t.vy, in.Jump, dt, v.Jump, support)
 	if in.Fire && t.cooldown <= 0 {
 		w.fire(i)
@@ -1308,7 +1729,9 @@ func stepVertical(pos *V3, vy *float64, jump bool, dt, jumpV, support float64) {
 // movement constants as the authoritative sim (firing/combat excluded). The
 // net client uses it to predict its own tank between server snapshots so steering
 // feels instant; because the math matches, reconciliation error stays small.
-func Predict(pos V3, hullYaw, turretYaw, vy float64, in Input, dt float64, v Vehicle, m Map) (V3, float64, float64, float64) {
+// solids are the alive solid entities' collision boxes this tick (from
+// SolidBoxes) so the predictor blocks on them exactly as the server does.
+func Predict(pos V3, hullYaw, turretYaw, pitch, vy float64, in Input, dt float64, v Vehicle, m Map, solids []Box) (V3, float64, float64, float64, float64) {
 	f := fwd(hullYaw)
 	if in.Throttle {
 		pos = pos.Add(V3{f.X * v.Speed * dt, 0, f.Z * v.Speed * dt})
@@ -1328,14 +1751,24 @@ func Predict(pos V3, hullYaw, turretYaw, vy float64, in Input, dt float64, v Veh
 	if in.TurretR {
 		turretYaw += v.AimTurn * dt
 	}
+	if in.AimUp {
+		pitch = clampPitch(pitch + pitchRate*dt)
+	}
+	if in.AimDown {
+		pitch = clampPitch(pitch - pitchRate*dt)
+	}
 	if in.Recenter {
-		turretYaw = 0 // match applyInput so prediction doesn't fight the snap
+		turretYaw, pitch = 0, 0 // match applyInput so prediction doesn't fight the snap
+	}
+	boxes := m.Obstacles
+	if len(solids) > 0 {
+		boxes = append(append([]Box(nil), m.Obstacles...), solids...)
 	}
 	clampArena(&pos, MapHalf(m))
-	CollideMap(m, &pos)
-	support := GroundHeight(m, pos.X, pos.Z, pos.Y)
+	CollideBoxes(boxes, &pos)
+	support := GroundBoxes(boxes, m.Ramps, pos.X, pos.Z, pos.Y)
 	stepVertical(&pos, &vy, in.Jump, dt, v.Jump, support)
-	return pos, hullYaw, turretYaw, vy
+	return pos, hullYaw, turretYaw, pitch, vy
 }
 
 // Veh exposes a vehicle's stats by index (for the client predictor).
@@ -1357,11 +1790,14 @@ func (w *World) botAI(i int, dt float64) {
 	angTo := math.Atan2(d.X, d.Z)
 	b.HullYaw = turnToward(b.HullYaw, angTo, v.HullTurn*dt)
 	b.TurretYaw = turnToward(b.TurretYaw, angDiff(angTo, b.HullYaw), turretRate*dt) // bots track responsively
+	wantPitch := clampPitch(math.Atan2((w.Tanks[tgt].Pos.Y+turretAimHeight)-(b.Pos.Y+EyeHeight), dist))
+	b.TurretPitch = turnToward(b.TurretPitch, wantPitch, turretRate*dt)
 	if dist > botKeepDist {
 		w.driveForward(i, dt, 0.7)
 	}
-	b.Pos.Y = GroundHeight(w.ActiveMap(), b.Pos.X, b.Pos.Z, b.Pos.Y+stepUp)
-	if dist < botFireRange && math.Abs(angDiff(b.HullYaw+b.TurretYaw, angTo)) < botAimTol && b.cooldown <= 0 {
+	b.Pos.Y = w.ground(b.Pos.X, b.Pos.Z, b.Pos.Y+stepUp)
+	if dist < botFireRange && math.Abs(angDiff(b.HullYaw+b.TurretYaw, angTo)) < botAimTol &&
+		math.Abs(wantPitch-b.TurretPitch) < botAimTol && b.cooldown <= 0 {
 		w.fire(i) // fire() sets cooldown to the bot's vehicle FireDelay
 	}
 }
@@ -1404,11 +1840,14 @@ func (w *World) ctfBotAI(i int, dt float64) {
 		dist := math.Hypot(d.X, d.Z)
 		angTo := math.Atan2(d.X, d.Z)
 		b.TurretYaw = turnToward(b.TurretYaw, angDiff(angTo, b.HullYaw), turretRate*dt)
-		if dist < botFireRange && math.Abs(angDiff(b.HullYaw+b.TurretYaw, angTo)) < botAimTol && b.cooldown <= 0 {
+		wantPitch := clampPitch(math.Atan2((w.Tanks[tgt].Pos.Y+turretAimHeight)-(b.Pos.Y+EyeHeight), dist))
+		b.TurretPitch = turnToward(b.TurretPitch, wantPitch, turretRate*dt)
+		if dist < botFireRange && math.Abs(angDiff(b.HullYaw+b.TurretYaw, angTo)) < botAimTol &&
+			math.Abs(wantPitch-b.TurretPitch) < botAimTol && b.cooldown <= 0 {
 			w.fire(i)
 		}
 	}
-	b.Pos.Y = GroundHeight(w.ActiveMap(), b.Pos.X, b.Pos.Z, b.Pos.Y+stepUp)
+	b.Pos.Y = w.ground(b.Pos.X, b.Pos.Z, b.Pos.Y+stepUp)
 }
 
 // driveForward moves a bot along its hull heading at the given speed fraction,
@@ -1454,6 +1893,76 @@ func (w *World) nearestEnemy(self int) int {
 	return best
 }
 
+// hurt applies dmg to tank ti and handles death bookkeeping (respawn timer,
+// deaths, buff clearing, Survival lives, CTF flag drop, kill credit). owner is
+// the firing tank index for kill credit; <0 means no credit (e.g. a turret or
+// a hazard killed them). Caller has already checked the tank is vulnerable.
+func (w *World) hurt(ti, dmg, owner int) {
+	t := &w.Tanks[ti]
+	t.HP -= dmg
+	t.hitFlash = tankHitFlash
+	if t.HP > 0 {
+		return
+	}
+	t.Dead = true
+	t.respawn = respawnDelay
+	t.Deaths++
+	t.shieldT, t.rapidT, t.cloakT = 0, 0, 0 // buffs die with you
+	if w.Mode == ModeSurvival && !t.Bot {
+		t.lives--
+	}
+	// CTF: drop any carried flag where the carrier fell.
+	if w.Mode == ModeCTF && t.Carrying >= 0 {
+		f := &w.flags[t.Carrying]
+		f.Carrier, f.atHome = -1, false
+		f.Pos, f.dropTimer = V3{t.Pos.X, 0, t.Pos.Z}, flagReturnTime
+		t.Carrying = -1
+	}
+	if owner >= 0 && owner < len(w.Tanks) && owner != ti {
+		w.Tanks[owner].Kills++
+	}
+}
+
+// shotHitsEntity reports whether a projectile is absorbed by a map entity: a
+// solid entity blocks it, and a destructible one also takes damage (and is
+// destroyed at 0 HP). Low entities the shot flies over (height check, like
+// hitObstacle) don't absorb it.
+func (w *World) shotHitsEntity(s *Projectile) bool {
+	for i := range w.entities {
+		e := &w.entities[i]
+		if e.Dead || (!e.Solid && e.Destruct == nil) {
+			continue
+		}
+		if math.Abs(s.Pos.X-e.Pos.X) >= e.Half.X || math.Abs(s.Pos.Z-e.Pos.Z) >= e.Half.Z {
+			continue
+		}
+		if s.Pos.Y >= e.Pos.Y+e.Half.Y { // flew over the top
+			continue
+		}
+		if e.Destruct != nil {
+			dmg := s.dmg
+			if dmg <= 0 {
+				dmg = projDmg
+			}
+			e.HP -= dmg
+			if e.HP <= 0 {
+				w.destroyEntity(e)
+			}
+		}
+		return true // absorbed (blocked, and damaged if destructible)
+	}
+	return false
+}
+
+// destroyEntity marks an entity destroyed and arms its respawn timer if it has
+// the Respawn trait (otherwise it stays gone for the match).
+func (w *World) destroyEntity(e *Entity) {
+	e.Dead, e.HP = true, 0
+	if e.Respawn != nil {
+		e.respawnT = e.Respawn.Delay
+	}
+}
+
 func (w *World) stepProjectiles(dt float64) {
 	live := w.Shots[:0]
 	for _, s := range w.Shots {
@@ -1463,6 +1972,9 @@ func (w *World) stepProjectiles(dt float64) {
 			continue
 		}
 		if w.hitObstacle(s.Pos) { // tall cover blocks shots; low cover they fly over
+			continue
+		}
+		if w.shotHitsEntity(&s) { // solid entities block; destructibles take damage
 			continue
 		}
 		hit := false
@@ -1476,29 +1988,17 @@ func (w *World) stepProjectiles(dt float64) {
 				continue
 			}
 			dx, dz := t.Pos.X-s.Pos.X, t.Pos.Z-s.Pos.Z
-			if dx*dx+dz*dz < hitRadius*hitRadius {
-				t.HP -= projDmg
-				t.hitFlash = tankHitFlash
-				hit = true
-				if t.HP <= 0 {
-					t.Dead = true
-					t.respawn = respawnDelay
-					t.Deaths++
-					t.shieldT, t.rapidT, t.cloakT = 0, 0, 0 // buffs die with you
-					if w.Mode == ModeSurvival && !t.Bot {
-						t.lives--
-					}
-					// CTF: drop any carried flag where the carrier fell.
-					if w.Mode == ModeCTF && t.Carrying >= 0 {
-						f := &w.flags[t.Carrying]
-						f.Carrier, f.atHome = -1, false
-						f.Pos, f.dropTimer = V3{t.Pos.X, 0, t.Pos.Z}, flagReturnTime
-						t.Carrying = -1
-					}
-					if s.owner >= 0 && s.owner < len(w.Tanks) && s.owner != ti {
-						w.Tanks[s.owner].Kills++
-					}
+			// Height-aware: the shot must also be within the tank's body span, so
+			// elevation matters (shoot over cover, or miss high). The window spans
+			// from just below the feet to above the turret, scaled by vehicle size.
+			dyLow, dyHigh := t.Pos.Y-0.3, t.Pos.Y+tankBodyTop*veh(t.Vehicle).Scale
+			if dx*dx+dz*dz < hitRadius*hitRadius && s.Pos.Y >= dyLow && s.Pos.Y <= dyHigh {
+				dmg := s.dmg
+				if dmg <= 0 {
+					dmg = projDmg
 				}
+				w.hurt(ti, dmg, s.owner)
+				hit = true
 				break
 			}
 		}
@@ -1516,7 +2016,7 @@ func (w *World) blocked(p V3) bool {
 	if math.Abs(p.X) > w.half() || math.Abs(p.Z) > w.half() {
 		return true
 	}
-	for _, b := range w.ActiveMap().Obstacles {
+	for _, b := range w.collidables() { // obstacles + alive solid entities
 		if p.Y > b.Pos.Y+b.Half.Y+0.1 {
 			continue
 		}
@@ -1643,7 +2143,7 @@ func (w *World) Snapshot() ([]TankSnap, []V3, []FlagSnap, []PickupSnap) {
 			reload = 1
 		}
 		ts = append(ts, TankSnap{
-			ID: i, Pos: t.Pos, HullYaw: t.HullYaw, TurretYaw: t.TurretYaw,
+			ID: i, Pos: t.Pos, HullYaw: t.HullYaw, TurretYaw: t.TurretYaw, TurretPitch: t.TurretPitch,
 			HP: t.HP, Color: t.Color, Dead: t.Dead, Bot: t.Bot,
 			Shield: t.guard > 0 || t.shieldT > 0, Hit: t.hitFlash > 0,
 			Cloak: t.cloakT > 0, Rapid: t.rapidT > 0,

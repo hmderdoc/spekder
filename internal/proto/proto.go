@@ -170,7 +170,99 @@ func EncodeMap(m gm.Map) []byte {
 		w.f32(s.X)
 		w.f32(s.Z)
 	}
+	w.u16(len(m.Entities))
+	for i := range m.Entities {
+		w.entity(m.Entities[i])
+	}
 	return w.b
+}
+
+// trait-presence bits in the entity wire byte.
+const (
+	traitTurret   = 1 << 0
+	traitHazard   = 1 << 1
+	traitTeleport = 1 << 2
+	traitDestruct = 1 << 3
+	traitRespawn  = 1 << 4
+)
+
+// entity encodes an authored map entity: its shape, then a trait bitmask, then
+// the params of each present trait. Runtime state (HP/dead/facing) is NOT here -
+// that rides MsgState via EntitySnap; only the authored template travels in MsgMap.
+func (w *cursor) entity(e gm.Entity) {
+	w.str(e.Kind)
+	w.v3(e.Pos)
+	w.v3(e.Half)
+	w.col3(e.Color)
+	w.f32(e.Yaw)
+	var solid byte
+	if e.Solid {
+		solid = 1
+	}
+	w.u8(solid)
+	var mask byte
+	if e.Turret != nil {
+		mask |= traitTurret
+	}
+	if e.Hazard != nil {
+		mask |= traitHazard
+	}
+	if e.Teleport != nil {
+		mask |= traitTeleport
+	}
+	if e.Destruct != nil {
+		mask |= traitDestruct
+	}
+	if e.Respawn != nil {
+		mask |= traitRespawn
+	}
+	w.u8(mask)
+	if e.Turret != nil {
+		w.f32(e.Turret.Range)
+		w.f32(e.Turret.FireDelay)
+		w.u16(e.Turret.Dmg)
+		w.f32(e.Turret.TurnRate)
+	}
+	if e.Hazard != nil {
+		w.f32(e.Hazard.DPS)
+	}
+	if e.Teleport != nil {
+		w.v3(e.Teleport.Dest)
+		w.f32(e.Teleport.Cooldown)
+	}
+	if e.Destruct != nil {
+		w.u16(e.Destruct.MaxHP)
+	}
+	if e.Respawn != nil {
+		w.f32(e.Respawn.Delay)
+	}
+}
+
+func (r *cursor) rentity() gm.Entity {
+	var e gm.Entity
+	e.Kind = r.rstr()
+	e.Pos = r.rv3()
+	e.Half = r.rv3()
+	e.Color = r.rcol3()
+	e.Yaw = r.rf32()
+	e.Solid = r.ru8() != 0
+	mask := r.ru8()
+	if mask&traitTurret != 0 {
+		e.Turret = &gm.TurretTrait{Range: r.rf32(), FireDelay: r.rf32(), Dmg: r.ru16(), TurnRate: r.rf32()}
+	}
+	if mask&traitHazard != 0 {
+		e.Hazard = &gm.HazardTrait{DPS: r.rf32()}
+	}
+	if mask&traitTeleport != 0 {
+		e.Teleport = &gm.TeleportTrait{Dest: r.rv3(), Cooldown: r.rf32()}
+	}
+	if mask&traitDestruct != 0 {
+		e.Destruct = &gm.DestructTrait{MaxHP: r.ru16()}
+	}
+	if mask&traitRespawn != 0 {
+		e.Respawn = &gm.RespawnTrait{Delay: r.rf32()}
+	}
+	return e
 }
 
 func DecodeMap(p []byte) (gm.Map, bool) {
@@ -193,6 +285,9 @@ func DecodeMap(p []byte) (gm.Map, bool) {
 	for n := r.ru16(); n > 0; n-- {
 		m.Spawns = append(m.Spawns, gm.V3{X: r.rf32(), Z: r.rf32()})
 	}
+	for n := r.ru16(); n > 0; n-- {
+		m.Entities = append(m.Entities, r.rentity())
+	}
 	if r.err {
 		return gm.Map{}, false
 	}
@@ -201,7 +296,7 @@ func DecodeMap(p []byte) (gm.Map, bool) {
 
 // ---- STATE ----
 
-func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.V3, flags []gm.FlagSnap, pickups []gm.PickupSnap) []byte {
+func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.V3, flags []gm.FlagSnap, pickups []gm.PickupSnap, ents []gm.EntitySnap) []byte {
 	w := &cursor{}
 	w.u8(MsgState)
 	w.u32(tick)
@@ -227,6 +322,7 @@ func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.V3
 		w.f32(t.Pos.Z)
 		w.f32(t.HullYaw)
 		w.f32(t.TurretYaw)
+		w.f32(t.TurretPitch)
 		w.i16(t.HP)
 		w.u8(c255(t.Color[0]))
 		w.u8(c255(t.Color[1]))
@@ -282,12 +378,23 @@ func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.V3
 		w.v3(p.Pos)
 		w.u8(byte(p.Kind))
 	}
+	w.u16(len(ents))
+	for _, e := range ents {
+		w.i16(e.HP)
+		var fl byte
+		if e.Dead {
+			fl |= 1
+		}
+		w.u8(fl)
+		w.f32(e.Yaw)
+		w.f32(e.Pitch)
+	}
 	return w.b
 }
 
-func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.V3, flags []gm.FlagSnap, pickups []gm.PickupSnap, ok bool) {
+func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.V3, flags []gm.FlagSnap, pickups []gm.PickupSnap, ents []gm.EntitySnap, ok bool) {
 	if len(p) == 0 || p[0] != MsgState {
-		return 0, gm.MatchSnap{}, nil, nil, nil, nil, false
+		return 0, gm.MatchSnap{}, nil, nil, nil, nil, nil, false
 	}
 	r := &cursor{b: p, i: 1}
 	tick = r.ru32()
@@ -316,6 +423,7 @@ func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, sh
 		t.Pos.Z = r.rf32()
 		t.HullYaw = r.rf32()
 		t.TurretYaw = r.rf32()
+		t.TurretPitch = r.rf32()
 		t.HP = r.ri16()
 		cr, cg, cb := r.ru8(), r.ru8(), r.ru8()
 		t.Color = [3]float64{float64(cr) / 255, float64(cg) / 255, float64(cb) / 255}
@@ -355,10 +463,19 @@ func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, sh
 		pk.Kind = int(r.ru8())
 		pickups = append(pickups, pk)
 	}
-	if r.err {
-		return 0, gm.MatchSnap{}, nil, nil, nil, nil, false
+	ne := r.ru16()
+	for k := 0; k < ne; k++ {
+		var e gm.EntitySnap
+		e.HP = r.ri16()
+		e.Dead = r.ru8()&1 != 0
+		e.Yaw = r.rf32()
+		e.Pitch = r.rf32()
+		ents = append(ents, e)
 	}
-	return tick, m, tanks, shots, flags, pickups, true
+	if r.err {
+		return 0, gm.MatchSnap{}, nil, nil, nil, nil, nil, false
+	}
+	return tick, m, tanks, shots, flags, pickups, ents, true
 }
 
 // ---- helpers ----

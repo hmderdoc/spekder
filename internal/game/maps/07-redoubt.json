@@ -1,0 +1,79 @@
+{
+  "name": "REDOUBT",
+  "size": 20,
+  "obstacles": [
+    { "pos": [0, 1.2, 0], "half": [2.2, 1.2, 2.2], "color": [0.42, 0.44, 0.52] }
+  ],
+  "scenery": [],
+  "spawns": [[-16, -16], [16, -16], [16, 16], [-16, 16]],
+  "pickups": [[-10, 10], [10, -10], [0, 14], [0, -14]],
+  "entities": [
+    {
+      "kind": "turret",
+      "pos": [0, 2.6, 0],
+      "half": [0.7, 0.3, 0.7],
+      "color": [0.55, 0.50, 0.30],
+      "solid": true,
+      "turret": { "range": 22, "fireDelay": 1.4, "dmg": 16, "turnRate": 1.6 },
+      "destruct": { "maxHp": 70 },
+      "respawn": { "delay": 14 }
+    },
+    {
+      "kind": "turret",
+      "pos": [-14, 0.7, -14],
+      "half": [0.7, 0.7, 0.7],
+      "color": [0.50, 0.45, 0.28],
+      "solid": true,
+      "turret": { "range": 18, "fireDelay": 1.8, "dmg": 12, "turnRate": 1.3 },
+      "destruct": { "maxHp": 45 },
+      "respawn": { "delay": 12 }
+    },
+    {
+      "kind": "turret",
+      "pos": [14, 0.7, 14],
+      "half": [0.7, 0.7, 0.7],
+      "color": [0.50, 0.45, 0.28],
+      "solid": true,
+      "turret": { "range": 18, "fireDelay": 1.8, "dmg": 12, "turnRate": 1.3 },
+      "destruct": { "maxHp": 45 },
+      "respawn": { "delay": 12 }
+    },
+    {
+      "kind": "wall",
+      "pos": [-7, 0.9, 0],
+      "half": [0.8, 0.9, 3.0],
+      "color": [0.45, 0.40, 0.38],
+      "solid": true,
+      "destruct": { "maxHp": 60 }
+    },
+    {
+      "kind": "wall",
+      "pos": [7, 0.9, 0],
+      "half": [0.8, 0.9, 3.0],
+      "color": [0.45, 0.40, 0.38],
+      "solid": true,
+      "destruct": { "maxHp": 60 }
+    },
+    {
+      "kind": "hazard",
+      "pos": [0, 0.1, 12],
+      "half": [3.0, 0.1, 2.0],
+      "color": [0.85, 0.28, 0.12],
+      "hazard": { "dps": 22 }
+    },
+    {
+      "kind": "teleporter",
+      "pos": [-16, 0.1, 0],
+      "half": [1.1, 0.1, 1.1],
+      "color": [0.30, 0.70, 0.90],
+      "teleport": { "dest": [16, 0, 0], "cooldown": 1.5 }
+    },
+    {
+      "kind": "teleporter",
+      "pos": [16, 0.1, 0],
+      "half": [1.1, 0.1, 1.1],
+      "color": [0.30, 0.70, 0.90],
+      "teleport": { "dest": [-16, 0, 0], "cooldown": 1.5 }
+    }
+  ]
+}
