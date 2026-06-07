@@ -215,6 +215,12 @@ func appendEntity(dst []Tri, e gm.Entity, st gm.EntitySnap) []Tri {
 		gun := [3]float64{0.20, 0.20, 0.24}
 		dst = box(dst, V3{0, 0.3, 0}, V3{0.45, 0.3, 0.45}, bright, headXf) // rotating head
 		dst = box(dst, V3{0, 0.3, 0.55}, V3{0.1, 0.1, 0.55}, gun, barXf)   // barrel (pitches)
+	case "trampoline":
+		// A low pad with a brighter raised "mat" on top so it reads as springy.
+		xf := func(l V3) V3 { return l.Add(e.Pos) }
+		dst = box(dst, V3{}, V3{e.Half.X, e.Half.Y * 0.5, e.Half.Z}, [3]float64{col[0] * 0.5, col[1] * 0.5, col[2] * 0.5}, xf)
+		mat := [3]float64{math.Min(col[0]*1.3, 1), math.Min(col[1]*1.3, 1), math.Min(col[2]*1.3, 1)}
+		dst = box(dst, V3{0, e.Half.Y, 0}, V3{e.Half.X * 0.92, e.Half.Y * 0.2, e.Half.Z * 0.92}, mat, xf)
 	default:
 		xf := func(l V3) V3 { return l.Add(e.Pos) }
 		dst = box(dst, V3{}, e.Half, col, xf) // generic solid block (wall, cover, ...)

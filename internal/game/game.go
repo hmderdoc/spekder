@@ -59,6 +59,7 @@ type Entity struct {
 	Teleport *TeleportTrait
 	Destruct *DestructTrait
 	Respawn  *RespawnTrait
+	Bounce   *BounceTrait
 
 	// --- runtime instance state (set in the World copy, not authored) ---
 	HP       int     // current hit points (Destruct); 0/unused otherwise
@@ -98,6 +99,13 @@ type DestructTrait struct {
 // RespawnTrait makes a destroyed entity come back after Delay sec.
 type RespawnTrait struct {
 	Delay float64
+}
+
+// BounceTrait launches a tank that touches the entity's footprint straight up
+// with a fixed velocity (a trampoline / jump pad). Power is the launch speed in
+// units/sec; standing on it re-launches each time you come back down.
+type BounceTrait struct {
+	Power float64
 }
 
 // Map is a static arena layout. Size is the arena half-extent (0 = default).
@@ -180,6 +188,9 @@ type jdestruct struct {
 type jrespawn struct {
 	Delay float64 `json:"delay"`
 }
+type jbounce struct {
+	Power float64 `json:"power"`
+}
 type jentity struct {
 	Kind     string     `json:"kind"`
 	Pos      [3]float64 `json:"pos"`
@@ -192,6 +203,7 @@ type jentity struct {
 	Teleport *jteleport `json:"teleport"`
 	Destruct *jdestruct `json:"destruct"`
 	Respawn  *jrespawn  `json:"respawn"`
+	Bounce   *jbounce   `json:"bounce"`
 }
 type jmap struct {
 	Name      string       `json:"name"`
@@ -220,6 +232,9 @@ func (je jentity) toEntity() Entity {
 	}
 	if je.Respawn != nil {
 		e.Respawn = &RespawnTrait{Delay: je.Respawn.Delay}
+	}
+	if je.Bounce != nil {
+		e.Bounce = &BounceTrait{Power: je.Bounce.Power}
 	}
 	return e
 }
@@ -1381,6 +1396,9 @@ func (w *World) stepEntities(dt float64) {
 		if e.Teleport != nil {
 			w.stepTeleport(e)
 		}
+		if e.Bounce != nil {
+			w.stepBounce(e)
+		}
 	}
 }
 
@@ -1427,6 +1445,27 @@ func (w *World) stepTeleport(e *Entity) {
 		t.teleT = teleDebounce
 		e.cooldown = e.Teleport.Cooldown
 		break
+	}
+}
+
+// stepBounce launches any tank resting on/near the pad straight up with the
+// trait's fixed Power. The "near the surface and not already rising" gate both
+// debounces (one launch per descent) and gives a trampoline its repeat bounce:
+// you come back down, touch, and fire again. Only tanks with vertical physics
+// (players) actually leave the ground today; bots snap to ground each tick.
+func (w *World) stepBounce(e *Entity) {
+	padTop := e.Pos.Y + e.Half.Y
+	for ti := range w.Tanks {
+		t := &w.Tanks[ti]
+		if t.Dead || t.gone {
+			continue
+		}
+		if math.Abs(t.Pos.X-e.Pos.X) >= e.Half.X || math.Abs(t.Pos.Z-e.Pos.Z) >= e.Half.Z {
+			continue
+		}
+		if t.Pos.Y <= padTop+0.25 && t.vy <= 0.1 {
+			t.vy = e.Bounce.Power
+		}
 	}
 }
 

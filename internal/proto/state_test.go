@@ -123,14 +123,21 @@ func TestMapRoundTripEntities(t *testing.T) {
 				Kind: "teleporter", Pos: gm.V3{X: -5, Y: 0, Z: -5}, Half: gm.V3{X: 1, Y: 0.1, Z: 1},
 				Teleport: &gm.TeleportTrait{Dest: gm.V3{X: 5, Y: 0, Z: 5}, Cooldown: 2},
 			},
+			{
+				Kind: "trampoline", Pos: gm.V3{X: 8, Y: 0.1, Z: 0}, Half: gm.V3{X: 1.5, Y: 0.1, Z: 1.5},
+				Bounce: &gm.BounceTrait{Power: 13},
+			},
 		},
 	}
 	dm, ok := DecodeMap(EncodeMap(m))
 	if !ok {
 		t.Fatal("DecodeMap failed")
 	}
-	if len(dm.Entities) != 3 {
-		t.Fatalf("want 3 entities, got %d", len(dm.Entities))
+	if len(dm.Entities) != 4 {
+		t.Fatalf("want 4 entities, got %d", len(dm.Entities))
+	}
+	if b := dm.Entities[3].Bounce; b == nil || b.Power != 13 {
+		t.Fatalf("bounce trait lost: %+v", dm.Entities[3])
 	}
 	e := dm.Entities[0]
 	if e.Kind != "turret" || !e.Solid || e.Turret == nil || e.Destruct == nil || e.Respawn == nil {

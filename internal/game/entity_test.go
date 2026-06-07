@@ -172,6 +172,36 @@ func TestSolidCollision(t *testing.T) {
 	}
 }
 
+// TestTrampolineLaunches: a tank resting on a bounce pad gets a fixed upward
+// velocity, and is re-launched after it comes back down (not while still rising).
+func TestTrampolineLaunches(t *testing.T) {
+	w, me := startDMMap(t, 0, "OPEN")
+	w.Tanks[me].Pos = V3{X: 0, Y: 0, Z: 0}
+	w.Tanks[me].vy = 0
+	w.entities = []Entity{{
+		Kind: "trampoline", Pos: V3{X: 0, Y: 0.1, Z: 0}, Half: V3{X: 1.5, Y: 0.1, Z: 1.5},
+		Bounce: &BounceTrait{Power: 12},
+	}}
+	w.stepEntities(1.0 / 30)
+	if w.Tanks[me].vy != 12 {
+		t.Fatalf("standing on the pad should launch upward (vy=12), got %v", w.Tanks[me].vy)
+	}
+	// While still rising, it must NOT re-trigger (debounce).
+	w.Tanks[me].vy = 5
+	w.Tanks[me].Pos.Y = 2
+	w.stepEntities(1.0 / 30)
+	if w.Tanks[me].vy != 5 {
+		t.Fatalf("rising tank above the pad should not re-launch, vy became %v", w.Tanks[me].vy)
+	}
+	// Off the pad: no launch.
+	w.Tanks[me].Pos = V3{X: 10, Y: 0, Z: 10}
+	w.Tanks[me].vy = 0
+	w.stepEntities(1.0 / 30)
+	if w.Tanks[me].vy != 0 {
+		t.Fatalf("a tank off the pad should not be launched, vy=%v", w.Tanks[me].vy)
+	}
+}
+
 // startDMMap starts a deathmatch pinned to a named map (clear arena for
 // deterministic projectile tests).
 func startDMMap(t *testing.T, bots int, name string) (*World, int) {
