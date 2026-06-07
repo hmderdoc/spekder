@@ -392,7 +392,9 @@ const (
 	turretAimHeight = 0.9 // aim point above a target tank's feet (body center)
 )
 
-// Mode is a game mode; Phase is the match lifecycle state.
+// Mode indexes the Ruleset table; a "mode" IS the data at Rulesets[Mode]. The
+// wire syncs the index, so a new mode is just a new table entry. Phase is the
+// match lifecycle state.
 type Mode int
 
 const (
@@ -402,17 +404,78 @@ const (
 	ModeSurvival
 )
 
+// WinKind / BotSpawn / ObjKind are fixed palettes a Ruleset composes (palette,
+// not scripting). See PHASE_B.md.
+type WinKind int
+
+const (
+	WinFrags       WinKind = iota // a tank reaches Count kills
+	WinCaptures                   // a team reaches Count captures
+	WinCollectAll                 // every neutral flag has been collected
+	WinElimination                // one side eliminated (co-op: all humans out of lives)
+)
+
+type BotSpawn int
+
+const (
+	BotFill  BotSpawn = iota // keep a fixed bot pool topped up
+	BotWaves                 // survival: spawn escalating waves
+)
+
+type ObjKind int
+
+const (
+	ObjNone         ObjKind = iota
+	ObjNeutralFlags         // scattered neutral flags (Flag Run)
+	ObjTeamFlags            // one flag per team at its base (CTF)
+)
+
+// WinCond is one early-end trigger; Count is its threshold (kills/captures).
+type WinCond struct {
+	Kind  WinKind
+	Count int
+}
+
+// Ruleset is a game mode expressed as data (see PHASE_B.md). Timeout is implicit
+// when TimeLimit>0: the clock expiring ends the match and the winner is resolved
+// by scoring.
+type Ruleset struct {
+	Name      string
+	Teams     int     // 0 = free-for-all, 2 = two teams
+	TimeLimit float64 // match seconds; 0 = endless
+	Lives     int     // per-human lives; 0 = infinite respawn
+	Bots      BotSpawn
+	Objective ObjKind
+	Win       []WinCond
+	CoOp      bool // no per-tank winner (result = progress/wave reached)
+}
+
+// Rulesets is the mode table, indexed by Mode. Server and door must share the
+// build (the wire syncs the index - same contract as Maps). Append to add a mode.
+var Rulesets = []Ruleset{
+	ModeDeathmatch: {Name: "DEATHMATCH", Teams: 0, TimeLimit: matchTime, Bots: BotFill, Objective: ObjNone,
+		Win: []WinCond{{WinFrags, DMFragLimit}}},
+	ModeFlagRun: {Name: "FLAG RUN", Teams: 0, TimeLimit: matchTime, Bots: BotFill, Objective: ObjNeutralFlags,
+		Win: []WinCond{{WinCollectAll, 0}}},
+	ModeCTF: {Name: "CAPTURE THE FLAG", Teams: 2, TimeLimit: matchTime, Bots: BotFill, Objective: ObjTeamFlags,
+		Win: []WinCond{{WinCaptures, ctfCaptureLimit}}},
+	ModeSurvival: {Name: "SURVIVAL", Teams: 0, TimeLimit: 0, Lives: survivalLives, Bots: BotWaves, Objective: ObjNone,
+		Win: []WinCond{{WinElimination, 0}}, CoOp: true},
+}
+
 func (m Mode) String() string {
-	switch m {
-	case ModeFlagRun:
-		return "FLAG RUN"
-	case ModeCTF:
-		return "CAPTURE THE FLAG"
-	case ModeSurvival:
-		return "SURVIVAL"
-	default:
+	if int(m) < 0 || int(m) >= len(Rulesets) {
 		return "DEATHMATCH"
 	}
+	return Rulesets[m].Name
+}
+
+// rules returns the active mode's Ruleset (clamped defensively).
+func (w *World) rules() Ruleset {
+	if int(w.Mode) < 0 || int(w.Mode) >= len(Rulesets) {
+		return Rulesets[ModeDeathmatch]
+	}
+	return Rulesets[w.Mode]
 }
 
 type Phase int
@@ -424,7 +487,7 @@ const (
 	PhaseLobby // between matches (server only): vote for the next mode
 )
 
-// votable lists the modes the lobby rotates/votes between (functional ones).
+// votable lists the modes the lobby rotates/votes between.
 var votable = []Mode{ModeDeathmatch, ModeFlagRun, ModeSurvival, ModeCTF}
 
 const (
@@ -1086,9 +1149,14 @@ func (w *World) pickNextMode() Mode {
 
 // startMatch begins active play: full reset of scores, health, and positions.
 func (w *World) startMatch() {
-	w.Phase, w.Timer, w.WinnerID, w.Shots = PhaseActive, matchTime, -1, nil
+	r := w.rules()
+	timer := r.TimeLimit
+	if timer <= 0 {
+		timer = matchTime // endless modes still carry a clock for HUD/pacing
+	}
+	w.Phase, w.Timer, w.WinnerID, w.Shots = PhaseActive, timer, -1, nil
 	w.teamScore, w.winnerTeam = [2]int{}, -1
-	if w.Mode == ModeCTF {
+	if r.Teams == 2 {
 		w.assignTeams() // teams first, so spawnPoint can use the team bases
 	}
 	for i := range w.Tanks {
@@ -1102,22 +1170,22 @@ func (w *World) startMatch() {
 		t.guard = spawnGuardTime
 		t.Pos = w.spawnPoint(i)
 		t.HullYaw = w.faceTarget(i)
-		t.TurretYaw = 0
+		t.TurretYaw, t.TurretPitch = 0, 0
 	}
 	w.pickups, w.pickupTimer = nil, pickupInterval
 	w.resetEntities()
 	w.flags = nil
-	if w.Mode == ModeFlagRun {
+	switch r.Objective {
+	case ObjNeutralFlags:
 		for i := 0; i < flagCount; i++ {
 			x := (rand.Float64()*2 - 1) * (w.half() - 2)
 			z := (rand.Float64()*2 - 1) * (w.half() - 2)
 			w.flags = append(w.flags, Flag{Pos: V3{x, 0, z}, Team: -1, Carrier: -1})
 		}
-	}
-	if w.Mode == ModeCTF {
+	case ObjTeamFlags:
 		w.createTeamFlags()
 	}
-	if w.Mode == ModeSurvival {
+	if r.Bots == BotWaves {
 		w.setupSurvival()
 	}
 }
@@ -1627,37 +1695,17 @@ func (w *World) allFlagsTaken() bool {
 }
 
 func (w *World) checkEnd() {
-	done := false
-	switch w.Mode {
-	case ModeDeathmatch:
-		done = w.Timer <= 0
-		for i := range w.Tanks {
-			if !w.Tanks[i].gone && w.Tanks[i].Kills >= DMFragLimit {
-				done = true
-			}
+	r := w.rules()
+	done := r.TimeLimit > 0 && w.Timer <= 0 // implicit timeout
+	for _, wc := range r.Win {
+		if w.winCondMet(wc) {
+			done = true
 		}
-	case ModeFlagRun:
-		done = w.Timer <= 0 || w.allFlagsTaken()
-	case ModeSurvival:
-		humans, allOut := 0, true
-		for i := range w.Tanks {
-			t := &w.Tanks[i]
-			if t.Bot || t.gone {
-				continue
-			}
-			humans++
-			if !t.Dead || t.lives > 0 {
-				allOut = false
-			}
-		}
-		done = humans > 0 && allOut
-	case ModeCTF:
-		done = w.Timer <= 0 || w.teamScore[0] >= ctfCaptureLimit || w.teamScore[1] >= ctfCaptureLimit
 	}
 	if !done {
 		return
 	}
-	if w.Mode == ModeCTF {
+	if r.Teams == 2 {
 		switch {
 		case w.teamScore[0] > w.teamScore[1]:
 			w.winnerTeam = 0
@@ -1671,14 +1719,66 @@ func (w *World) checkEnd() {
 	w.WinnerID = w.computeWinner()
 }
 
-func (w *World) computeWinner() int {
-	if w.Mode == ModeSurvival {
-		return -1 // co-op: the result is the wave reached, not a winner
+// winCondMet evaluates one win condition against the current world state.
+func (w *World) winCondMet(wc WinCond) bool {
+	switch wc.Kind {
+	case WinFrags:
+		for i := range w.Tanks {
+			if !w.Tanks[i].gone && w.Tanks[i].Kills >= wc.Count {
+				return true
+			}
+		}
+	case WinCaptures:
+		return w.teamScore[0] >= wc.Count || w.teamScore[1] >= wc.Count
+	case WinCollectAll:
+		return w.allFlagsTaken()
+	case WinElimination:
+		return w.eliminationMet()
 	}
-	if w.Mode == ModeCTF {
+	return false
+}
+
+// eliminationMet reports whether an elimination win condition is satisfied. For
+// a co-op ruleset (Survival) that means every human is out of lives; otherwise
+// it's last-side-standing (one or zero tanks left alive) - used by FFA/team
+// elimination modes (Phase B Stage 3).
+func (w *World) eliminationMet() bool {
+	if w.rules().CoOp {
+		humans, allOut := 0, true
+		for i := range w.Tanks {
+			t := &w.Tanks[i]
+			if t.Bot || t.gone {
+				continue
+			}
+			humans++
+			if !t.Dead || t.lives > 0 {
+				allOut = false
+			}
+		}
+		return humans > 0 && allOut
+	}
+	alive := 0
+	for i := range w.Tanks {
+		t := &w.Tanks[i]
+		if t.gone {
+			continue
+		}
+		if !t.Dead || t.lives > 0 {
+			alive++
+		}
+	}
+	return alive <= 1
+}
+
+func (w *World) computeWinner() int {
+	r := w.rules()
+	if r.CoOp {
+		return -1 // co-op: the result is the wave/progress reached, not a winner
+	}
+	if r.Teams == 2 {
 		return -1 // team mode: the winner is a team, not a tank (see WinnerTeam)
 	}
-	if w.Mode == ModeFlagRun {
+	if r.Objective == ObjNeutralFlags {
 		if !w.allFlagsTaken() {
 			return -1 // ran out of time
 		}
@@ -1728,16 +1828,17 @@ func (w *World) simulate(dt float64, inputs map[int]Input) {
 		}
 	}
 	w.stepProjectiles(dt)
-	if w.Mode == ModeFlagRun {
+	r := w.rules()
+	switch r.Objective {
+	case ObjNeutralFlags:
 		w.collectFlags()
-	}
-	if w.Mode == ModeCTF {
+	case ObjTeamFlags:
 		w.stepCTF(dt)
 	}
 	w.stepPickups(dt)
 	w.stepEntities(dt)
 	w.respawns(dt)
-	if w.Mode == ModeSurvival && w.activeBots() == 0 {
+	if r.Bots == BotWaves && w.activeBots() == 0 {
 		w.spawnWave() // wave cleared -> next, bigger wave
 	}
 }
@@ -1846,7 +1947,7 @@ func Predict(pos V3, hullYaw, turretYaw, pitch, vy float64, in Input, dt float64
 func Veh(i int) Vehicle { return veh(i) }
 
 func (w *World) botAI(i int, dt float64) {
-	if w.Mode == ModeCTF {
+	if w.rules().Teams == 2 {
 		w.ctfBotAI(i, dt)
 		return
 	}
@@ -1953,7 +2054,7 @@ func (w *World) nearestEnemy(self int) int {
 		if j == self || t.Dead || t.gone || t.cloakT > 0 {
 			continue // cloaked tanks can't be targeted by bots
 		}
-		if w.Mode == ModeCTF && t.Team == w.Tanks[self].Team {
+		if w.rules().Teams == 2 && t.Team == w.Tanks[self].Team {
 			continue
 		}
 		d := t.Pos.Sub(w.Tanks[self].Pos)
@@ -1979,11 +2080,11 @@ func (w *World) hurt(ti, dmg, owner int) {
 	t.respawn = respawnDelay
 	t.Deaths++
 	t.shieldT, t.rapidT, t.cloakT = 0, 0, 0 // buffs die with you
-	if w.Mode == ModeSurvival && !t.Bot {
+	if w.rules().Lives > 0 && !t.Bot {
 		t.lives--
 	}
-	// CTF: drop any carried flag where the carrier fell.
-	if w.Mode == ModeCTF && t.Carrying >= 0 {
+	// Team modes: drop any carried flag where the carrier fell.
+	if w.rules().Objective == ObjTeamFlags && t.Carrying >= 0 {
 		f := &w.flags[t.Carrying]
 		f.Carrier, f.atHome = -1, false
 		f.Pos, f.dropTimer = V3{t.Pos.X, 0, t.Pos.Z}, flagReturnTime
@@ -2055,7 +2156,7 @@ func (w *World) stepProjectiles(dt float64) {
 				continue
 			}
 			// CTF: no friendly fire between teammates.
-			if w.Mode == ModeCTF && s.owner >= 0 && s.owner < len(w.Tanks) && w.Tanks[s.owner].Team == t.Team {
+			if w.rules().Teams == 2 && s.owner >= 0 && s.owner < len(w.Tanks) && w.Tanks[s.owner].Team == t.Team {
 				continue
 			}
 			dx, dz := t.Pos.X-s.Pos.X, t.Pos.Z-s.Pos.Z
@@ -2115,7 +2216,7 @@ func (w *World) respawns(dt float64) {
 		if !t.Dead || t.gone {
 			continue
 		}
-		if w.Mode == ModeSurvival {
+		if w.rules().Bots == BotWaves {
 			if t.Bot || t.lives <= 0 {
 				continue // bots come back via waves; out-of-lives humans stay dead
 			}
@@ -2133,8 +2234,8 @@ func (w *World) respawns(dt float64) {
 }
 
 func (w *World) spawnPoint(self int) V3 {
-	// CTF: spawn near your own base (jittered), so teams hold opposite ends.
-	if w.Mode == ModeCTF && self >= 0 && self < len(w.Tanks) && w.Tanks[self].Team >= 0 {
+	// Team modes: spawn near your own base (jittered), so teams hold opposite ends.
+	if w.rules().Teams == 2 && self >= 0 && self < len(w.Tanks) && w.Tanks[self].Team >= 0 {
 		base := w.ctfBase(w.Tanks[self].Team)
 		x := base.X + (rand.Float64()*2-1)*4
 		z := base.Z + (rand.Float64()*2-1)*2.5
