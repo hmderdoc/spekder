@@ -104,6 +104,68 @@ func TestEliminationRespawnGate(t *testing.T) {
 	}
 }
 
+// TestAuthoredNeutralFlags: a Flag Run map with authored neutral `flag` entities
+// uses exactly those, not the procedural scatter.
+func TestAuthoredNeutralFlags(t *testing.T) {
+	idx := len(Maps)
+	Maps = append(Maps, Map{
+		Name: "TEST-NEUTRAL", Size: 18, Spawns: []V3{{X: -10, Z: -10}},
+		Entities: []Entity{
+			{Kind: "flag", Pos: V3{X: 3, Z: 4}, Half: V3{X: 0.5, Y: 0.5, Z: 0.5}, Flag: &FlagTrait{Team: -1}},
+			{Kind: "flag", Pos: V3{X: -3, Z: -4}, Half: V3{X: 0.5, Y: 0.5, Z: 0.5}, Flag: &FlagTrait{Team: -1}},
+		},
+	})
+	w := NewWorld(0, ModeFlagRun)
+	w.PinMap(idx)
+	me := w.AddPlayer([3]float64{}, 1)
+	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{me: {}})
+	if len(w.flags) != 2 {
+		t.Fatalf("expected 2 authored neutral flags, got %d (procedural fallback?)", len(w.flags))
+	}
+}
+
+// TestAuthoredTeamFlags: a CTF map with authored team `flag` entities homes each
+// team's flag at the authored spot.
+func TestAuthoredTeamFlags(t *testing.T) {
+	idx := len(Maps)
+	Maps = append(Maps, Map{
+		Name: "TEST-TEAM", Size: 18, Spawns: []V3{{X: -10, Z: -10}},
+		Entities: []Entity{
+			{Kind: "flag", Pos: V3{X: 0, Z: -12}, Half: V3{X: 0.5, Y: 0.5, Z: 0.5}, Flag: &FlagTrait{Team: 0}},
+			{Kind: "flag", Pos: V3{X: 0, Z: 12}, Half: V3{X: 0.5, Y: 0.5, Z: 0.5}, Flag: &FlagTrait{Team: 1}},
+		},
+	})
+	w := NewWorld(2, ModeCTF)
+	w.PinMap(idx)
+	me := w.AddPlayer([3]float64{}, 1)
+	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{me: {}})
+	if len(w.flags) != 2 {
+		t.Fatalf("expected 2 team flags, got %d", len(w.flags))
+	}
+	for _, f := range w.flags {
+		if f.Team == 0 && f.Home.Z != -12 {
+			t.Fatalf("team 0 flag should be homed at authored z=-12, got %v", f.Home)
+		}
+		if f.Team == 1 && f.Home.Z != 12 {
+			t.Fatalf("team 1 flag should be homed at authored z=12, got %v", f.Home)
+		}
+	}
+}
+
+// TestProceduralFlagFallback: a map with no flag entities still gets procedural
+// Flag Run flags (every existing map keeps working).
+func TestProceduralFlagFallback(t *testing.T) {
+	idx := len(Maps)
+	Maps = append(Maps, Map{Name: "TEST-EMPTY", Size: 18, Spawns: []V3{{X: -10, Z: -10}}})
+	w := NewWorld(0, ModeFlagRun)
+	w.PinMap(idx)
+	me := w.AddPlayer([3]float64{}, 1)
+	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{me: {}})
+	if len(w.flags) != flagCount {
+		t.Fatalf("no authored flags -> expected %d scattered, got %d", flagCount, len(w.flags))
+	}
+}
+
 // TestEndlessModeNoTimeout: a ruleset with TimeLimit 0 (survival) does not end on
 // the clock — only its win condition can end it.
 func TestEndlessModeNoTimeout(t *testing.T) {

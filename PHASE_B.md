@@ -75,16 +75,18 @@ them. But every existing map has zero objective entities and must keep working:
 
 ## Stages (each ends green, the four modes intact)
 
-1. **Ruleset table + route the switches.** Behavior-preserving refactor: define the
-   table, replace every `switch w.Mode` / `w.Mode == ModeX` (startMatch, simulate,
-   checkEnd, computeWinner, bot AI targeting, projectile friendly-fire) with reads
-   off `w.rules()`. No gameplay change.
-2. **Objectives from data.** Drive flag/CTF setup off `Objective` + map flag-entities
-   (procedural fallback). Add the `flag` trait to schema + validator.
-3. **Prove emergence.** Add a brand-new mode as a *pure table entry* (e.g.
-   ELIMINATION: FFA, lives 3, win = last-standing) with no new sim code. Generalize
-   the lobby vote tally from a fixed `[4]` to N rulesets.
-4. **(Stretch)** `zone`/capture-point trait + a King-of-the-Hill ruleset.
+1. **Ruleset table + route the switches.** DONE. Behavior-preserving refactor; every
+   `switch w.Mode` / `w.Mode == ModeX` now reads off `w.rules()`.
+2. **Objectives from data.** DONE. `flag` trait (in `SCHEMA.md` + validator); flag/CTF
+   setup sources runtime flags from authored `flag` entities, else procedural
+   fallback so legacy maps keep working. Flag markers are inert (no render/collide).
+   Demo: `09-citadel.json` (authored CTF team flags).
+3. **Prove emergence.** DONE. ELIMINATION (FFA, 3 lives, last-standing) added as a
+   Ruleset entry + one small general lives/respawn rule; menu + HUD render from the
+   table. (Remaining: surface new modes in the arena lobby + generalize the vote
+   tally from `[4]` to N — folded into Stage 4.)
+4. **(Stretch)** `zone`/capture-point trait + a King-of-the-Hill ruleset; arena
+   lobby vote generalization.
 
 ## Notes / risks
 

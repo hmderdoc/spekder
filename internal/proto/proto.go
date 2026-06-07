@@ -185,6 +185,7 @@ const (
 	traitDestruct = 1 << 3
 	traitRespawn  = 1 << 4
 	traitBounce   = 1 << 5
+	traitFlag     = 1 << 6
 )
 
 // entity encodes an authored map entity: its shape, then a trait bitmask, then
@@ -220,6 +221,9 @@ func (w *cursor) entity(e gm.Entity) {
 	if e.Bounce != nil {
 		mask |= traitBounce
 	}
+	if e.Flag != nil {
+		mask |= traitFlag
+	}
 	w.u8(mask)
 	if e.Turret != nil {
 		w.f32(e.Turret.Range)
@@ -242,6 +246,9 @@ func (w *cursor) entity(e gm.Entity) {
 	}
 	if e.Bounce != nil {
 		w.f32(e.Bounce.Power)
+	}
+	if e.Flag != nil {
+		w.i16(e.Flag.Team)
 	}
 }
 
@@ -271,6 +278,9 @@ func (r *cursor) rentity() gm.Entity {
 	}
 	if mask&traitBounce != 0 {
 		e.Bounce = &gm.BounceTrait{Power: r.rf32()}
+	}
+	if mask&traitFlag != 0 {
+		e.Flag = &gm.FlagTrait{Team: r.ri16()}
 	}
 	return e
 }

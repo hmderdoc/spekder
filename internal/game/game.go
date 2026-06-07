@@ -61,6 +61,7 @@ type Entity struct {
 	Destruct *DestructTrait
 	Respawn  *RespawnTrait
 	Bounce   *BounceTrait
+	Flag     *FlagTrait
 
 	// --- runtime instance state (set in the World copy, not authored) ---
 	HP       int     // current hit points (Destruct); 0/unused otherwise
@@ -107,6 +108,14 @@ type RespawnTrait struct {
 // units/sec; standing on it re-launches each time you come back down.
 type BounceTrait struct {
 	Power float64
+}
+
+// FlagTrait marks an entity as an objective flag spawn (Phase B): the ruleset
+// instantiates a runtime flag here at match start. Team -1 is a neutral Flag Run
+// pickup; 0/1 is a CTF team flag homed at this spot. The entity itself is an
+// inert placement marker - it doesn't render or collide; the runtime flag does.
+type FlagTrait struct {
+	Team int
 }
 
 // SchemaVersion is the current map-file format version. Authored maps may set
@@ -197,6 +206,9 @@ type jrespawn struct {
 type jbounce struct {
 	Power float64 `json:"power"`
 }
+type jflag struct {
+	Team int `json:"team"`
+}
 type jentity struct {
 	Kind     string     `json:"kind"`
 	Pos      [3]float64 `json:"pos"`
@@ -210,6 +222,7 @@ type jentity struct {
 	Destruct *jdestruct `json:"destruct"`
 	Respawn  *jrespawn  `json:"respawn"`
 	Bounce   *jbounce   `json:"bounce"`
+	Flag     *jflag     `json:"flag"`
 }
 type jmap struct {
 	Version   int          `json:"version"`
@@ -242,6 +255,9 @@ func (je jentity) toEntity() Entity {
 	}
 	if je.Bounce != nil {
 		e.Bounce = &BounceTrait{Power: je.Bounce.Power}
+	}
+	if je.Flag != nil {
+		e.Flag = &FlagTrait{Team: je.Flag.Team}
 	}
 	return e
 }
@@ -1193,13 +1209,9 @@ func (w *World) startMatch() {
 	w.flags = nil
 	switch r.Objective {
 	case ObjNeutralFlags:
-		for i := 0; i < flagCount; i++ {
-			x := (rand.Float64()*2 - 1) * (w.half() - 2)
-			z := (rand.Float64()*2 - 1) * (w.half() - 2)
-			w.flags = append(w.flags, Flag{Pos: V3{x, 0, z}, Team: -1, Carrier: -1})
-		}
+		w.setupNeutralFlags()
 	case ObjTeamFlags:
-		w.createTeamFlags()
+		w.setupTeamFlags()
 	}
 	if r.Bots == BotWaves {
 		w.setupSurvival()
@@ -1262,11 +1274,40 @@ func teamColor(team, k int) [3]float64 {
 	return [3]float64{0.28 - d*0.1, 0.45 - d*0.1, 0.88 - d*0.3}
 }
 
-// createTeamFlags places one flag at each team's base, sitting at home.
-func (w *World) createTeamFlags() {
+// setupNeutralFlags places the Flag Run flags: at authored `flag` entities
+// (Team < 0) if the map defines any, else scattered procedurally as before.
+func (w *World) setupNeutralFlags() {
+	for _, e := range w.ActiveMap().Entities {
+		if e.Flag != nil && e.Flag.Team < 0 {
+			w.flags = append(w.flags, Flag{Pos: V3{e.Pos.X, 0, e.Pos.Z}, Team: -1, Carrier: -1})
+		}
+	}
+	if len(w.flags) > 0 {
+		return // authored placement wins
+	}
+	for i := 0; i < flagCount; i++ {
+		x := (rand.Float64()*2 - 1) * (w.half() - 2)
+		z := (rand.Float64()*2 - 1) * (w.half() - 2)
+		w.flags = append(w.flags, Flag{Pos: V3{x, 0, z}, Team: -1, Carrier: -1})
+	}
+}
+
+// setupTeamFlags places the CTF flags: one homed at each authored team `flag`
+// entity if the map defines both teams', else procedurally at the team bases.
+func (w *World) setupTeamFlags() {
+	var home [2]V3
+	var have [2]bool
+	for _, e := range w.ActiveMap().Entities {
+		if e.Flag != nil && (e.Flag.Team == 0 || e.Flag.Team == 1) {
+			home[e.Flag.Team], have[e.Flag.Team] = V3{e.Pos.X, 0, e.Pos.Z}, true
+		}
+	}
 	for team := 0; team < 2; team++ {
-		home := w.ctfBase(team)
-		w.flags = append(w.flags, Flag{Pos: home, Home: home, Team: team, Carrier: -1, atHome: true})
+		h := w.ctfBase(team)
+		if have[team] {
+			h = home[team]
+		}
+		w.flags = append(w.flags, Flag{Pos: h, Home: h, Team: team, Carrier: -1, atHome: true})
 	}
 }
 

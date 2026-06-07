@@ -125,6 +125,18 @@ standing on it re-launches each time you land.
 ```
 `power` **> 0** (units/sec; ~13 reaches noticeably higher than a normal jump).
 
+### Trait: `flag` (objective marker)
+Marks where an objective flag spawns. The active ruleset instantiates a runtime
+flag here at match start: a Flag Run mode uses the neutral ones, a CTF mode uses
+the team ones. The entity itself is an inert marker — it doesn't render or
+collide; the runtime flag does. If a map defines no `flag` entities for the mode,
+flags are placed procedurally (scatter / team bases) so legacy maps keep working.
+```json
+"flag": { "team": -1 }   // -1 = neutral (Flag Run); 0 or 1 = CTF team flag
+```
+`team` must be **-1, 0, or 1**. Give a flag a tiny non-zero `half` (e.g. `[0.5,
+0.5, 0.5]`) so it passes validation, even though it isn't drawn.
+
 ## Validation
 
 `game.ValidateMap` returns issues with a severity:
@@ -136,16 +148,15 @@ standing on it re-launches each time you land.
   pickup / entity / teleport `dest` outside the arena, `respawn` without `destruct`,
   a `version` newer than this build supports.
 
-## Planned (Phase B): objective traits
+## Planned: objective traits
 
-Objectives will be unified into this same entity/trait palette rather than staying
-hardcoded. Expected additions (not yet implemented):
+`flag` is implemented (above). Still planned:
 
-- `flag` — a carriable/returnable flag (replaces the bespoke Flag Run / CTF flags).
-- `zone` / `capture` — a control point or capture area (hold / capture-to-score).
+- `zone` / `capture` — a control point or capture area (hold / capture-to-score),
+  for King-of-the-Hill / domination rulesets.
 
-Win conditions (a separate, data-driven **ruleset**) will reference these, so a
-mode becomes: place objective entities + pick win conditions. See `BACKLOG.md`.
+Modes themselves are data (see `PHASE_B.md`): a `Ruleset` picks team structure,
+win conditions, lives, bot spawning, and which objective kind to instantiate.
 
 ## Example
 

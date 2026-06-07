@@ -186,6 +186,9 @@ func appendEntity(dst []Tri, e gm.Entity, st gm.EntitySnap) []Tri {
 	if st.Dead {
 		return dst
 	}
+	if e.Flag != nil {
+		return dst // inert objective marker; the runtime flag (FlagSnap) renders it
+	}
 	col := e.Color
 	if col == ([3]float64{}) {
 		col = [3]float64{0.55, 0.57, 0.62}

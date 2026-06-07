@@ -130,6 +130,9 @@ func ValidateMap(m Map) []MapIssue {
 		if b := e.Bounce; b != nil && b.Power <= 0 {
 			entIssue(i, "bounce.power", "power must be > 0", true)
 		}
+		if f := e.Flag; f != nil && (f.Team < -1 || f.Team > 1) {
+			entIssue(i, "flag.team", "team must be -1 (neutral), 0, or 1", true)
+		}
 	}
 	return out
 }

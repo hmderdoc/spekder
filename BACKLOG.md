@@ -19,6 +19,12 @@ they capture intent so nothing is lost between sessions. Newest themes first.
 - **Verticality (partial)** — `bounce` trait (trampoline / jump pad, fixed launch
   impulse) added to the palette; ramps authored into a map for the first time
   (`08-ascent.json`, which also showcases vertical aim against a rooftop turret).
+- **Phase B (in progress)** — modes are data: a `Ruleset` table replaces the
+  hardcoded mode switches (Stage 1); objectives are entity traits (`flag`, with a
+  procedural fallback) so the editor can place them (Stage 2); a new ELIMINATION
+  mode was added almost entirely as a table entry, with the menu + HUD rendering
+  from the ruleset (Stage 3). Remaining: `zone`/KotH trait + arena lobby vote
+  generalization (Stage 4). See `PHASE_B.md`.
 - **Phase A consolidation** — map format frozen at schema `version: 1`; authoring
   contract written (`SCHEMA.md`); `game.ValidateMap` (severity-tagged issues,
   editor-consumable) wired into map loading + tested on every embedded map;

@@ -116,7 +116,7 @@ func TestMapRoundTripEntities(t *testing.T) {
 			},
 			{
 				Kind: "hazard", Pos: gm.V3{X: 5, Y: 0, Z: 5}, Half: gm.V3{X: 2, Y: 0.1, Z: 2},
-				Color: [3]float64{0.9, 0.3, 0.1},
+				Color:  [3]float64{0.9, 0.3, 0.1},
 				Hazard: &gm.HazardTrait{DPS: 25},
 			},
 			{
@@ -127,17 +127,24 @@ func TestMapRoundTripEntities(t *testing.T) {
 				Kind: "trampoline", Pos: gm.V3{X: 8, Y: 0.1, Z: 0}, Half: gm.V3{X: 1.5, Y: 0.1, Z: 1.5},
 				Bounce: &gm.BounceTrait{Power: 13},
 			},
+			{
+				Kind: "flag", Pos: gm.V3{X: 0, Y: 0, Z: -12}, Half: gm.V3{X: 0.5, Y: 0.5, Z: 0.5},
+				Flag: &gm.FlagTrait{Team: -1},
+			},
 		},
 	}
 	dm, ok := DecodeMap(EncodeMap(m))
 	if !ok {
 		t.Fatal("DecodeMap failed")
 	}
-	if len(dm.Entities) != 4 {
-		t.Fatalf("want 4 entities, got %d", len(dm.Entities))
+	if len(dm.Entities) != 5 {
+		t.Fatalf("want 5 entities, got %d", len(dm.Entities))
 	}
 	if b := dm.Entities[3].Bounce; b == nil || b.Power != 13 {
 		t.Fatalf("bounce trait lost: %+v", dm.Entities[3])
+	}
+	if f := dm.Entities[4].Flag; f == nil || f.Team != -1 {
+		t.Fatalf("flag trait lost: %+v", dm.Entities[4])
 	}
 	e := dm.Entities[0]
 	if e.Kind != "turret" || !e.Solid || e.Turret == nil || e.Destruct == nil || e.Respawn == nil {
