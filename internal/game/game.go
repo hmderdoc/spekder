@@ -7,6 +7,7 @@ package game
 import (
 	"embed"
 	"encoding/json"
+	"fmt"
 	"math"
 	"math/rand"
 	"os"
@@ -108,10 +109,15 @@ type BounceTrait struct {
 	Power float64
 }
 
-// Map is a static arena layout. Size is the arena half-extent (0 = default).
-// Pickups reserves power-up spawn spots for a later drop system. Entities are
+// SchemaVersion is the current map-file format version. Authored maps may set
+// "version"; 0 (absent) is treated as 1 for legacy files.
+const SchemaVersion = 1
+
+// Map is a static arena layout. Size is the arena half-extent (0 = default);
+// arenas are square. Pickups reserves power-up spawn spots. Entities are
 // authored trait-objects (turrets, hazards, ...) instantiated each match.
 type Map struct {
+	Version   int
 	Name      string
 	Size      float64
 	Obstacles []Box
@@ -206,6 +212,7 @@ type jentity struct {
 	Bounce   *jbounce   `json:"bounce"`
 }
 type jmap struct {
+	Version   int          `json:"version"`
 	Name      string       `json:"name"`
 	Size      float64      `json:"size"`
 	Obstacles []jbox       `json:"obstacles"`
@@ -280,8 +287,9 @@ func init() {
 }
 
 // LoadMapDir appends author maps (*.json) from a directory to Maps (server-side;
-// these get sent to clients over the wire, so the door needn't have them). It
-// returns how many were added.
+// these get sent to clients over the wire, so the door needn't have them). Maps
+// that fail to parse or have fatal validation issues are skipped with a reason
+// on stderr (so the sysop sees why), and the count of loaded maps is returned.
 func LoadMapDir(dir string) int {
 	files, _ := filepath.Glob(filepath.Join(dir, "*.json"))
 	sort.Strings(files)
@@ -293,19 +301,43 @@ func LoadMapDir(dir string) int {
 		}
 		var jm jmap
 		if json.Unmarshal(data, &jm) != nil || jm.Name == "" {
+			fmt.Fprintf(os.Stderr, "spekder: skipping %s: not a valid map JSON\n", fn)
 			continue
 		}
-		Maps = append(Maps, jm.toMap())
+		m := jm.toMap()
+		issues := ValidateMap(m)
+		for _, is := range issues {
+			fmt.Fprintf(os.Stderr, "spekder: %s: %s\n", fn, is)
+		}
+		if FatalIssues(issues) {
+			fmt.Fprintf(os.Stderr, "spekder: skipping %s: fatal validation errors\n", fn)
+			continue
+		}
+		Maps = append(Maps, m)
 		n++
 	}
 	return n
+}
+
+// ParseMapJSON decodes one map file's bytes into a Map. Exported so tools (the
+// mapcheck CLI, the future editor) can load author maps outside the embed path.
+func ParseMapJSON(data []byte) (Map, error) {
+	var jm jmap
+	if err := json.Unmarshal(data, &jm); err != nil {
+		return Map{}, err
+	}
+	return jm.toMap(), nil
 }
 
 func v3(a [3]float64) V3   { return V3{a[0], a[1], a[2]} }
 func v3xz(a [2]float64) V3 { return V3{a[0], 0, a[1]} }
 
 func (jm jmap) toMap() Map {
-	m := Map{Name: jm.Name, Size: jm.Size}
+	ver := jm.Version
+	if ver == 0 {
+		ver = 1 // legacy files predate the version field
+	}
+	m := Map{Version: ver, Name: jm.Name, Size: jm.Size}
 	for _, b := range jm.Obstacles {
 		m.Obstacles = append(m.Obstacles, Box{Pos: v3(b.Pos), Half: v3(b.Half), Color: b.Color})
 	}
@@ -331,10 +363,10 @@ func (jm jmap) toMap() Map {
 const (
 	tankSpeed        = 6.0
 	hullTurnRate     = 1.9
-	turretRate       = 2.6 // bot turret tracking speed
-	playerTurretRate = 1.3 // player aim speed (slower = finer aim, less overshoot)
-	pitchRate        = 1.1  // player gun-elevation speed (rad/sec)
-	pitchMax         = 0.70 // max elevation (aim up), ~40 deg
+	turretRate       = 2.6   // bot turret tracking speed
+	playerTurretRate = 1.3   // player aim speed (slower = finer aim, less overshoot)
+	pitchRate        = 1.1   // player gun-elevation speed (rad/sec)
+	pitchMax         = 0.70  // max elevation (aim up), ~40 deg
 	pitchMin         = -0.50 // max depression (aim down), ~-29 deg
 	fireDelay        = 0.55
 	jumpSpeed        = 8.5  // upward launch velocity (units/sec)
@@ -481,8 +513,8 @@ func (a V3) Norm() V3 {
 type Input struct {
 	Throttle, Reverse, HullL, HullR, TurretL, TurretR, Fire, Jump bool
 	AimUp, AimDown                                                bool // elevate / depress the gun
-	Recenter                                                     bool // snap turret to hull-forward + level
-	Vote                                                         int
+	Recenter                                                      bool // snap turret to hull-forward + level
+	Vote                                                          int
 }
 
 type Tank struct {
@@ -491,12 +523,12 @@ type Tank struct {
 	TurretYaw   float64 // relative to hull
 	TurretPitch float64 // gun elevation: + = aim up, - = aim down (radians)
 	HP          int
-	Color     [3]float64
-	Vehicle   int
-	Bot       bool
-	Dead      bool
-	Kills     int
-	Deaths    int
+	Color       [3]float64
+	Vehicle     int
+	Bot         bool
+	Dead        bool
+	Kills       int
+	Deaths      int
 
 	cooldown float64
 	respawn  float64
@@ -520,11 +552,11 @@ type Tank struct {
 // sim internals. ID is the stable world index (so the viewer matches by ID even
 // as the snapshot omits vacated slots).
 type TankSnap struct {
-	ID                      int
-	Pos                     V3
-	HullYaw, TurretYaw      float64
-	TurretPitch             float64 // gun elevation (+ up)
-	HP                      int
+	ID                     int
+	Pos                    V3
+	HullYaw, TurretYaw     float64
+	TurretPitch            float64 // gun elevation (+ up)
+	HP                     int
 	Color                  [3]float64
 	Dead, Bot, Shield, Hit bool
 	Kills, Deaths          int
@@ -1493,7 +1525,7 @@ func (w *World) stepTurret(e *Entity, dt float64) {
 	// (not clamped) so an elevated emplacement can depress onto ground tanks.
 	muzzleY := e.Pos.Y + e.Half.Y + 0.3
 	horiz := math.Sqrt(bestD2)
-	wantPitch := math.Atan2((t.Pos.Y + turretAimHeight) - muzzleY, horiz)
+	wantPitch := math.Atan2((t.Pos.Y+turretAimHeight)-muzzleY, horiz)
 	rate := tr.TurnRate
 	if rate <= 0 {
 		rate = turretRate

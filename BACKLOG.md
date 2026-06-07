@@ -19,6 +19,23 @@ they capture intent so nothing is lost between sessions. Newest themes first.
 - **Verticality (partial)** — `bounce` trait (trampoline / jump pad, fixed launch
   impulse) added to the palette; ramps authored into a map for the first time
   (`08-ascent.json`, which also showcases vertical aim against a rooftop turret).
+- **Phase A consolidation** — map format frozen at schema `version: 1`; authoring
+  contract written (`SCHEMA.md`); `game.ValidateMap` (severity-tagged issues,
+  editor-consumable) wired into map loading + tested on every embedded map;
+  `cmd/mapcheck` CLI; `game.ParseMapJSON` for tools/editor.
+
+## Decisions (locked)
+
+- **Phases**: A (entity/trait model) done -> B (rules/win-conditions as data) ->
+  C (editor). Editor comes AFTER B so it can author rules, not just place objects.
+- **Palette, not scripting** — applies to Phase B too: win conditions and mode
+  mechanics are a fixed, parameterized set, never a scripting VM.
+- **Objectives become entity traits** (Phase B): flags / capture zones / control
+  points join the trait palette; rulesets reference them. Unifies authoring and
+  the editor. Requires refactoring the current CTF/flag/wave systems.
+- **Arenas stay square** — `size` is a single per-map half-extent. Rectangular
+  rejected: keeps radar/scaling honest and avoids symmetry/bounds edge cases;
+  use obstacles + spawn placement for corridors.
 
 ## Backlog
 
@@ -83,8 +100,7 @@ this is about what happens on hit beyond `hurt()`.
   The payload work is the foundation; types are the authorable presets on top.
 
 ### Map / entity / trait schema docs
-Write reference docs for the map JSON format (obstacles, ramps, scenery, spawns,
-pickups, and the entity trait blocks) for hand-authors and the future editor.
+DONE — see `SCHEMA.md` (the authoring contract) and `cmd/mapcheck` (validator CLI).
 
 ### Map editor
 The bigger goal: human-curated level authoring. "Basic deathmatch in <10 min,
