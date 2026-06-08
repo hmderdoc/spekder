@@ -194,7 +194,15 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 				cursor.X = clampF(cursor.X, -lim, lim)
 				cursor.Z = clampF(cursor.Z, -lim, lim)
 			} else if !topdown {
-				flyCam(&cam, in, flySpeed, lookRate, dt, mode == edNav) // vertical only in nav (SPACE = drop in place)
+				flyCam(&cam, in, flySpeed, lookRate, dt)
+				step := flySpeed * dt // R/F rise/fall (works in nav and place; SPACE = drop)
+				if ip.held(aEdUp) {
+					cam.pos.Y += step
+				}
+				if ip.held(aEdDown) {
+					cam.pos.Y -= step
+				}
+				cam.pos.Y = clampF(cam.pos.Y, 1, 80)
 			}
 		}
 
@@ -250,9 +258,9 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 	}
 }
 
-// flyCam applies free-fly movement/look to the 3D camera from held input.
-// vertical enables SPACE/ENTER rise/fall (off in place mode, where SPACE drops).
-func flyCam(cam *Cam, in gm.Input, fly, look, dt float64, vertical bool) {
+// flyCam applies free-fly move + look to the 3D camera from held input (W/S/A/D
+// + ,/. and arrows). Vertical (R/F) is handled by the caller.
+func flyCam(cam *Cam, in gm.Input, fly, look, dt float64) {
 	if in.TurretL {
 		cam.yaw -= look * dt
 	}
@@ -284,15 +292,6 @@ func flyCam(cam *Cam, in gm.Input, fly, look, dt float64, vertical bool) {
 		cam.pos.X -= cy * step
 		cam.pos.Z += sy * step
 	}
-	if vertical {
-		if in.Fire { // SPACE: rise
-			cam.pos.Y += step
-		}
-		if in.Jump { // ENTER (held): fall
-			cam.pos.Y -= step
-		}
-	}
-	cam.pos.Y = clampF(cam.pos.Y, 1, 80)
 }
 
 // raycastFloor returns where the camera's forward ray meets the floor (y=0),
@@ -359,20 +358,22 @@ func drawEditorBar(w *bufio.Writer, cols, rows int, m gm.Map, topdown bool, mode
 	if topdown {
 		view = "TOP"
 	}
+	// Width capped at cols-1: never touch the bottom-right cell (autowrap scroll).
+	width := cols - 1
 	top := fmt.Sprintf(" EDIT %s  [%s]  obst:%d ent:%d spawn:%d ", m.Name, view, len(m.Obstacles), len(m.Entities), len(m.Spawns))
-	fmt.Fprintf(w, "\x1b[1;1H\x1b[1;30;46m%-*s\x1b[0m", cols, clip(top, cols))
+	fmt.Fprintf(w, "\x1b[1;1H\x1b[1;30;46m%-*s\x1b[0m", width, clip(top, width))
 
 	var help string
 	switch mode {
 	case edPalette:
 		help = "up/dn pick   ENTER choose   BKSP cancel"
 	case edPlace:
-		help = fmt.Sprintf("PLACING %s @ %.0f,%.0f   SPACE drop  ENTER palette  TAB view  BKSP done",
+		help = fmt.Sprintf("PLACING %s @ %.0f,%.0f   SPACE drop  R/F up/down  ENTER palette  TAB view  BKSP done",
 			catItems[itemIdx].name, ghost.X, ghost.Z)
 	default:
-		help = "WASD fly  ,/. + arrows look  SPACE/ENTER rise/fall  ENTER palette  TAB view  BKSP exit"
+		help = "WASD fly  ,/. + arrows look  R/F up/down  ENTER catalog  TAB view  BKSP exit"
 	}
-	fmt.Fprintf(w, "\x1b[%d;1H\x1b[0;90m%s\x1b[0m", rows, clip(centered(help, cols), cols))
+	fmt.Fprintf(w, "\x1b[%d;1H\x1b[0;90m%s\x1b[0m", rows, clip(centered(help, width), width))
 }
 
 // drawPalette overlays the catalog list, highlighting the current selection.

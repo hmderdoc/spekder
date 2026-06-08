@@ -453,6 +453,8 @@ const (
 	aRecenter        // snap turret to hull-forward + level (C)
 	aAimUp           // elevate the gun (up arrow)
 	aAimDown         // depress the gun (down arrow)
+	aEdUp            // editor: fly camera up (R)
+	aEdDown          // editor: fly camera down (F)
 	aCount
 )
 
@@ -558,6 +560,10 @@ func (in *input) reader(t Term) {
 				in.pushKey(mkTab)
 			case c == 0x7f || c == 0x08: // Backspace: back / exit a screen
 				in.pushKey(mkBack)
+			case c == 'r' || c == 'R': // editor: fly up
+				in.hit(aEdUp)
+			case c == 'f' || c == 'F': // editor: fly down
+				in.hit(aEdDown)
 			}
 		}
 	}
