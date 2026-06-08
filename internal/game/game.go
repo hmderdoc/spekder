@@ -390,6 +390,84 @@ func (jm jmap) toMap() Map {
 	return m
 }
 
+func rampDirName(d int) string {
+	switch d {
+	case 1:
+		return "-x"
+	case 2:
+		return "+z"
+	case 3:
+		return "-z"
+	default:
+		return "+x"
+	}
+}
+
+func j3(v V3) [3]float64 { return [3]float64{v.X, v.Y, v.Z} }
+func j2(v V3) [2]float64 { return [2]float64{v.X, v.Z} }
+
+func (e Entity) toJEntity() jentity {
+	je := jentity{Kind: e.Kind, Pos: j3(e.Pos), Half: j3(e.Half), Color: e.Color, Yaw: e.Yaw, Solid: e.Solid}
+	if e.Turret != nil {
+		je.Turret = &jturret{Range: e.Turret.Range, FireDelay: e.Turret.FireDelay, Dmg: e.Turret.Dmg, TurnRate: e.Turret.TurnRate}
+	}
+	if e.Hazard != nil {
+		je.Hazard = &jhazard{DPS: e.Hazard.DPS}
+	}
+	if e.Teleport != nil {
+		je.Teleport = &jteleport{Dest: j3(e.Teleport.Dest), Cooldown: e.Teleport.Cooldown}
+	}
+	if e.Destruct != nil {
+		je.Destruct = &jdestruct{MaxHP: e.Destruct.MaxHP}
+	}
+	if e.Respawn != nil {
+		je.Respawn = &jrespawn{Delay: e.Respawn.Delay}
+	}
+	if e.Bounce != nil {
+		je.Bounce = &jbounce{Power: e.Bounce.Power}
+	}
+	if e.Flag != nil {
+		je.Flag = &jflag{Team: e.Flag.Team}
+	}
+	if e.Zone != nil {
+		je.Zone = &jzone{Capture: e.Zone.Capture}
+	}
+	return je
+}
+
+func (m Map) toJmap() jmap {
+	ver := m.Version
+	if ver == 0 {
+		ver = SchemaVersion
+	}
+	jm := jmap{Version: ver, Name: m.Name, Size: m.Size}
+	for _, b := range m.Obstacles {
+		jm.Obstacles = append(jm.Obstacles, jbox{Pos: j3(b.Pos), Half: j3(b.Half), Color: b.Color})
+	}
+	for _, r := range m.Ramps {
+		jm.Ramps = append(jm.Ramps, jramp{Pos: j3(r.Pos), Half: j3(r.Half), H: r.H, Dir: rampDirName(r.Dir), Color: r.Color})
+	}
+	for _, p := range m.Scenery {
+		jm.Scenery = append(jm.Scenery, jprop{Kind: p.Kind, Pos: j3(p.Pos), H: p.H, Color: p.Color})
+	}
+	for _, s := range m.Spawns {
+		jm.Spawns = append(jm.Spawns, j2(s))
+	}
+	for _, s := range m.Pickups {
+		jm.Pickups = append(jm.Pickups, j2(s))
+	}
+	for _, e := range m.Entities {
+		jm.Entities = append(jm.Entities, e.toJEntity())
+	}
+	return jm
+}
+
+// MapJSON serializes a Map to indented JSON (the inverse of ParseMapJSON), for
+// the editor's save and any map-export tooling.
+func MapJSON(m Map) ([]byte, error) {
+	return json.MarshalIndent(m.toJmap(), "", "  ")
+}
+
 // --- tuning knobs (exported ones are also needed by the renderer) ---
 const (
 	tankSpeed        = 6.0

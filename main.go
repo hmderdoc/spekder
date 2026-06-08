@@ -1325,6 +1325,12 @@ func main() {
 	w := bufio.NewWriterSize(term, 1<<16)
 	splash(w, cols, rows, ip)
 
+	// Load author maps (editor output) so they're playable/pinnable offline. The
+	// arena server loads its own set; this is the offline/door pool.
+	if n := gm.LoadMapDir(authorMapsDir()); n > 0 {
+		logf("loaded %d author map(s) from %s", n, authorMapsDir())
+	}
+
 	// The menu drives everything: pick a single-player mode, join the arena, or
 	// open OPTIONS. Preferences are loaded per-BBS-user and editable in OPTIONS.
 	settings := loadUserSettings(dropfile)

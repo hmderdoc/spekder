@@ -41,6 +41,15 @@ func sanitizeKey(s string) string {
 	return k
 }
 
+// authorMapsDir is where the editor saves maps and the door loads them from
+// (usermaps/ next to the binary).
+func authorMapsDir() string {
+	if exe, err := os.Executable(); err == nil {
+		return filepath.Join(filepath.Dir(exe), "usermaps")
+	}
+	return "usermaps"
+}
+
 // userSettingsPath returns the per-user settings file path (data/ next to the binary).
 func userSettingsPath(dropfile string) string {
 	_, handle := door32Identity(dropfile)
