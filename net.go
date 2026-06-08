@@ -54,6 +54,7 @@ type stamped struct {
 	flags   []gm.FlagSnap
 	pickups []gm.PickupSnap
 	ents    []gm.EntitySnap
+	zones   []gm.ZoneSnap
 }
 
 // netSession mirrors the server's broadcast and forwards our input. Remote tanks
@@ -130,14 +131,14 @@ func (s *netSession) readLoop() {
 			}
 			continue
 		}
-		_, match, tanks, shots, flags, pickups, ents, ok := proto.DecodeState(msg)
+		_, match, tanks, shots, flags, pickups, ents, zones, ok := proto.DecodeState(msg)
 		if !ok {
 			continue
 		}
 		now := time.Now()
 		s.mu.Lock()
 		s.lastMatch = match
-		s.buf = append(s.buf, stamped{t: now, tanks: tanks, shots: shots, flags: flags, pickups: pickups, ents: ents})
+		s.buf = append(s.buf, stamped{t: now, tanks: tanks, shots: shots, flags: flags, pickups: pickups, ents: ents, zones: zones})
 		// trim history older than snapKeep, but always keep the last two.
 		cut := now.Add(-snapKeep)
 		drop := 0
@@ -207,15 +208,17 @@ func (s *netSession) step(dt float64, in gm.Input) viewState {
 	var flags []gm.FlagSnap
 	var pickups []gm.PickupSnap
 	ents := latestEnts // entity facing/HP: snap to latest (no interp)
+	var zones []gm.ZoneSnap
 	if len(buf) > 0 {
 		flags = buf[len(buf)-1].flags     // flags follow carriers but need no interpolation
 		pickups = buf[len(buf)-1].pickups // static until grabbed
+		zones = buf[len(buf)-1].zones     // zone control: snap to latest
 	}
 	return viewState{
 		ready: true, tanks: tanks, shots: shots, me: s.me, self: self,
 		camPos: s.predPos, camYaw: s.predHull + s.predTur, viewTurret: s.predTur, viewPitch: s.predPitch,
 		mode: match.Mode, phase: match.Phase, timer: match.Timer, winnerID: match.WinnerID,
-		flags: flags, pickups: pickups, ents: ents, flagsLeft: match.FlagsLeft, flagsTotal: match.FlagsTotal, votes: match.Votes,
+		flags: flags, pickups: pickups, ents: ents, zones: zones, flagsLeft: match.FlagsLeft, flagsTotal: match.FlagsTotal, votes: match.Votes,
 		mapIdx: match.MapIdx, wave: match.Wave, teamScore: match.TeamScore,
 		winnerTeam: match.WinnerTeam, myTeam: self.Team, gmap: cmap,
 	}

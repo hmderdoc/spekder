@@ -85,8 +85,15 @@ them. But every existing map has zero objective entities and must keep working:
    Ruleset entry + one small general lives/respawn rule; menu + HUD render from the
    table. (Remaining: surface new modes in the arena lobby + generalize the vote
    tally from `[4]` to N — folded into Stage 4.)
-4. **(Stretch)** `zone`/capture-point trait + a King-of-the-Hill ruleset; arena
-   lobby vote generalization.
+4. **Zone trait + King of the Hill.** DONE. `zone` trait (inert marker, runtime
+   contest/hold scoring with its own ZoneSnap wire array + render); `WinScore` win
+   condition; `Tank.holdScore`; two rulesets sharing the trait — TEAM KOTH
+   (teamScore) and FFA KING OF THE HILL (per-tank holdScore). Demo:
+   `10-hilltop.json`. The lobby vote tally was also generalized from `[4]` to N
+   modes, so all seven modes appear in the arena lobby.
+
+**Phase B is complete** — modes are data (7 of them), objectives are traits
+(flag, zone), and new modes are table entries. Next: the editor (Phase C).
 
 ## Notes / risks
 

@@ -21,7 +21,7 @@ func TestStateRoundTripCTF(t *testing.T) {
 		WinnerTeam: -1,
 	}
 	tanks := []gm.TankSnap{
-		{ID: 0, Pos: gm.V3{X: 1, Y: 0, Z: -3}, HP: 80, Team: 0, Carrying: true, Lives: 0, Vehicle: 1, Shield: true, TurretPitch: 0.35},
+		{ID: 0, Pos: gm.V3{X: 1, Y: 0, Z: -3}, HP: 80, Team: 0, Carrying: true, Lives: 0, Vehicle: 1, Shield: true, TurretPitch: 0.35, HoldScore: 7},
 		{ID: 1, Pos: gm.V3{X: -2, Y: 0, Z: 4}, HP: 100, Team: 1, Carrying: false, Bot: true, Vehicle: 2, Cloak: true, Rapid: true},
 	}
 	shots := []gm.V3{{X: 0, Y: gm.EyeHeight, Z: 0}}
@@ -38,10 +38,22 @@ func TestStateRoundTripCTF(t *testing.T) {
 		{HP: 45, Dead: false, Yaw: 1.25, Pitch: -0.4},
 		{HP: 0, Dead: true, Yaw: -2.0},
 	}
-	buf := EncodeState(7, m, tanks, shots, flags, pickups, ents)
-	tick, dm, dt, ds, df, dp, de, ok := DecodeState(buf)
+	zones := []gm.ZoneSnap{
+		{Pos: gm.V3{X: 0, Z: 0}, Half: gm.V3{X: 4, Y: 1, Z: 4}, Prog: 0.5, Color: [3]float64{0.9, 0.3, 0.3}},
+	}
+	buf := EncodeState(7, m, tanks, shots, flags, pickups, ents, zones)
+	tick, dm, dt, ds, df, dp, de, dz, ok := DecodeState(buf)
 	if !ok {
 		t.Fatal("DecodeState failed")
+	}
+	if len(dz) != 1 || dz[0].Half.X != 4 {
+		t.Fatalf("zone snap lost over wire: %+v", dz)
+	}
+	if d := dz[0].Prog - 0.5; d > 1e-3 || d < -1e-3 {
+		t.Fatalf("zone progress lost: %+v", dz[0])
+	}
+	if dt[0].HoldScore != tanks[0].HoldScore {
+		t.Fatalf("tank holdScore lost over wire")
 	}
 	if len(dp) != 2 || dp[0].Kind != gm.PickShield || dp[1].Kind != gm.PickCloak {
 		t.Fatalf("pickups lost over wire: %+v", dp)
@@ -131,20 +143,27 @@ func TestMapRoundTripEntities(t *testing.T) {
 				Kind: "flag", Pos: gm.V3{X: 0, Y: 0, Z: -12}, Half: gm.V3{X: 0.5, Y: 0.5, Z: 0.5},
 				Flag: &gm.FlagTrait{Team: -1},
 			},
+			{
+				Kind: "zone", Pos: gm.V3{X: 0, Y: 0, Z: 0}, Half: gm.V3{X: 4, Y: 1, Z: 4},
+				Zone: &gm.ZoneTrait{Capture: 5},
+			},
 		},
 	}
 	dm, ok := DecodeMap(EncodeMap(m))
 	if !ok {
 		t.Fatal("DecodeMap failed")
 	}
-	if len(dm.Entities) != 5 {
-		t.Fatalf("want 5 entities, got %d", len(dm.Entities))
+	if len(dm.Entities) != 6 {
+		t.Fatalf("want 6 entities, got %d", len(dm.Entities))
 	}
 	if b := dm.Entities[3].Bounce; b == nil || b.Power != 13 {
 		t.Fatalf("bounce trait lost: %+v", dm.Entities[3])
 	}
 	if f := dm.Entities[4].Flag; f == nil || f.Team != -1 {
 		t.Fatalf("flag trait lost: %+v", dm.Entities[4])
+	}
+	if z := dm.Entities[5].Zone; z == nil || z.Capture != 5 {
+		t.Fatalf("zone trait lost: %+v", dm.Entities[5])
 	}
 	e := dm.Entities[0]
 	if e.Kind != "turret" || !e.Solid || e.Turret == nil || e.Destruct == nil || e.Respawn == nil {

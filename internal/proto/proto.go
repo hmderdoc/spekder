@@ -186,6 +186,7 @@ const (
 	traitRespawn  = 1 << 4
 	traitBounce   = 1 << 5
 	traitFlag     = 1 << 6
+	traitZone     = 1 << 7
 )
 
 // entity encodes an authored map entity: its shape, then a trait bitmask, then
@@ -224,6 +225,9 @@ func (w *cursor) entity(e gm.Entity) {
 	if e.Flag != nil {
 		mask |= traitFlag
 	}
+	if e.Zone != nil {
+		mask |= traitZone
+	}
 	w.u8(mask)
 	if e.Turret != nil {
 		w.f32(e.Turret.Range)
@@ -249,6 +253,9 @@ func (w *cursor) entity(e gm.Entity) {
 	}
 	if e.Flag != nil {
 		w.i16(e.Flag.Team)
+	}
+	if e.Zone != nil {
+		w.f32(e.Zone.Capture)
 	}
 }
 
@@ -281,6 +288,9 @@ func (r *cursor) rentity() gm.Entity {
 	}
 	if mask&traitFlag != 0 {
 		e.Flag = &gm.FlagTrait{Team: r.ri16()}
+	}
+	if mask&traitZone != 0 {
+		e.Zone = &gm.ZoneTrait{Capture: r.rf32()}
 	}
 	return e
 }
@@ -316,7 +326,7 @@ func DecodeMap(p []byte) (gm.Map, bool) {
 
 // ---- STATE ----
 
-func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.V3, flags []gm.FlagSnap, pickups []gm.PickupSnap, ents []gm.EntitySnap) []byte {
+func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.V3, flags []gm.FlagSnap, pickups []gm.PickupSnap, ents []gm.EntitySnap, zones []gm.ZoneSnap) []byte {
 	w := &cursor{}
 	w.u8(MsgState)
 	w.u32(tick)
@@ -377,6 +387,7 @@ func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.V3
 		w.u8(byte(t.Vehicle))
 		w.i16(t.Lives)
 		w.i16(t.Team)
+		w.u16(t.HoldScore)
 	}
 	w.u16(len(shots))
 	for _, s := range shots {
@@ -410,12 +421,19 @@ func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.V3
 		w.f32(e.Yaw)
 		w.f32(e.Pitch)
 	}
+	w.u16(len(zones))
+	for _, z := range zones {
+		w.v3(z.Pos)
+		w.v3(z.Half)
+		w.f32(z.Prog)
+		w.col3(z.Color)
+	}
 	return w.b
 }
 
-func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.V3, flags []gm.FlagSnap, pickups []gm.PickupSnap, ents []gm.EntitySnap, ok bool) {
+func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.V3, flags []gm.FlagSnap, pickups []gm.PickupSnap, ents []gm.EntitySnap, zones []gm.ZoneSnap, ok bool) {
 	if len(p) == 0 || p[0] != MsgState {
-		return 0, gm.MatchSnap{}, nil, nil, nil, nil, nil, false
+		return 0, gm.MatchSnap{}, nil, nil, nil, nil, nil, nil, false
 	}
 	r := &cursor{b: p, i: 1}
 	tick = r.ru32()
@@ -461,6 +479,7 @@ func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, sh
 		t.Vehicle = int(r.ru8())
 		t.Lives = r.ri16()
 		t.Team = r.ri16()
+		t.HoldScore = r.ru16()
 		tanks = append(tanks, t)
 	}
 	ns := r.ru16()
@@ -495,10 +514,19 @@ func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, sh
 		e.Pitch = r.rf32()
 		ents = append(ents, e)
 	}
-	if r.err {
-		return 0, gm.MatchSnap{}, nil, nil, nil, nil, nil, false
+	nz := r.ru16()
+	for k := 0; k < nz; k++ {
+		var z gm.ZoneSnap
+		z.Pos = r.rv3()
+		z.Half = r.rv3()
+		z.Prog = r.rf32()
+		z.Color = r.rcol3()
+		zones = append(zones, z)
 	}
-	return tick, m, tanks, shots, flags, pickups, ents, true
+	if r.err {
+		return 0, gm.MatchSnap{}, nil, nil, nil, nil, nil, nil, false
+	}
+	return tick, m, tanks, shots, flags, pickups, ents, zones, true
 }
 
 // ---- helpers ----

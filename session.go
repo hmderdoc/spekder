@@ -36,6 +36,7 @@ type viewState struct {
 	flags      []gm.FlagSnap   // flags to draw (Flag Run pickups / CTF team flags)
 	pickups    []gm.PickupSnap // power-up drops to draw
 	ents       []gm.EntitySnap // per-tick dynamic state of gmap.Entities (aligned by index)
+	zones      []gm.ZoneSnap   // King of the Hill control zones to draw
 	flagsLeft  int
 	flagsTotal int
 	votes      []int  // lobby vote tally per mode index (len = len(gm.Rulesets))
@@ -92,6 +93,7 @@ func (s *offlineSession) step(dt float64, in gm.Input) viewState {
 	s.w.Update(dt, map[int]gm.Input{s.me: in})
 	tanks, shots, flags, pickups := s.w.Snapshot()
 	ents := s.w.Entities()
+	zones := s.w.Zones()
 	var self gm.TankSnap
 	for i := range tanks {
 		if tanks[i].ID == s.me {
@@ -104,7 +106,7 @@ func (s *offlineSession) step(dt float64, in gm.Input) viewState {
 		ready: true, tanks: tanks, shots: shots, me: s.me, self: self,
 		camPos: self.Pos, camYaw: self.HullYaw + self.TurretYaw, viewTurret: self.TurretYaw, viewPitch: self.TurretPitch,
 		mode: m.Mode, phase: m.Phase, timer: m.Timer, winnerID: m.WinnerID,
-		flags: flags, pickups: pickups, ents: ents, flagsLeft: m.FlagsLeft, flagsTotal: m.FlagsTotal, mapIdx: m.MapIdx,
+		flags: flags, pickups: pickups, ents: ents, zones: zones, flagsLeft: m.FlagsLeft, flagsTotal: m.FlagsTotal, mapIdx: m.MapIdx,
 		wave: m.Wave, teamScore: m.TeamScore, winnerTeam: m.WinnerTeam, myTeam: self.Team,
 		gmap: s.w.ActiveMap(),
 	}

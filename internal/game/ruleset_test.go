@@ -166,6 +166,69 @@ func TestProceduralFlagFallback(t *testing.T) {
 	}
 }
 
+// TestFFAKotHCaptureAndScore: a lone tank standing in the hill captures it after
+// the capture time, then accrues hold-points each second; reaching the limit wins.
+func TestFFAKotHCaptureAndScore(t *testing.T) {
+	w := NewWorld(0, ModeFFAKotH)
+	me := w.AddPlayer([3]float64{}, 1)
+	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{me: {}})
+	if len(w.zones) == 0 {
+		t.Fatal("KotH should have at least a fallback center zone")
+	}
+	z := &w.zones[0]
+	w.Tanks[me].Pos = z.Pos // stand on the hill
+	w.Tanks[me].guard = 0
+	// Capture: after Cap seconds uncontested, the lone tank owns the zone.
+	for i := 0; i < int(z.Cap*30)+5; i++ {
+		w.stepZones(1.0 / 30)
+		w.Tanks[me].Pos = w.zones[0].Pos // hold position
+	}
+	if w.zones[0].Owner != me {
+		t.Fatalf("lone tank should capture the hill, owner=%d", w.zones[0].Owner)
+	}
+	// Hold: points accrue ~1/sec.
+	before := w.Tanks[me].holdScore
+	for i := 0; i < 60; i++ { // ~2s
+		w.stepZones(1.0 / 30)
+	}
+	if w.Tanks[me].holdScore <= before {
+		t.Fatalf("holding the hill should accrue points (%d -> %d)", before, w.Tanks[me].holdScore)
+	}
+	// Win condition fires at the score limit.
+	w.Tanks[me].holdScore = kothScoreLimit
+	w.checkEnd()
+	if w.Phase != PhaseEnded || w.WinnerID != me {
+		t.Fatalf("reaching the score limit should win: phase=%v winner=%d", w.Phase, w.WinnerID)
+	}
+}
+
+// TestKotHContestedNoProgress: two opposing tanks in the hill = contested, so no
+// capture progress and no points.
+func TestKotHContestedNoProgress(t *testing.T) {
+	idx := len(Maps)
+	Maps = append(Maps, Map{Name: "TEST-KOTH", Size: 18, Spawns: []V3{{X: -10, Z: -10}}})
+	w := NewWorld(0, ModeTeamKotH)
+	w.PinMap(idx)
+	a := w.AddPlayer([3]float64{}, 1)
+	b := w.AddPlayer([3]float64{}, 1)
+	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{a: {}, b: {}})
+	// Force opposing teams, both on the hill.
+	w.Tanks[a].Team, w.Tanks[b].Team = 0, 1
+	w.Tanks[a].guard, w.Tanks[b].guard = 0, 0
+	z := &w.zones[0]
+	w.Tanks[a].Pos, w.Tanks[b].Pos = z.Pos, z.Pos
+	for i := 0; i < 90; i++ {
+		w.stepZones(1.0 / 30)
+		w.Tanks[a].Pos, w.Tanks[b].Pos = w.zones[0].Pos, w.zones[0].Pos
+	}
+	if w.zones[0].Owner != -1 {
+		t.Fatalf("contested hill should stay neutral, owner=%d", w.zones[0].Owner)
+	}
+	if w.teamScore[0] != 0 || w.teamScore[1] != 0 {
+		t.Fatalf("contested hill should award no points, got %v", w.teamScore)
+	}
+}
+
 // TestEndlessModeNoTimeout: a ruleset with TimeLimit 0 (survival) does not end on
 // the clock — only its win condition can end it.
 func TestEndlessModeNoTimeout(t *testing.T) {

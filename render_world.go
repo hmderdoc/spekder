@@ -186,8 +186,8 @@ func appendEntity(dst []Tri, e gm.Entity, st gm.EntitySnap) []Tri {
 	if st.Dead {
 		return dst
 	}
-	if e.Flag != nil {
-		return dst // inert objective marker; the runtime flag (FlagSnap) renders it
+	if e.Flag != nil || e.Zone != nil {
+		return dst // inert objective marker; the runtime flag/zone snap renders it
 	}
 	col := e.Color
 	if col == ([3]float64{}) {
@@ -228,6 +228,22 @@ func appendEntity(dst []Tri, e gm.Entity, st gm.EntitySnap) []Tri {
 		xf := func(l V3) V3 { return l.Add(e.Pos) }
 		dst = box(dst, V3{}, e.Half, col, xf) // generic solid block (wall, cover, ...)
 	}
+	return dst
+}
+
+// appendZone builds a King-of-the-Hill control zone: a low pad tinted by the
+// controller's color (grey when neutral), brightening with capture progress so
+// you can read who's taking it.
+func appendZone(dst []Tri, z gm.ZoneSnap) []Tri {
+	col := z.Color
+	if z.Prog > 0 { // brighten toward white as it's captured
+		f := z.Prog
+		col = [3]float64{col[0] + (1-col[0])*f, col[1] + (1-col[1])*f, col[2] + (1-col[2])*f}
+	}
+	xf := func(l V3) V3 { return l.Add(V3{z.Pos.X, 0, z.Pos.Z}) }
+	dim := [3]float64{col[0] * 0.55, col[1] * 0.55, col[2] * 0.55}
+	dst = box(dst, V3{0, 0.05, 0}, V3{z.Half.X, 0.05, z.Half.Z}, dim, xf)               // floor pad
+	dst = box(dst, V3{0, 0.55, 0}, V3{z.Half.X * 0.18, 0.55, z.Half.Z * 0.18}, col, xf) // center post (visible from afar)
 	return dst
 }
 
@@ -314,10 +330,13 @@ func (r *Renderer) drawReticle(col [3]byte, turret float64) {
 
 // renderWorld draws the arena, every tank except our own (me) and the dead, all
 // projectiles, then the damage flash and aiming reticle.
-func (r *Renderer) renderWorld(cam Cam, t float64, tanks []gm.TankSnap, shots []gm.V3, flags []gm.FlagSnap, pickups []gm.PickupSnap, entT []gm.Entity, entS []gm.EntitySnap, me int, flash float64, topdown bool, reticle [3]byte, selfTurret float64) {
+func (r *Renderer) renderWorld(cam Cam, t float64, tanks []gm.TankSnap, shots []gm.V3, flags []gm.FlagSnap, pickups []gm.PickupSnap, entT []gm.Entity, entS []gm.EntitySnap, zones []gm.ZoneSnap, me int, flash float64, topdown bool, reticle [3]byte, selfTurret float64) {
 	r.clear()
 	r.drawTris(cam, arena, t)
 	var dyn []Tri
+	for i := range zones {
+		dyn = appendZone(dyn, zones[i])
+	}
 	for i := range tanks {
 		tk := &tanks[i]
 		if tk.Dead || (!topdown && tk.ID == me) { // skip the dead; in 1st person, our own hull

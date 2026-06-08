@@ -148,15 +148,24 @@ flags are placed procedurally (scatter / team bases) so legacy maps keep working
   pickup / entity / teleport `dest` outside the arena, `respawn` without `destruct`,
   a `version` newer than this build supports.
 
-## Planned: objective traits
+### Trait: `zone` (King-of-the-Hill control zone)
+Marks a control zone. In a KotH ruleset, a single uncontested contender (a team
+in team modes, a lone tank in FFA) standing in the footprint captures it over
+`capture` seconds; the controller then accrues a hold-point per second. Inert
+marker — the runtime zone renders (a pad tinted by the controller, brightening
+with capture progress). If a KotH map has no `zone`, a default hill spawns at the
+arena center.
+```json
+"zone": { "capture": 4 }   // seconds of uncontested presence to flip control (0 = default ~4)
+```
+The footprint is the entity's `half` (X/Z). Placing a zone atop a solid obstacle
+(as in `10-hilltop.json`) makes it a literal hilltop you must climb a ramp to hold.
 
-`flag` is implemented (above). Still planned:
-
-- `zone` / `capture` — a control point or capture area (hold / capture-to-score),
-  for King-of-the-Hill / domination rulesets.
+## Modes are data
 
 Modes themselves are data (see `PHASE_B.md`): a `Ruleset` picks team structure,
 win conditions, lives, bot spawning, and which objective kind to instantiate.
+Objective traits (`flag`, `zone`) are placed in maps; the ruleset wires them up.
 
 ## Example
 

@@ -113,6 +113,7 @@ func (s *server) run(tickHz float64) {
 		s.world.Update(dt, inputs)
 		tanks, shots, flags, pickups := s.world.Snapshot()
 		ents := s.world.Entities()
+		zones := s.world.Zones()
 		match := s.world.Match()
 		var mapMsg []byte
 		if s.world.MapIdx != lastMap { // map rotated: tell everyone the new layout
@@ -121,7 +122,7 @@ func (s *server) run(tickHz float64) {
 		}
 		s.mu.Unlock()
 
-		state := proto.EncodeState(tick, match, tanks, shots, flags, pickups, ents)
+		state := proto.EncodeState(tick, match, tanks, shots, flags, pickups, ents, zones)
 		tick++
 		for _, conn := range conns {
 			conn.SetWriteDeadline(time.Now().Add(2 * time.Second))

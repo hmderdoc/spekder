@@ -160,9 +160,9 @@ func TestSolidCollision(t *testing.T) {
 	w, _ := startDM(t, 0)
 	base := len(w.ActiveMap().Obstacles)
 	w.entities = []Entity{
-		{Solid: true, Pos: V3{X: 1, Y: 1, Z: 1}, Half: V3{X: 1, Y: 1, Z: 1}},               // counts
-		{Solid: true, Dead: true, Pos: V3{X: 2, Y: 1, Z: 2}, Half: V3{X: 1, Y: 1, Z: 1}},   // dead: excluded
-		{Solid: false, Pos: V3{X: 3, Y: 1, Z: 3}, Half: V3{X: 1, Y: 1, Z: 1}},              // non-solid: excluded
+		{Solid: true, Pos: V3{X: 1, Y: 1, Z: 1}, Half: V3{X: 1, Y: 1, Z: 1}},             // counts
+		{Solid: true, Dead: true, Pos: V3{X: 2, Y: 1, Z: 2}, Half: V3{X: 1, Y: 1, Z: 1}}, // dead: excluded
+		{Solid: false, Pos: V3{X: 3, Y: 1, Z: 3}, Half: V3{X: 1, Y: 1, Z: 1}},            // non-solid: excluded
 	}
 	if got := len(w.collidables()) - base; got != 1 {
 		t.Fatalf("collidables should add exactly 1 solid entity box, added %d", got)

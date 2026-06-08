@@ -659,10 +659,10 @@ func drawStatus(w *bufio.Writer, cols int, v viewState, p *gm.TankSnap) {
 		}
 		fmt.Fprintf(&b, "  %d:%02d", t/60, t%60)
 	}
-	switch r.Objective {
-	case gm.ObjNeutralFlags:
+	if r.Objective == gm.ObjNeutralFlags {
 		fmt.Fprintf(&b, "  FLAGS %d/%d", v.flagsTotal-v.flagsLeft, v.flagsTotal)
-	case gm.ObjTeamFlags:
+	}
+	if r.Teams == 2 { // team modes (CTF, Team KotH): RED vs BLU score
 		mark0, mark1 := " ", " "
 		if v.myTeam == 0 {
 			mark0 = ">"
@@ -675,6 +675,9 @@ func drawStatus(w *bufio.Writer, cols int, v viewState, p *gm.TankSnap) {
 		if p.Carrying {
 			b.WriteString("  \x1b[93m*FLAG*\x1b[0;37m")
 		}
+	}
+	if r.Objective == gm.ObjZone && r.Teams != 2 { // FFA King of the Hill: your hold-score
+		fmt.Fprintf(&b, "  SCORE %d", p.HoldScore)
 	}
 	if r.Bots == gm.BotWaves {
 		fmt.Fprintf(&b, "  WAVE %d", v.wave)
@@ -966,9 +969,10 @@ func drawLobby(w *bufio.Writer, cols, rows int, v viewState, voteMode int) {
 
 // drawScoreboard overlays VICTORY/GAME OVER and a ranked frag list.
 func drawScoreboard(w *bufio.Writer, cols, rows int, v viewState) {
+	rs := gm.RulesetFor(v.mode)
 	won := v.winnerID == v.me
 	title, fg := "GAME OVER", 4 // CGA red
-	if v.mode == gm.ModeCTF {
+	if rs.Teams == 2 {
 		switch {
 		case v.winnerTeam == v.myTeam:
 			title, fg = "VICTORY", 10 // green
@@ -990,7 +994,7 @@ func drawScoreboard(w *bufio.Writer, cols, rows int, v viewState) {
 		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;97m%s\x1b[0m", rows/2, (cols-len(line))/2+1, line)
 		return
 	}
-	if v.mode == gm.ModeCTF {
+	if rs.Teams == 2 {
 		red := fmt.Sprintf("RED %d", v.teamScore[0])
 		blu := fmt.Sprintf("BLU %d", v.teamScore[1])
 		plain := red + "   -   " + blu
@@ -1334,7 +1338,7 @@ loop:
 		case p.Rapid:
 			reticle = [3]byte{230, 170, 40}
 		}
-		rnd.renderWorld(cam, now.Sub(start).Seconds(), v.tanks, v.shots, v.flags, v.pickups, v.gmap.Entities, v.ents, v.me, flash, topdown, reticle, v.viewTurret)
+		rnd.renderWorld(cam, now.Sub(start).Seconds(), v.tanks, v.shots, v.flags, v.pickups, v.gmap.Entities, v.ents, v.zones, v.me, flash, topdown, reticle, v.viewTurret)
 		frame, cur := encode(rnd, cols, rows3d, prev)
 		prev = cur
 		w.Write(frame)

@@ -62,6 +62,7 @@ type Entity struct {
 	Respawn  *RespawnTrait
 	Bounce   *BounceTrait
 	Flag     *FlagTrait
+	Zone     *ZoneTrait
 
 	// --- runtime instance state (set in the World copy, not authored) ---
 	HP       int     // current hit points (Destruct); 0/unused otherwise
@@ -116,6 +117,13 @@ type BounceTrait struct {
 // inert placement marker - it doesn't render or collide; the runtime flag does.
 type FlagTrait struct {
 	Team int
+}
+
+// ZoneTrait marks a King-of-the-Hill control zone spawn. Capture is the seconds
+// of uncontested presence needed to flip control (0 -> default). Inert marker
+// like flag; the runtime zone (w.zones) does the contest/hold scoring and render.
+type ZoneTrait struct {
+	Capture float64
 }
 
 // SchemaVersion is the current map-file format version. Authored maps may set
@@ -209,6 +217,9 @@ type jbounce struct {
 type jflag struct {
 	Team int `json:"team"`
 }
+type jzone struct {
+	Capture float64 `json:"capture"`
+}
 type jentity struct {
 	Kind     string     `json:"kind"`
 	Pos      [3]float64 `json:"pos"`
@@ -223,6 +234,7 @@ type jentity struct {
 	Respawn  *jrespawn  `json:"respawn"`
 	Bounce   *jbounce   `json:"bounce"`
 	Flag     *jflag     `json:"flag"`
+	Zone     *jzone     `json:"zone"`
 }
 type jmap struct {
 	Version   int          `json:"version"`
@@ -258,6 +270,9 @@ func (je jentity) toEntity() Entity {
 	}
 	if je.Flag != nil {
 		e.Flag = &FlagTrait{Team: je.Flag.Team}
+	}
+	if je.Zone != nil {
+		e.Zone = &ZoneTrait{Capture: je.Zone.Capture}
 	}
 	return e
 }
@@ -419,6 +434,8 @@ const (
 	ModeCTF
 	ModeSurvival
 	ModeElimination
+	ModeTeamKotH
+	ModeFFAKotH
 )
 
 // WinKind / BotSpawn / ObjKind are fixed palettes a Ruleset composes (palette,
@@ -430,6 +447,7 @@ const (
 	WinCaptures                   // a team reaches Count captures
 	WinCollectAll                 // every neutral flag has been collected
 	WinElimination                // one side eliminated (co-op: all humans out of lives)
+	WinScore                      // a team/tank reaches Count hold-points (King of the Hill)
 )
 
 type BotSpawn int
@@ -445,6 +463,7 @@ const (
 	ObjNone         ObjKind = iota
 	ObjNeutralFlags         // scattered neutral flags (Flag Run)
 	ObjTeamFlags            // one flag per team at its base (CTF)
+	ObjZone                 // control zone(s) to hold (King of the Hill)
 )
 
 // WinCond is one early-end trigger; Count is its threshold (kills/captures).
@@ -486,6 +505,12 @@ var Rulesets = []Ruleset{
 	ModeElimination: {Name: "ELIMINATION", Desc: "Solo vs bots: 3 lives each, last tank standing wins.",
 		Teams: 0, TimeLimit: matchTime, Lives: 3, Bots: BotFill, Objective: ObjNone,
 		Win: []WinCond{{WinElimination, 0}}},
+	ModeTeamKotH: {Name: "TEAM KOTH", Desc: "Two teams fight to hold the hill; first to the score wins.",
+		Teams: 2, TimeLimit: matchTime, Bots: BotFill, Objective: ObjZone,
+		Win: []WinCond{{WinScore, kothScoreLimit}}},
+	ModeFFAKotH: {Name: "KING OF THE HILL", Desc: "Solo vs bots: hold the hill to score; first to the score wins.",
+		Teams: 0, TimeLimit: matchTime, Bots: BotFill, Objective: ObjZone,
+		Win: []WinCond{{WinScore, kothScoreLimit}}},
 }
 
 func (m Mode) String() string {
@@ -543,6 +568,10 @@ const (
 	ctfCaptureRad   = 2.6  // CTF: how close to your base to score a capture
 	flagReturnTime  = 15.0 // CTF: sec a dropped flag waits before returning home
 	ctfCaptureBonus = 5    // CTF: personal frags awarded for a capture
+
+	zoneCaptureTime = 4.0 // KotH: default sec of uncontested presence to flip a zone
+	kothScoreLimit  = 60  // KotH: hold-points (~seconds held) to win
+	zoneFallbackR   = 4.0 // KotH: half-extent of the default center hill when none authored
 
 	teleDebounce   = 0.8 // sec a tank is immune to teleporters after warping
 	pickupRadius   = 1.9 // how close you drive to grab a power-up
@@ -645,6 +674,7 @@ type Tank struct {
 
 	hazardDebt float64 // hazard-trait: fractional HP damage carried between ticks
 	teleT      float64 // teleporter debounce remaining (sec); 0 = can teleport
+	holdScore  int     // King of the Hill (FFA): hold-points accrued this match
 }
 
 // TankSnap is the renderable/transmittable view of a tank: exported, flat, no
@@ -667,6 +697,7 @@ type TankSnap struct {
 	Rapid                  bool // power-up: rapid-fire active
 	RespawnIn              float64
 	Reload                 float64 // 0 = ready to fire, ->1 = just fired
+	HoldScore              int     // King of the Hill (FFA): hold-points
 }
 
 // PickKind enumerates power-up drop types.
@@ -732,6 +763,29 @@ type FlagSnap struct {
 	Carried bool
 }
 
+// Zone is a King-of-the-Hill control zone (runtime). Owner is the controlling
+// team (team mode) or tank index (FFA), -1 = none. Prog is capture progress by
+// `cont` toward Cap; hold is a fractional accumulator for awarding hold-points.
+type Zone struct {
+	Pos   V3
+	Half  V3
+	Cap   float64
+	Owner int
+	Prog  float64
+	cont  int
+	hold  float64
+}
+
+// ZoneSnap is the renderable/transmittable view of a control zone. Color is the
+// controller's display color (grey when neutral), resolved server-side so the
+// client needn't know the mode; Prog is 0..1 capture progress.
+type ZoneSnap struct {
+	Pos   V3
+	Half  V3
+	Prog  float64
+	Color [3]float64
+}
+
 // MatchSnap is the transmittable match state (lifecycle, mode, clock, winner,
 // and Flag Run progress).
 type MatchSnap struct {
@@ -791,6 +845,7 @@ type World struct {
 	pickupTimer float64  // sec until the next drop spawns
 
 	entities []Entity // runtime trait-objects, instanced from ActiveMap().Entities
+	zones    []Zone   // King of the Hill control zones (when the ruleset uses them)
 }
 
 // Entities returns per-tick dynamic snapshots of the world's entities, aligned
@@ -799,6 +854,31 @@ func (w *World) Entities() []EntitySnap {
 	out := make([]EntitySnap, len(w.entities))
 	for i := range w.entities {
 		out[i] = EntitySnap{HP: w.entities[i].HP, Dead: w.entities[i].Dead, Yaw: w.entities[i].Yaw, Pitch: w.entities[i].Pitch}
+	}
+	return out
+}
+
+// Zones returns per-tick snapshots of control zones, with the controller's color
+// resolved (team shade in team modes, the owning tank's color in FFA, grey when
+// neutral) so the client renders without knowing the mode.
+func (w *World) Zones() []ZoneSnap {
+	teamMode := w.rules().Teams == 2
+	out := make([]ZoneSnap, len(w.zones))
+	for i := range w.zones {
+		z := &w.zones[i]
+		col := [3]float64{0.55, 0.55, 0.6} // neutral grey
+		if z.Owner >= 0 {
+			if teamMode {
+				col = teamColor(z.Owner, 0)
+			} else if z.Owner < len(w.Tanks) {
+				col = w.Tanks[z.Owner].Color
+			}
+		}
+		prog := 0.0
+		if z.Cap > 0 {
+			prog = z.Prog / z.Cap
+		}
+		out[i] = ZoneSnap{Pos: z.Pos, Half: z.Half, Prog: prog, Color: col}
 	}
 	return out
 }
@@ -1205,6 +1285,7 @@ func (w *World) startMatch() {
 		t.HP, t.Dead, t.vy = veh(t.Vehicle).MaxHP, false, 0
 		t.shieldT, t.rapidT, t.cloakT = 0, 0, 0
 		t.guard = spawnGuardTime
+		t.holdScore = 0
 		t.Pos = w.spawnPoint(i)
 		t.HullYaw = w.faceTarget(i)
 		t.TurretYaw, t.TurretPitch = 0, 0
@@ -1214,12 +1295,14 @@ func (w *World) startMatch() {
 	}
 	w.pickups, w.pickupTimer = nil, pickupInterval
 	w.resetEntities()
-	w.flags = nil
+	w.flags, w.zones = nil, nil
 	switch r.Objective {
 	case ObjNeutralFlags:
 		w.setupNeutralFlags()
 	case ObjTeamFlags:
 		w.setupTeamFlags()
+	case ObjZone:
+		w.setupZones()
 	}
 	if r.Bots == BotWaves {
 		w.setupSurvival()
@@ -1316,6 +1399,99 @@ func (w *World) setupTeamFlags() {
 			h = home[team]
 		}
 		w.flags = append(w.flags, Flag{Pos: h, Home: h, Team: team, Carrier: -1, atHome: true})
+	}
+}
+
+// setupZones places King-of-the-Hill control zones: at authored `zone` entities
+// if the map defines any, else a single default hill at the arena center (so the
+// mode is playable on any map).
+func (w *World) setupZones() {
+	for _, e := range w.ActiveMap().Entities {
+		if e.Zone == nil {
+			continue
+		}
+		cap := e.Zone.Capture
+		if cap <= 0 {
+			cap = zoneCaptureTime
+		}
+		w.zones = append(w.zones, Zone{Pos: V3{e.Pos.X, 0, e.Pos.Z}, Half: e.Half, Cap: cap, Owner: -1, cont: -1})
+	}
+	if len(w.zones) == 0 {
+		w.zones = append(w.zones, Zone{Pos: V3{}, Half: V3{X: zoneFallbackR, Y: 1, Z: zoneFallbackR}, Cap: zoneCaptureTime, Owner: -1, cont: -1})
+	}
+}
+
+// stepZones advances each control zone: a single uncontested contender (a team
+// in team mode, a lone tank in FFA) captures it over Cap seconds; the owner,
+// present and uncontested, accrues a hold-point per second (into team score or
+// the tank's holdScore). Contested or empty -> no progress, partial caps reset.
+func (w *World) stepZones(dt float64) {
+	teamMode := w.rules().Teams == 2
+	for zi := range w.zones {
+		z := &w.zones[zi]
+		// Who is inside the footprint?
+		contender, count := -1, 0
+		var teamsIn [2]bool
+		for ti := range w.Tanks {
+			t := &w.Tanks[ti]
+			if t.Dead || t.gone {
+				continue
+			}
+			if math.Abs(t.Pos.X-z.Pos.X) >= z.Half.X || math.Abs(t.Pos.Z-z.Pos.Z) >= z.Half.Z {
+				continue
+			}
+			count++
+			if teamMode {
+				if t.Team == 0 || t.Team == 1 {
+					teamsIn[t.Team] = true
+				}
+			} else {
+				contender = ti // last one in; only meaningful when count == 1
+			}
+		}
+		// Resolve the sole contender, or contested/empty.
+		contested := false
+		if teamMode {
+			switch {
+			case teamsIn[0] && teamsIn[1]:
+				contested = true
+			case teamsIn[0]:
+				contender = 0
+			case teamsIn[1]:
+				contender = 1
+			default:
+				contender = -1
+			}
+		} else if count != 1 {
+			contender = -1
+			contested = count > 1
+		}
+
+		if contested || contender < 0 {
+			z.Prog, z.cont = 0, -1 // partial capture lapses
+			continue
+		}
+		if z.Owner == contender { // owner holds -> accrue points
+			z.cont, z.Prog = -1, 0
+			z.hold += dt
+			for z.hold >= 1 {
+				z.hold--
+				if teamMode {
+					w.teamScore[contender]++
+				} else if contender < len(w.Tanks) {
+					w.Tanks[contender].holdScore++
+				}
+			}
+			continue
+		}
+		// Capturing from a different (or no) owner.
+		if z.cont != contender {
+			z.Prog, z.cont = 0, contender
+		}
+		z.Prog += dt
+		if z.Prog >= z.Cap {
+			z.Owner, z.Prog, z.hold = contender, 0, 0
+		}
 	}
 }
 
@@ -1799,6 +1975,15 @@ func (w *World) winCondMet(wc WinCond) bool {
 		return w.allFlagsTaken()
 	case WinElimination:
 		return w.eliminationMet()
+	case WinScore:
+		if w.rules().Teams == 2 {
+			return w.teamScore[0] >= wc.Count || w.teamScore[1] >= wc.Count
+		}
+		for i := range w.Tanks {
+			if !w.Tanks[i].gone && w.Tanks[i].holdScore >= wc.Count {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -1855,7 +2040,8 @@ func (w *World) computeWinner() int {
 		return -1
 	}
 	for _, wc := range r.Win {
-		if wc.Kind == WinElimination { // last tank standing wins (0 alive = draw)
+		switch wc.Kind {
+		case WinElimination: // last tank standing wins (0 alive = draw)
 			for i := range w.Tanks {
 				t := &w.Tanks[i]
 				if !t.gone && (!t.Dead || t.lives > 0) {
@@ -1863,6 +2049,17 @@ func (w *World) computeWinner() int {
 				}
 			}
 			return -1
+		case WinScore: // FFA King of the Hill: most hold-points wins
+			best, bestS := -1, -1
+			for i := range w.Tanks {
+				if w.Tanks[i].gone {
+					continue
+				}
+				if w.Tanks[i].holdScore > bestS {
+					bestS, best = w.Tanks[i].holdScore, i
+				}
+			}
+			return best
 		}
 	}
 	best, bestK := -1, -1
@@ -1910,6 +2107,8 @@ func (w *World) simulate(dt float64, inputs map[int]Input) {
 		w.collectFlags()
 	case ObjTeamFlags:
 		w.stepCTF(dt)
+	case ObjZone:
+		w.stepZones(dt)
 	}
 	w.stepPickups(dt)
 	w.stepEntities(dt)
@@ -2398,7 +2597,7 @@ func (w *World) Snapshot() ([]TankSnap, []V3, []FlagSnap, []PickupSnap) {
 			Shield: t.guard > 0 || t.shieldT > 0, Hit: t.hitFlash > 0,
 			Cloak: t.cloakT > 0, Rapid: t.rapidT > 0,
 			Vehicle: t.Vehicle, Lives: t.lives, Team: t.Team, Carrying: t.Carrying >= 0,
-			Kills: t.Kills, Deaths: t.Deaths, RespawnIn: t.respawn, Reload: reload,
+			Kills: t.Kills, Deaths: t.Deaths, RespawnIn: t.respawn, Reload: reload, HoldScore: t.holdScore,
 		})
 	}
 	sh := make([]V3, len(w.Shots))
