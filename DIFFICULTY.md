@@ -23,22 +23,31 @@ var BotProfiles = []BotProfile{ /* Easy … Ultimate, indexed by tier */ }
 ```
 
 The World holds the active profile; the bot AI reads it instead of today's
-hardcoded `turretRate` / `botFireRange` / `botAimTol` / `botFireDelay`. Difficulty
-is a **sim parameter** — it never rides the wire. (Arena bot difficulty is the
-sysop's server config; the menu setting governs offline single-player.)
+hardcoded `turretRate` / `botFireRange` / `botAimTol` / `botFireDelay`. The
+unset/zero default is **HARD** (today's behavior), so tests and any path that
+doesn't set difficulty are unchanged. Difficulty is a **sim parameter** — it never
+rides the wire. (Arena bot difficulty is the sysop's server config; the menu
+setting governs offline single-player.)
 
 ## Tiers (rough starting values; tune in playtest)
 
+Today's bots are already *hard*, so the current behavior maps to **HARD**, with only
+one tier above it (ULTIMATE) and the ladder ramping easier below — that's where the
+real need is.
+
 | Tier      | Sight | ReactDelay | TrackRate | Wobble | FireDelayMul | SeekPickups |
 |-----------|-------|------------|-----------|--------|--------------|-------------|
-| EASY      | 14    | 0.8        | 1.2       | 0.18   | 1.8          | no          |
-| BEGINNER  | 18    | 0.5        | 1.6       | 0.11   | 1.4          | no          |
-| NORMAL    | 24    | 0.30       | 2.2       | 0.06   | 1.0          | no          |
-| HARD      | 30    | 0.15       | 2.8       | 0.03   | 0.85         | yes         |
-| ULTIMATE  | 0     | 0.0        | 3.6       | 0.00   | 0.70         | yes         |
+| EASY      | 14    | 0.9        | 1.2       | 0.20   | 1.9          | no          |
+| BEGINNER  | 19    | 0.6        | 1.7       | 0.12   | 1.5          | no          |
+| NORMAL    | 26    | 0.35       | 2.1       | 0.07   | 1.2          | no          |
+| HARD      | 0     | 0.10       | 2.6       | 0.02   | 1.0          | no          |
+| ULTIMATE  | 0     | 0.0        | 3.3       | 0.00   | 0.8          | yes          |
 
-NORMAL ≈ today's bots (current consts: track 2.6, fire range 26, reload 1.2).
-EASY is meant to be beatable by anyone; ULTIMATE is a wall.
+**HARD ≈ today's bots** (current consts: track 2.6, reload 1.0, full sight, ~perfect
+aim, instant react) and is the **default for any unset/test path**, so existing
+behavior and tests don't regress. **NORMAL is the default for a new player** (gentler
+than today). EASY is meant to be beatable by anyone; ULTIMATE is the one step up — a
+wall that also seeks pickups.
 
 ## Bot-AI integration points (v1: cheap four + pickups)
 
