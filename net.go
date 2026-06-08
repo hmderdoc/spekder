@@ -47,6 +47,46 @@ func connectArena(vehicle int) (*netSession, error) {
 	return ns, nil
 }
 
+// publishMap uploads an author map to the configured arena's repository. It's a
+// one-shot connection: HELLO (with the publish sentinel, so no tank spawns) ->
+// MsgPublish -> MsgPubAck. Returns the server's status message.
+func publishMap(m gm.Map) (string, error) {
+	ini := loadINI(defaultINIPath())
+	host := ini["server"]
+	if host == "" {
+		return "", &netErr{"no arena server configured (set server= in spekder.ini)"}
+	}
+	port := ini["port"]
+	if port == "" {
+		port = "7700"
+	}
+	bbsid, handle := door32Identity("DOOR32.SYS")
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 3*time.Second)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	if err := proto.WriteMsg(conn, proto.EncodeHello(ini["token"], bbsid, handle, proto.PublishVehicle)); err != nil {
+		return "", err
+	}
+	if err := proto.WriteMsg(conn, proto.EncodePublish(m)); err != nil {
+		return "", err
+	}
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	msg, err := proto.ReadMsg(conn)
+	if err != nil {
+		return "", err
+	}
+	ok, text, good := proto.DecodePubAck(msg)
+	if !good {
+		return "", &netErr{"unexpected reply from server"}
+	}
+	if !ok {
+		return "", &netErr{text}
+	}
+	return text, nil
+}
+
 type stamped struct {
 	t       time.Time
 	tanks   []gm.TankSnap

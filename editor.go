@@ -147,7 +147,7 @@ const (
 	edSelect // selecting/editing a placed object
 )
 
-var fileMenu = []string{"SAVE", "LOAD", "PLAYTEST", "NEW", "BACK"}
+var fileMenu = []string{"SAVE", "LOAD", "PLAYTEST", "PUBLISH", "NEW", "BACK"}
 
 // ---------------------------------------------------------------------------
 // selection + field editing
@@ -460,6 +460,20 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 								rebuild()
 								mode = edNav
 							}
+						case "PUBLISH":
+							if gm.FatalIssues(gm.ValidateMap(m)) {
+								setStatus("fix errors before publishing")
+							} else {
+								// One blocking network round-trip; show a notice first.
+								fmt.Fprintf(w, "\x1b[2;1H\x1b[0;1;33m publishing %s ... \x1b[0m", clip(m.Name, cols-14))
+								w.Flush()
+								if msg, err := publishMap(m); err != nil {
+									setStatus("publish failed: " + err.Error())
+								} else {
+									setStatus(msg)
+								}
+							}
+							mode, prev = edNav, nil
 						case "NEW":
 							m = gm.Map{Name: "UNTITLED", Size: 20, Spawns: []gm.V3{{X: -14, Z: -14}, {X: 14, Z: 14}}}
 							rebuild()

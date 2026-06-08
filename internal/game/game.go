@@ -350,6 +350,21 @@ func LoadMapDir(dir string) int {
 	return n
 }
 
+// UpsertMap adds m to the pool (so it joins rotation/selection), replacing any
+// existing map with the same name; returns its index. Used by the arena server to
+// accept a published map live without a restart. Not concurrency-safe: the caller
+// must hold whatever lock guards World/Maps access.
+func UpsertMap(m Map) int {
+	for i := range Maps {
+		if Maps[i].Name == m.Name {
+			Maps[i] = m
+			return i
+		}
+	}
+	Maps = append(Maps, m)
+	return len(Maps) - 1
+}
+
 // ParseMapJSON decodes one map file's bytes into a Map. Exported so tools (the
 // mapcheck CLI, the future editor) can load author maps outside the embed path.
 func ParseMapJSON(data []byte) (Map, error) {

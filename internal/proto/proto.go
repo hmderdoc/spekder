@@ -18,7 +18,13 @@ const (
 	MsgInput   = 0x10 // client->server: held-button bitfield
 	MsgState   = 0x20 // server->client: full snapshot
 	MsgMap     = 0x21 // server->client: full map definition (on join / map change)
+	MsgPublish = 0x30 // client->server: publish an author map to the arena repo
+	MsgPubAck  = 0x31 // server->client: publish result (ok flag + message)
 )
+
+// PublishVehicle is the HELLO vehicle sentinel marking a publish-only connection
+// (no tank is spawned; the server reads one MsgPublish and replies MsgPubAck).
+const PublishVehicle = 0xFF
 
 const maxMsg = 1 << 20
 
@@ -322,6 +328,43 @@ func DecodeMap(p []byte) (gm.Map, bool) {
 		return gm.Map{}, false
 	}
 	return m, true
+}
+
+// ---- PUBLISH ----
+
+// EncodePublish wraps a map as a publish request (same body as MsgMap).
+func EncodePublish(m gm.Map) []byte {
+	b := EncodeMap(m)
+	b[0] = MsgPublish
+	return b
+}
+
+// DecodePublish reads a publish request back into a map.
+func DecodePublish(p []byte) (gm.Map, bool) {
+	if len(p) == 0 || p[0] != MsgPublish {
+		return gm.Map{}, false
+	}
+	q := make([]byte, len(p))
+	copy(q, p)
+	q[0] = MsgMap // reuse the map decoder
+	return DecodeMap(q)
+}
+
+func EncodePubAck(ok bool, msg string) []byte {
+	b := []byte{MsgPubAck, 0}
+	if ok {
+		b[1] = 1
+	}
+	return appendStr(b, msg)
+}
+
+func DecodePubAck(p []byte) (ok bool, msg string, good bool) {
+	if len(p) < 2 || p[0] != MsgPubAck {
+		return false, "", false
+	}
+	ok = p[1] == 1
+	msg, _, good = readStr(p, 2)
+	return
 }
 
 // ---- STATE ----

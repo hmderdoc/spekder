@@ -9,6 +9,9 @@ import (
 	"flag"
 	"log"
 	"net"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,9 +32,10 @@ type client struct {
 }
 
 type server struct {
-	token string
+	token   string
+	mapsDir string // where published maps are written
 
-	mu      sync.Mutex // guards world + clients (all world mutation happens here)
+	mu      sync.Mutex // guards world + clients + the map pool (all mutation here)
 	world   *gm.World
 	clients map[int]*client
 	nextID  int
@@ -47,6 +51,10 @@ func (s *server) handle(conn net.Conn) {
 	token, bbsid, handle, vehicle, ok := proto.DecodeHello(hello)
 	if !ok || token != s.token {
 		log.Printf("rejected %v (bad hello/token)", conn.RemoteAddr())
+		return
+	}
+	if vehicle == proto.PublishVehicle { // publish-only connection: no tank
+		s.handlePublish(conn, bbsid, handle)
 		return
 	}
 	conn.SetReadDeadline(time.Time{})
@@ -83,6 +91,58 @@ func (s *server) handle(conn net.Conn) {
 	}
 	s.drop(id, tank)
 	log.Printf("leave: tank %d (%d online)", tank, len(s.clients))
+}
+
+// handlePublish receives one map from a publish-only connection, validates it,
+// persists it to the maps repo (keyed by BBS id so peers don't collide), adds it
+// to the live pool, and replies with a status. Open/trusted: any door with the
+// connect token can publish.
+func (s *server) handlePublish(conn net.Conn, bbsid, handle string) {
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	msg, err := proto.ReadMsg(conn)
+	if err != nil {
+		return
+	}
+	m, ok := proto.DecodePublish(msg)
+	if !ok {
+		_ = proto.WriteMsg(conn, proto.EncodePubAck(false, "could not decode map"))
+		return
+	}
+	if gm.FatalIssues(gm.ValidateMap(m)) {
+		_ = proto.WriteMsg(conn, proto.EncodePubAck(false, "map has fatal errors; fix and retry"))
+		return
+	}
+	fname := pubSlug(bbsid) + "-" + pubSlug(m.Name) + ".json"
+	data, err := gm.MapJSON(m)
+	if err != nil {
+		_ = proto.WriteMsg(conn, proto.EncodePubAck(false, "encode failed"))
+		return
+	}
+	if err := os.MkdirAll(s.mapsDir, 0o755); err == nil {
+		_ = os.WriteFile(filepath.Join(s.mapsDir, fname), data, 0o644)
+	}
+	s.mu.Lock()
+	idx := gm.UpsertMap(m)
+	s.mu.Unlock()
+	log.Printf("publish: %q@%q -> %q (pool index %d, file %s)", handle, bbsid, m.Name, idx, fname)
+	_ = proto.WriteMsg(conn, proto.EncodePubAck(true, "published "+m.Name+" to the arena"))
+}
+
+// pubSlug makes a filename-safe fragment from a name/id.
+func pubSlug(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == ' ' || r == '-' || r == '_':
+			b.WriteRune('-')
+		}
+	}
+	if b.Len() == 0 {
+		return "x"
+	}
+	return b.String()
 }
 
 func (s *server) drop(id, tank int) {
@@ -164,6 +224,7 @@ func main() {
 	world.Lobby = true // server arenas run the between-match vote lobby + rotation
 	s := &server{
 		token:   *token,
+		mapsDir: *mapsDir,
 		world:   world,
 		clients: make(map[int]*client),
 	}
