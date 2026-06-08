@@ -399,15 +399,22 @@ const (
 	pitchRate        = 1.1   // player gun-elevation speed (rad/sec)
 	pitchMax         = 0.70  // max elevation (aim up), ~40 deg
 	pitchMin         = -0.50 // max depression (aim down), ~-29 deg
-	fireDelay        = 0.55
-	jumpSpeed        = 8.5  // upward launch velocity (units/sec)
-	gravity          = 24.0 // downward acceleration (units/sec^2)
-	projSpeed        = 24.0
-	projLife         = 2.4
-	projDmg          = 34
-	tankMaxHP        = 100
-	hitRadius        = 1.15
-	tankBodyTop      = 1.9 // top of a tank's hittable body above its feet (×vehicle scale)
+
+	// Aim assist (sticky aim): when the reticle is within these angular windows of
+	// an enemy on both axes, the turret eases onto the firing solution at
+	// assistRate (gradual, not a snap). Outside the windows, aiming is fully manual.
+	assistYawWin   = 0.13 // rad (~7.5 deg)
+	assistPitchWin = 0.13
+	assistRate     = 1.1 // rad/sec the assist closes the gap
+	fireDelay      = 0.55
+	jumpSpeed      = 8.5  // upward launch velocity (units/sec)
+	gravity        = 24.0 // downward acceleration (units/sec^2)
+	projSpeed      = 24.0
+	projLife       = 2.4
+	projDmg        = 34
+	tankMaxHP      = 100
+	hitRadius      = 1.15
+	tankBodyTop    = 1.9 // top of a tank's hittable body above its feet (×vehicle scale)
 
 	ArenaA = 22.0 // default playfield half-extent (maps may override via Size)
 
@@ -921,8 +928,12 @@ type World struct {
 	entities []Entity // runtime trait-objects, instanced from ActiveMap().Entities
 	zones    []Zone   // King of the Hill control zones (when the ruleset uses them)
 
-	bots BotProfile // active difficulty profile (bot AI reads it; default NORMAL)
+	bots      BotProfile // active difficulty profile (bot AI reads it; default NORMAL)
+	assistAim bool       // sticky aim assist for human players (default on)
 }
+
+// SetAimAssist toggles sticky aim assist for human players.
+func (w *World) SetAimAssist(on bool) { w.assistAim = on }
 
 // SetDifficulty sets the active bot profile; takes effect at the next match start
 // (when bots re-roll their per-bot AI). Offline play sets this from the user's
@@ -1163,7 +1174,7 @@ func rampHeight(r Ramp, x, z float64) (float64, bool) {
 // match starts in a countdown.
 func NewWorld(numBots int, mode Mode) *World {
 	w := &World{Mode: mode, Phase: PhaseCountdown, Timer: countdownTime, WinnerID: -1,
-		bots: ProfileFor(DiffNormal)} // gentler default; SetDifficulty overrides
+		bots: ProfileFor(DiffNormal), assistAim: true} // gentler default; setters override
 	if len(Maps) > 0 {
 		w.MapIdx = rand.Intn(len(Maps)) // start on a random map, not always the empty one
 	}
@@ -2233,6 +2244,79 @@ func (w *World) simulate(dt float64, inputs map[int]Input) {
 	}
 }
 
+// assistAimStep is sticky aim assist: if the player's reticle is already within
+// the assist windows of an enemy (both yaw and pitch), and there's line of sight,
+// ease the turret onto the exact firing solution at assistRate (gradual). It never
+// drags the aim across the screen or picks targets - only finishes a shot the
+// player is already lined up on, fixing the discrete-arrow-step overshoot.
+func (w *World) assistAimStep(i int, dt float64) {
+	if !w.assistAim {
+		return
+	}
+	t := &w.Tanks[i]
+	aimYaw := t.HullYaw + t.TurretYaw
+	muzzleY := t.Pos.Y + EyeHeight
+	teamMode := w.rules().Teams == 2
+	best, bestOff := -1, assistYawWin
+	var wantYaw, wantPitch float64
+	for j := range w.Tanks {
+		e := &w.Tanks[j]
+		if j == i || e.Dead || e.gone || e.cloakT > 0 {
+			continue
+		}
+		if teamMode && e.Team == t.Team {
+			continue
+		}
+		dx, dz := e.Pos.X-t.Pos.X, e.Pos.Z-t.Pos.Z
+		dist := math.Hypot(dx, dz)
+		if dist > botFireRange {
+			continue
+		}
+		wy := math.Atan2(dx, dz)
+		yoff := math.Abs(angDiff(wy, aimYaw))
+		if yoff >= bestOff {
+			continue
+		}
+		wp := clampPitch(math.Atan2((e.Pos.Y+turretAimHeight)-muzzleY, dist))
+		if math.Abs(wp-t.TurretPitch) >= assistPitchWin {
+			continue
+		}
+		if w.aimBlocked(t.Pos, e.Pos) {
+			continue // don't assist onto an enemy behind cover
+		}
+		best, bestOff, wantYaw, wantPitch = j, yoff, wy, wp
+	}
+	if best < 0 {
+		return
+	}
+	t.TurretYaw = turnToward(t.TurretYaw, angDiff(wantYaw, t.HullYaw), assistRate*dt)
+	t.TurretPitch = clampPitch(approach(t.TurretPitch, wantPitch, assistRate*dt))
+}
+
+// approach moves cur toward target by at most step.
+func approach(cur, target, step float64) float64 {
+	if d := target - cur; d > step {
+		return cur + step
+	} else if d < -step {
+		return cur - step
+	}
+	return target
+}
+
+// aimBlocked reports whether a tall obstacle sits on the line between two points
+// (a cheap line-of-sight check at eye height for aim assist).
+func (w *World) aimBlocked(from, to V3) bool {
+	const steps = 8
+	for k := 1; k < steps; k++ {
+		f := float64(k) / float64(steps)
+		p := V3{from.X + (to.X-from.X)*f, EyeHeight, from.Z + (to.Z-from.Z)*f}
+		if w.hitObstacle(p) {
+			return true
+		}
+	}
+	return false
+}
+
 func (w *World) applyInput(i int, in Input, dt float64) {
 	t := &w.Tanks[i]
 	v := veh(t.Vehicle)
@@ -2263,6 +2347,8 @@ func (w *World) applyInput(i int, in Input, dt float64) {
 	}
 	if in.Recenter {
 		t.TurretYaw, t.TurretPitch = 0, 0 // snap turret to hull-forward and level
+	} else {
+		w.assistAimStep(i, dt) // sticky aim: ease onto a near-reticle enemy
 	}
 	clampArena(&t.Pos, w.half())
 	w.collide(&t.Pos)

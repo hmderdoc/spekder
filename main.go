@@ -865,22 +865,38 @@ func drawListMenu(w *bufio.Writer, cols, rows int, title string, names, blurbs [
 	w.Flush()
 }
 
-// runOptions is the OPTIONS sub-menu: Difficulty (live), Map Editor + Controls
-// (coming soon). Returns the (possibly changed) difficulty.
-func runOptions(w *bufio.Writer, cols, rows int, ip *input, dropfile string, diff gm.Difficulty) gm.Difficulty {
-	names := []string{"DIFFICULTY", "MAP EDITOR", "CONTROLS", "BACK"}
-	blurbs := []string{"", "Build and edit arenas.", "Customize key bindings.", "Return to the main menu."}
-	dim := []bool{false, true, true, false}
+// runOptions is the OPTIONS sub-menu: Difficulty + Aim Assist (live), Map Editor
+// + Controls (coming soon). Mutates and persists the user's settings in place.
+func runOptions(w *bufio.Writer, cols, rows int, ip *input, dropfile string, s *userSettings) {
+	const (
+		iDiff = iota
+		iAssist
+		iEditor
+		iControls
+		iBack
+	)
+	names := []string{"DIFFICULTY", "AIM ASSIST", "MAP EDITOR", "CONTROLS", "BACK"}
+	blurbs := []string{"", "", "Build and edit arenas.", "Customize key bindings.", "Return to the main menu."}
+	dim := []bool{false, false, true, true, false}
+	onOff := func(b bool) string {
+		if b {
+			return "ON"
+		}
+		return "OFF"
+	}
 	sel := 0
 	draw := func() {
-		blurbs[0] = "Set bot skill (current: " + diff.String() + ")."
+		names[iDiff] = "DIFFICULTY: " + s.difficulty.String()
+		names[iAssist] = "AIM ASSIST: " + onOff(s.aimAssist)
+		blurbs[iDiff] = "Bot skill level."
+		blurbs[iAssist] = "Sticky aim: ease onto a target your reticle is near."
 		drawListMenu(w, cols, rows, "OPTIONS", names, blurbs, dim, sel)
 	}
 	draw()
 	for {
 		select {
 		case <-ip.quitCh:
-			return diff // propagate quit; the main menu will exit
+			return // propagate quit; the main menu will exit
 		case k := <-ip.events:
 			switch k {
 			case mkUp:
@@ -890,14 +906,19 @@ func runOptions(w *bufio.Writer, cols, rows int, ip *input, dropfile string, dif
 				sel = (sel + 1) % len(names)
 				draw()
 			case mkLeft:
-				return diff // back
+				return // back
 			case mkEnter:
 				switch sel {
-				case 0:
-					diff = runDifficulty(w, cols, rows, ip, dropfile, diff)
+				case iDiff:
+					s.difficulty = runDifficulty(w, cols, rows, ip, s.difficulty)
+					saveUserSettings(dropfile, *s)
 					draw()
-				case 3:
-					return diff
+				case iAssist:
+					s.aimAssist = !s.aimAssist
+					saveUserSettings(dropfile, *s)
+					draw()
+				case iBack:
+					return
 				default:
 					draw() // soon: no-op
 				}
@@ -907,7 +928,7 @@ func runOptions(w *bufio.Writer, cols, rows int, ip *input, dropfile string, dif
 }
 
 // runDifficulty is the tier picker; ENTER saves the choice for this caller.
-func runDifficulty(w *bufio.Writer, cols, rows int, ip *input, dropfile string, cur gm.Difficulty) gm.Difficulty {
+func runDifficulty(w *bufio.Writer, cols, rows int, ip *input, cur gm.Difficulty) gm.Difficulty {
 	tiers := gm.Difficulties()
 	names := make([]string, len(tiers))
 	blurbs := make([]string, len(tiers))
@@ -941,9 +962,7 @@ func runDifficulty(w *bufio.Writer, cols, rows int, ip *input, dropfile string, 
 			case mkLeft:
 				return cur // back without changing
 			case mkEnter:
-				cur = tiers[sel]
-				saveUserDifficulty(dropfile, cur)
-				return cur
+				return tiers[sel] // caller persists
 			}
 		}
 	}
@@ -1307,8 +1326,8 @@ func main() {
 	splash(w, cols, rows, ip)
 
 	// The menu drives everything: pick a single-player mode, join the arena, or
-	// open OPTIONS. Difficulty is loaded per-BBS-user and editable in OPTIONS.
-	difficulty := loadUserDifficulty(dropfile)
+	// open OPTIONS. Preferences are loaded per-BBS-user and editable in OPTIONS.
+	settings := loadUserSettings(dropfile)
 	var sess session
 	note := ""
 	for {
@@ -1318,7 +1337,7 @@ func main() {
 			return
 		}
 		if choice.options {
-			difficulty = runOptions(w, cols, rows, ip, dropfile, difficulty)
+			runOptions(w, cols, rows, ip, dropfile, &settings)
 			note = ""
 			continue
 		}
@@ -1328,7 +1347,7 @@ func main() {
 			return
 		}
 		if !choice.online {
-			sess = newOfflineSession(offlineBots, choice.mode, vehicle, difficulty)
+			sess = newOfflineSession(offlineBots, choice.mode, vehicle, settings.difficulty, settings.aimAssist)
 			break
 		}
 		ns, err := connectArena(vehicle)

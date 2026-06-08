@@ -175,7 +175,7 @@ func TestSolidCollision(t *testing.T) {
 // TestTrampolineLaunches: a tank resting on a bounce pad gets a fixed upward
 // velocity, and is re-launched after it comes back down (not while still rising).
 func TestTrampolineLaunches(t *testing.T) {
-	w, me := startDMMap(t, 0, "OPEN")
+	w, me := startDMMap(t, 0, "OPEN GRID")
 	w.Tanks[me].Pos = V3{X: 0, Y: 0, Z: 0}
 	w.Tanks[me].vy = 0
 	w.entities = []Entity{{
@@ -227,7 +227,7 @@ func firstBot(w *World) int {
 // TestPitchedShotHeightMatters: with height-aware hit detection, a flat shot
 // passes under an elevated target, but a shot at the target's height connects.
 func TestPitchedShotHeightMatters(t *testing.T) {
-	w, me := startDMMap(t, 1, "OPEN")
+	w, me := startDMMap(t, 1, "OPEN GRID")
 	bot := firstBot(w)
 	if bot < 0 {
 		t.Skip("no bot")
@@ -251,7 +251,7 @@ func TestPitchedShotHeightMatters(t *testing.T) {
 // TestTurretDepressesAtGroundTarget: an elevated turret aims its gun DOWN (pitch
 // < 0) toward a ground tank, instead of firing flat over it.
 func TestTurretDepressesAtGroundTarget(t *testing.T) {
-	w, me := startDMMap(t, 0, "OPEN")
+	w, me := startDMMap(t, 0, "OPEN GRID")
 	w.Tanks[me].Pos = V3{X: 0, Y: 0, Z: 6}
 	w.Tanks[me].guard, w.Tanks[me].cloakT = 0, 0
 	w.entities = []Entity{{

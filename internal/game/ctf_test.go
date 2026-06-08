@@ -77,14 +77,18 @@ func TestCTFPickupDropReturn(t *testing.T) {
 		t.Fatalf("flag should be dropped with a pending return timer: %+v", ef)
 	}
 
-	// Let the drop timer expire; the flag returns home.
+	// Let the drop timer expire; the flag returns home. Remove the bots first so
+	// none picks up the dropped flag mid-return - this test isolates the
+	// auto-return mechanic, not contested play.
+	for i := range w.Tanks {
+		if w.Tanks[i].Bot {
+			w.Tanks[i].gone, w.Tanks[i].Dead = true, true
+		}
+	}
 	drive(w, flagReturnTime+1, 1.0/30, map[int]Input{me: {}})
 	ef = w.enemyFlag(0)
-	if !ef.atHome {
-		// The match may have ended; if so just ensure it didn't crash. Otherwise fail.
-		if w.Phase == PhaseActive {
-			t.Fatalf("dropped flag should have returned home, got %+v", ef)
-		}
+	if !ef.atHome && w.Phase == PhaseActive {
+		t.Fatalf("dropped flag should have returned home, got %+v", ef)
 	}
 }
 
