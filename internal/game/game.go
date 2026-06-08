@@ -128,7 +128,7 @@ type ZoneTrait struct {
 
 // SchemaVersion is the current map-file format version. Authored maps may set
 // "version"; 0 (absent) is treated as 1 for legacy files.
-const SchemaVersion = 1
+const SchemaVersion = 2 // v2 added the optional per-map Rules block
 
 // Map is a static arena layout. Size is the arena half-extent (0 = default);
 // arenas are square. Pickups reserves power-up spawn spots. Entities are
@@ -143,6 +143,17 @@ type Map struct {
 	Spawns    []V3
 	Pickups   []V3
 	Entities  []Entity
+	Rules     *MapRules // optional per-map victory conditions (nil = implied by objectives)
+}
+
+// MapRules lets a map override how it's played: its mode and the win numbers.
+// Each field uses -1 to mean "use the mode's default", so a v1 map (no Rules)
+// behaves exactly as before. Set by the editor's RULES panel.
+type MapRules struct {
+	Mode      int     // -1 = auto (NaturalMode); else a mode index
+	TimeLimit float64 // -1 = default; 0 = endless; >0 = match seconds
+	Target    int     // -1 = default; else the win count (frags/captures/hold-points)
+	Lives     int     // -1 = default; 0 = infinite; >0 = lives per tank
 }
 
 // NewEntities returns a fresh runtime copy of the map's authored entities with
@@ -246,6 +257,14 @@ type jmap struct {
 	Spawns    [][2]float64 `json:"spawns"`
 	Pickups   [][2]float64 `json:"pickups"`
 	Entities  []jentity    `json:"entities"`
+	Rules     *jrules      `json:"rules,omitempty"`
+}
+
+type jrules struct {
+	Mode      int     `json:"mode"`
+	TimeLimit float64 `json:"timeLimit"`
+	Target    int     `json:"target"`
+	Lives     int     `json:"lives"`
 }
 
 func (je jentity) toEntity() Entity {
@@ -402,6 +421,9 @@ func (jm jmap) toMap() Map {
 	for _, e := range jm.Entities {
 		m.Entities = append(m.Entities, e.toEntity())
 	}
+	if jm.Rules != nil {
+		m.Rules = &MapRules{Mode: jm.Rules.Mode, TimeLimit: jm.Rules.TimeLimit, Target: jm.Rules.Target, Lives: jm.Rules.Lives}
+	}
 	return m
 }
 
@@ -473,6 +495,9 @@ func (m Map) toJmap() jmap {
 	}
 	for _, e := range m.Entities {
 		jm.Entities = append(jm.Entities, e.toJEntity())
+	}
+	if m.Rules != nil {
+		jm.Rules = &jrules{Mode: m.Rules.Mode, TimeLimit: m.Rules.TimeLimit, Target: m.Rules.Target, Lives: m.Rules.Lives}
 	}
 	return jm
 }
@@ -635,7 +660,30 @@ func RulesetFor(m Mode) Ruleset {
 	return Rulesets[m]
 }
 
-func (w *World) rules() Ruleset { return RulesetFor(w.Mode) }
+// rules returns the effective ruleset: the base for the current mode, with the
+// active map's MapRules overrides applied (time limit, win target, lives). Every
+// win/time/lives check flows through here, so the overrides take effect globally.
+func (w *World) rules() Ruleset {
+	base := RulesetFor(w.Mode)
+	mr := w.ActiveMap().Rules
+	if mr == nil {
+		return base
+	}
+	if mr.TimeLimit >= 0 {
+		base.TimeLimit = mr.TimeLimit
+	}
+	if mr.Lives >= 0 {
+		base.Lives = mr.Lives
+	}
+	if mr.Target > 0 && len(base.Win) > 0 {
+		win := append([]WinCond(nil), base.Win...) // copy: never mutate the shared Rulesets table
+		for i := range win {
+			win[i].Count = mr.Target
+		}
+		base.Win = win
+	}
+	return base
+}
 
 type Phase int
 
@@ -1483,6 +1531,15 @@ func NaturalMode(m Map) Mode {
 	}
 }
 
+// EffectiveMode is the mode a map plays in: its explicit Rules.Mode if set, else
+// the mode implied by its objectives (NaturalMode).
+func EffectiveMode(m Map) Mode {
+	if m.Rules != nil && m.Rules.Mode >= 0 && m.Rules.Mode < len(Rulesets) {
+		return Mode(m.Rules.Mode)
+	}
+	return NaturalMode(m)
+}
+
 // pickNextPairing chooses the next (map, mode) from per-map votes: the most-voted
 // map wins (mode = its NaturalMode); with no votes it advances the rotation so an
 // idle arena still cycles. A lone human's vote therefore decides the pairing.
@@ -1506,7 +1563,7 @@ func (w *World) pickNextPairing() (mapIdx int, mode Mode) {
 	if best < 0 {
 		best = (w.MapIdx + 1) % len(Maps) // no votes: rotate
 	}
-	return best, NaturalMode(Maps[best])
+	return best, EffectiveMode(Maps[best])
 }
 
 func (w *World) applyVotes(inputs map[int]Input) {

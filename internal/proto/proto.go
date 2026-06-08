@@ -181,6 +181,15 @@ func EncodeMap(m gm.Map) []byte {
 	for i := range m.Entities {
 		w.entity(m.Entities[i])
 	}
+	if m.Rules != nil { // optional per-map victory conditions
+		w.u8(1)
+		w.f32(float64(m.Rules.Mode))
+		w.f32(m.Rules.TimeLimit)
+		w.f32(float64(m.Rules.Target))
+		w.f32(float64(m.Rules.Lives))
+	} else {
+		w.u8(0)
+	}
 	return w.b
 }
 
@@ -324,6 +333,11 @@ func DecodeMap(p []byte) (gm.Map, bool) {
 	}
 	for n := r.ru16(); n > 0; n-- {
 		m.Entities = append(m.Entities, r.rentity())
+	}
+	if r.i < len(r.b) && r.ru8() == 1 { // optional per-map victory conditions (absent from older servers)
+		m.Rules = &gm.MapRules{
+			Mode: int(r.rf32()), TimeLimit: r.rf32(), Target: int(r.rf32()), Lives: int(r.rf32()),
+		}
 	}
 	if r.err {
 		return gm.Map{}, false

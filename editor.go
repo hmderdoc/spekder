@@ -116,9 +116,12 @@ const (
 	edName   // typing a map name (to save)
 	edLoad   // picking a usermap to load
 	edSelect // selecting/editing a placed object
+	edRules  // editing the map's victory conditions
 )
 
-var fileMenu = []string{"SAVE", "LOAD", "PLAYTEST", "PUBLISH", "NEW", "BACK"}
+var fileMenu = []string{"SAVE", "LOAD", "PLAYTEST", "PUBLISH", "RULES", "NEW", "BACK"}
+
+var ruleFields = []string{"mode", "time", "target", "lives"}
 
 // ---------------------------------------------------------------------------
 // selection + field editing
@@ -333,6 +336,7 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 	setStatus := func(s string) { status, statusT = s, 3.0 }
 	var selList []selRef
 	selIdx, fieldIdx, adjustT := 0, 0, 0.0
+	ruleIdx := 0 // selected field in the RULES panel
 
 	rebuild := func() { buildArena(m); prev = nil }
 
@@ -420,7 +424,7 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 								// Temporarily add the working map, play it, then remove it.
 								idx := len(gm.Maps)
 								gm.Maps = append(gm.Maps, m)
-								sess := newOfflineOnMap(idx, offlineBots, gm.NaturalMode(m), 1, s.difficulty, s.aimAssist)
+								sess := newOfflineOnMap(idx, offlineBots, gm.EffectiveMode(m), 1, s.difficulty, s.aimAssist)
 								quit := playMatch(w, cols, rows, rows3d, rnd, ip, sess)
 								sess.close()
 								gm.Maps = gm.Maps[:idx]
@@ -445,6 +449,11 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 								}
 							}
 							mode, prev = edNav, nil
+						case "RULES":
+							if m.Rules == nil { // start from "all default"
+								m.Rules = &gm.MapRules{Mode: -1, TimeLimit: -1, Target: -1, Lives: -1}
+							}
+							ruleIdx, mode, prev = 0, edRules, nil
 						case "NEW":
 							m = gm.Map{Name: "UNTITLED", Size: 20, Spawns: []gm.V3{{X: -14, Z: -14}, {X: 14, Z: 14}}}
 							rebuild()
@@ -482,6 +491,8 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 						if n := len(fieldsFor(&m, selList[selIdx])); n > 0 {
 							fieldIdx = (fieldIdx - 1 + n) % n
 						}
+					case edRules:
+						ruleIdx = (ruleIdx - 1 + len(ruleFields)) % len(ruleFields)
 					}
 				case mkDown:
 					switch mode {
@@ -497,6 +508,8 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 						if n := len(fieldsFor(&m, selList[selIdx])); n > 0 {
 							fieldIdx = (fieldIdx + 1) % n
 						}
+					case edRules:
+						ruleIdx = (ruleIdx + 1) % len(ruleFields)
 					}
 				case mkLeft:
 					if mode == edSelect && len(selList) > 0 {
@@ -574,6 +587,19 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 				setStatus("deleted")
 			}
 			prevDel = ip.held(aEdDelete)
+		}
+
+		// In rules mode: ,/. adjust the selected victory-condition field (throttled).
+		if mode == edRules && m.Rules != nil {
+			adjustT -= dt
+			if (in.TurretL || in.TurretR) && adjustT <= 0 {
+				adjustT = 0.12
+				dir := 1
+				if in.TurretL {
+					dir = -1
+				}
+				adjustRule(m.Rules, ruleIdx, dir)
+			}
 		}
 
 		if statusT > 0 {
@@ -714,6 +740,8 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 			if len(selList) > 0 {
 				drawEditPanel(w, rows, selLabel(&m, selList[selIdx]), selIdx+1, len(selList), fieldsFor(&m, selList[selIdx]), fieldIdx)
 			}
+		case edRules:
+			drawRulesPanel(w, rows, m, ruleIdx)
 		}
 		if statusT > 0 {
 			fmt.Fprintf(w, "\x1b[2;1H\x1b[0;1;33m %s \x1b[0m", clip(status, cols-2))
@@ -855,6 +883,8 @@ func drawEditorBar(w *bufio.Writer, cols, rows int, m gm.Map, topdown bool, mode
 		help = "up/dn pick   ENTER choose   BKSP cancel"
 	case edSelect:
 		help = "</> object   up/dn field   ,/. adjust   X delete   BKSP done"
+	case edRules:
+		help = "up/dn field   ,/. adjust   BKSP done"
 	default:
 		help = "WASD fly  arrows look  R/F up/down  ENTER catalog  E edit  G grid  M file  TAB view  BKSP exit"
 	}
@@ -902,6 +932,86 @@ func drawEditPanel(w *bufio.Writer, rows int, label string, n, total int, fields
 			style = "\x1b[1;30;46m"
 		}
 		fmt.Fprintf(w, "\x1b[%d;2H%s %-12s %7.2f \x1b[0m", row, style, f.name, f.get())
+	}
+}
+
+// adjustRule steps one victory-condition field; -1 means "default" for each, with
+// the sentinels stepping naturally (time: default->endless->15s..., target:
+// default->1->2..., lives: default->infinite->1...).
+func adjustRule(r *gm.MapRules, idx, dir int) {
+	switch idx {
+	case 0: // mode: -1 (auto) .. last ruleset
+		r.Mode = clampI(r.Mode+dir, -1, len(gm.Rulesets)-1)
+	case 1: // time seconds: -1 default, 0 endless, then 15s steps
+		switch {
+		case dir > 0 && r.TimeLimit < 0:
+			r.TimeLimit = 0
+		case dir > 0:
+			r.TimeLimit += 15
+		case dir < 0 && r.TimeLimit <= 0:
+			r.TimeLimit = -1
+		default:
+			if r.TimeLimit -= 15; r.TimeLimit < 0 {
+				r.TimeLimit = 0
+			}
+		}
+	case 2: // target: -1 default, then >=1
+		switch {
+		case dir > 0 && r.Target < 1:
+			r.Target = 1
+		case dir > 0:
+			r.Target++
+		case dir < 0 && r.Target <= 1:
+			r.Target = -1
+		default:
+			r.Target--
+		}
+	case 3: // lives: -1 default, 0 infinite, then >=1
+		r.Lives = clampI(r.Lives+dir, -1, 99)
+	}
+}
+
+// drawRulesPanel shows the map's victory-condition fields; "default" defers to the
+// mode, and the header notes the mode the map will actually play (incl. auto).
+func drawRulesPanel(w *bufio.Writer, rows int, m gm.Map, sel int) {
+	r := m.Rules
+	if r == nil {
+		return
+	}
+	modeS := "AUTO (" + gm.EffectiveMode(m).String() + ")"
+	if r.Mode >= 0 && r.Mode < len(gm.Rulesets) {
+		modeS = gm.Mode(r.Mode).String()
+	}
+	timeS := "default"
+	if r.TimeLimit == 0 {
+		timeS = "endless"
+	} else if r.TimeLimit > 0 {
+		timeS = fmt.Sprintf("%.0fs", r.TimeLimit)
+	}
+	targetS := "default"
+	if r.Target > 0 {
+		targetS = fmt.Sprintf("%d", r.Target)
+	}
+	livesS := "default"
+	if r.Lives == 0 {
+		livesS = "infinite"
+	} else if r.Lives > 0 {
+		livesS = fmt.Sprintf("%d", r.Lives)
+	}
+	vals := []string{modeS, timeS, targetS, livesS}
+
+	row := 3
+	fmt.Fprintf(w, "\x1b[%d;2H\x1b[1;97mMAP RULES (victory)\x1b[0m", row)
+	for i, name := range ruleFields {
+		row++
+		if row >= rows {
+			break
+		}
+		style := "\x1b[0;37m"
+		if i == sel {
+			style = "\x1b[1;30;46m"
+		}
+		fmt.Fprintf(w, "\x1b[%d;2H%s %-8s %-18s \x1b[0m", row, style, name, vals[i])
 	}
 }
 

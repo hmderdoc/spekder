@@ -13,6 +13,7 @@ func TestMapJSONRoundTrip(t *testing.T) {
 		Scenery:   []Prop{{Kind: "obelisk", Pos: V3{}, H: 7, Color: [3]float64{0.8, 0.3, 0.6}}},
 		Spawns:    []V3{{X: -14, Z: -14}, {X: 14, Z: 14}},
 		Pickups:   []V3{{X: 0, Z: 10}},
+		Rules:     &MapRules{Mode: int(ModeCTF), TimeLimit: 120, Target: 5, Lives: 3},
 		Entities: []Entity{
 			{Kind: "turret", Pos: V3{Y: 2}, Half: V3{X: 0.7, Y: 0.3, Z: 0.7}, Solid: true,
 				Turret:   &TurretTrait{Range: 22, FireDelay: 1.4, Dmg: 16, TurnRate: 1.6},
@@ -57,6 +58,9 @@ func TestMapJSONRoundTrip(t *testing.T) {
 	}
 	if got.Entities[3].Zone == nil || got.Entities[3].Zone.Capture != 5 {
 		t.Fatalf("zone lost: %+v", got.Entities[3])
+	}
+	if got.Rules == nil || got.Rules.Mode != int(ModeCTF) || got.Rules.TimeLimit != 120 || got.Rules.Target != 5 || got.Rules.Lives != 3 {
+		t.Fatalf("rules lost: %+v", got.Rules)
 	}
 	if len(ValidateMap(got)) != 0 {
 		t.Fatalf("round-tripped map should validate clean: %v", ValidateMap(got))

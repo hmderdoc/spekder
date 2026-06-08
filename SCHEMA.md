@@ -28,7 +28,7 @@ the test suite for the embedded set, so this document and the validator agree.
 
 | field       | type             | notes |
 |-------------|------------------|-------|
-| `version`   | int              | schema version (current: 1). Absent = 1. |
+| `version`   | int              | schema version (current: 2). Absent = 1. |
 | `name`      | string           | **required**; shown in selection, sent on the wire. |
 | `size`      | number           | arena half-extent. 0/absent = 22. |
 | `obstacles` | array of Box     | solid, collidable blocks (cover, walls, pillars). |
@@ -37,6 +37,24 @@ the test suite for the embedded set, so this document and the validator agree.
 | `spawns`    | array of `[x,z]` | tank start points. 0 = random fallback. |
 | `pickups`   | array of `[x,z]` | reserved power-up drop spots. |
 | `entities`  | array of Entity  | trait-driven objects (turrets, hazards, …). |
+| `rules`     | Rules (optional) | **v2**; per-map victory conditions. Absent = implied by objectives. |
+
+### Rules (v2, optional)
+
+Overrides how the map is played. Every field uses `-1` to mean "use the mode's
+default", so a v1 map (no `rules`) behaves exactly as before. Set by the editor's
+RULES panel (FILE → RULES).
+
+| field       | type   | notes |
+|-------------|--------|-------|
+| `mode`      | int    | mode index; `-1` = auto (implied by objectives — team flags→CTF, zone→KotH, neutral flags→Flag Run, else Deathmatch). |
+| `timeLimit` | number | match seconds; `-1` = mode default, `0` = endless. |
+| `target`    | int    | win count (frags / captures / hold-points); `-1` = default. |
+| `lives`     | int    | per-tank lives; `-1` = default, `0` = infinite. |
+
+The mode (explicit or auto) determines the *win family* (frags/captures/collect/
+elimination/hold-score); `target`/`timeLimit`/`lives` tune the numbers. Applied
+both offline and online (the server honors a published map's rules).
 
 ### Box (obstacle)
 ```json

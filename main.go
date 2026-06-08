@@ -1499,7 +1499,11 @@ func main() {
 				continue // back to the main menu
 			}
 			if mapIdx >= 0 {
-				sess = newOfflineOnMap(mapIdx, offlineBots, choice.mode, vehicle, settings.difficulty, settings.aimAssist)
+				mode := choice.mode // a map with an explicit Rules.Mode plays in that mode
+				if r := gm.Maps[mapIdx].Rules; r != nil && r.Mode >= 0 {
+					mode = gm.Mode(r.Mode)
+				}
+				sess = newOfflineOnMap(mapIdx, offlineBots, mode, vehicle, settings.difficulty, settings.aimAssist)
 			} else {
 				sess = newOfflineSession(offlineBots, choice.mode, vehicle, settings.difficulty, settings.aimAssist)
 			}

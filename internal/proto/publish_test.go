@@ -13,6 +13,7 @@ func TestPublishRoundTrip(t *testing.T) {
 		Name: "PUB", Size: 16,
 		Obstacles: []gm.Box{{Pos: gm.V3{X: 1, Y: 1, Z: 1}, Half: gm.V3{X: 1, Y: 1, Z: 1}, Color: [3]float64{0.4, 0.4, 0.5}}},
 		Entities:  []gm.Entity{{Kind: "turret", Pos: gm.V3{Y: 1}, Half: gm.V3{X: 0.7, Y: 1, Z: 0.7}, Turret: &gm.TurretTrait{Range: 20, Dmg: 12, FireDelay: 1.2, TurnRate: 1.5}}},
+		Rules:     &gm.MapRules{Mode: int(gm.ModeFFAKotH), TimeLimit: -1, Target: 80, Lives: -1},
 	}
 	enc := EncodePublish(m)
 	if enc[0] != MsgPublish {
@@ -27,6 +28,9 @@ func TestPublishRoundTrip(t *testing.T) {
 	}
 	if dm.Name != "PUB" || len(dm.Obstacles) != 1 || len(dm.Entities) != 1 || dm.Entities[0].Turret == nil {
 		t.Fatalf("publish round-trip lost data: %+v", dm)
+	}
+	if dm.Rules == nil || dm.Rules.Mode != int(gm.ModeFFAKotH) || dm.Rules.Target != 80 || dm.Rules.TimeLimit != -1 || dm.Rules.Lives != -1 {
+		t.Fatalf("publish round-trip lost rules: %+v", dm.Rules)
 	}
 
 	for _, tc := range []struct {
