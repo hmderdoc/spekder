@@ -36,6 +36,9 @@ import (
 // version is stamped at build time by the release workflow (-X main.version).
 var version = "dev"
 
+// sigCh delivers OS shutdown signals; playMatch watches it to end a match.
+var sigCh chan os.Signal
+
 // dbg, when set, writes a lifecycle log next to the binary (spekder.log) so an
 // unexpected exit is never invisible.
 var dbg *log.Logger
@@ -968,7 +971,7 @@ func runOptions(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *inpu
 					saveUserSettings(dropfile, *s)
 					draw()
 				case iEditor:
-					runEditor(w, cols, rows, rows3d, rnd, ip)
+					runEditor(w, cols, rows, rows3d, rnd, ip, s)
 					draw() // repaint the options menu on return
 				case iBack:
 					return
@@ -1356,10 +1359,6 @@ func main() {
 	rows3d := rows // 3D scene now owns every row (HUD is drawn over the top-left sky)
 
 	rnd := newRenderer(cols, 2*rows3d)
-	var cam Cam // arena geometry is (re)built in the loop when the map changes
-
-	prevHP := -1
-	flash := 0.0
 
 	// Raw mode is set inside openTerm. The input reader blocks in its own
 	// goroutine; Term.Read tolerates the non-blocking inherited door socket.
@@ -1372,8 +1371,8 @@ func main() {
 		restore()
 		fmt.Fprint(term, "\x1b[?7h\x1b[0m\x1b[?25h\x1b[2J\x1b[H")
 	}
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, shutdownSignals...)
+	sigCh = make(chan os.Signal, 1)
+	signal.Notify(sigCh, shutdownSignals...)
 
 	w := bufio.NewWriterSize(term, 1<<16)
 	splash(w, cols, rows, ip)
@@ -1387,7 +1386,6 @@ func main() {
 	// The menu drives everything: pick a single-player mode, join the arena, or
 	// open OPTIONS. Preferences are loaded per-BBS-user and editable in OPTIONS.
 	settings := loadUserSettings(dropfile)
-	var sess session
 	note := ""
 	for {
 		choice := runMenu(w, cols, rows, ip, note)
@@ -1405,20 +1403,35 @@ func main() {
 			cleanup()
 			return
 		}
-		if !choice.online {
+		var sess session
+		if choice.online {
+			ns, err := connectArena(vehicle)
+			if err != nil {
+				note = "Could not reach the arena: " + err.Error()
+				continue
+			}
+			sess = ns
+		} else {
 			sess = newOfflineSession(offlineBots, choice.mode, vehicle, settings.difficulty, settings.aimAssist)
-			break
 		}
-		ns, err := connectArena(vehicle)
-		if err != nil {
-			note = "Could not reach the arena: " + err.Error()
-			continue
+		note = ""
+		quit := playMatch(w, cols, rows, rows3d, rnd, ip, sess)
+		sess.close()
+		if quit {
+			cleanup()
+			return
 		}
-		sess = ns
-		break
+		// mkBack: returned from the match to the menu
 	}
-	defer sess.close()
+}
 
+// playMatch runs one session (offline or arena) to completion, returning true if
+// the player quit the program (Q / OS signal) or false if they backed out to the
+// menu (Backspace). Shared by the main game and the editor's playtest.
+func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, sess session) bool {
+	var cam Cam
+	prevHP := -1
+	flash := 0.0
 	const targetFPS = 30.0
 	frameBudget := time.Second / time.Duration(targetFPS)
 	var prev []byte
@@ -1433,15 +1446,14 @@ func main() {
 	topdown := false
 	lastPhase := gm.PhaseActive
 
-loop:
 	for {
 		select {
 		case <-ip.quitCh:
-			logf("loop exit: input channel closed")
-			break loop
-		case <-sig:
-			logf("loop exit: signal")
-			break loop
+			logf("match exit: input channel closed")
+			return true
+		case <-sigCh:
+			logf("match exit: signal")
+			return true
 		default:
 		}
 		now := time.Now()
@@ -1460,6 +1472,8 @@ loop:
 				case k == mkTab:
 					topdown = !topdown
 					prev = nil // view changed: full repaint
+				case k == mkBack:
+					return false // back out of the match to the menu / editor
 				case lastPhase == gm.PhaseLobby && k == mkLeft:
 					voteMode = cycleVote(voteMode, -1)
 				case lastPhase == gm.PhaseLobby && k == mkRight:
@@ -1577,5 +1591,4 @@ loop:
 			time.Sleep(d)
 		}
 	}
-	cleanup()
 }

@@ -79,6 +79,35 @@ var catItems = []catItem{
 	}},
 }
 
+// playtestMode picks a sensible mode for the working map: CTF if it has team
+// flags, King of the Hill if it has a zone, Flag Run for neutral flags, else
+// Deathmatch.
+func playtestMode(m gm.Map) gm.Mode {
+	hasZone, teamFlag, neutralFlag := false, false, false
+	for _, e := range m.Entities {
+		if e.Zone != nil {
+			hasZone = true
+		}
+		if e.Flag != nil {
+			if e.Flag.Team >= 0 {
+				teamFlag = true
+			} else {
+				neutralFlag = true
+			}
+		}
+	}
+	switch {
+	case teamFlag:
+		return gm.ModeCTF
+	case hasZone:
+		return gm.ModeFFAKotH
+	case neutralFlag:
+		return gm.ModeFlagRun
+	default:
+		return gm.ModeDeathmatch
+	}
+}
+
 func placeFlag(team int) func(m *gm.Map, p gm.V3) {
 	return func(m *gm.Map, p gm.V3) {
 		m.Entities = append(m.Entities, gm.Entity{Kind: "flag", Pos: gm.V3{X: p.X, Z: p.Z}, Half: gm.V3{X: 0.5, Y: 0.5, Z: 0.5},
@@ -100,7 +129,7 @@ const (
 	edSelect // selecting/editing a placed object
 )
 
-var fileMenu = []string{"SAVE", "LOAD", "NEW", "BACK"}
+var fileMenu = []string{"SAVE", "LOAD", "PLAYTEST", "NEW", "BACK"}
 
 // ---------------------------------------------------------------------------
 // selection + field editing
@@ -290,7 +319,7 @@ func clampI(v, lo, hi int) int {
 // views, a catalog palette, ghost preview, and placement (3D gun-sight raycast or
 // top-down cursor). Backspace backs out of each mode (and exits to the menu from
 // nav); Q quits the program.
-func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input) {
+func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, s *userSettings) {
 	m := gm.Map{Name: "UNTITLED", Size: 20, Spawns: []gm.V3{{X: -14, Z: -14}, {X: 14, Z: 14}}}
 	buildArena(m)
 
@@ -384,6 +413,25 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 						case "LOAD":
 							loadList = listUserMaps()
 							loadIdx, mode, prev = 0, edLoad, nil
+						case "PLAYTEST":
+							if gm.FatalIssues(gm.ValidateMap(m)) {
+								setStatus("fix errors before playtest")
+								mode = edNav
+							} else {
+								// Temporarily add the working map, play it, then remove it.
+								idx := len(gm.Maps)
+								gm.Maps = append(gm.Maps, m)
+								sess := newOfflineOnMap(idx, offlineBots, playtestMode(m), 1, s.difficulty, s.aimAssist)
+								quit := playMatch(w, cols, rows, rows3d, rnd, ip, sess)
+								sess.close()
+								gm.Maps = gm.Maps[:idx]
+								if quit {
+									return // Q during playtest: leave the editor (program quits)
+								}
+								w.WriteString("\x1b[2J\x1b[H")
+								rebuild()
+								mode = edNav
+							}
 						case "NEW":
 							m = gm.Map{Name: "UNTITLED", Size: 20, Spawns: []gm.V3{{X: -14, Z: -14}, {X: 14, Z: 14}}}
 							rebuild()

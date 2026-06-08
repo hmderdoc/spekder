@@ -115,3 +115,13 @@ func (s *offlineSession) step(dt float64, in gm.Input) viewState {
 }
 
 func (s *offlineSession) close() {}
+
+// newOfflineOnMap builds an offline session pinned to a specific map index (used
+// by the editor's playtest, which temporarily appends the working map to gm.Maps).
+func newOfflineOnMap(mapIdx, numBots int, mode gm.Mode, vehicle int, diff gm.Difficulty, aimAssist bool) *offlineSession {
+	w := gm.NewWorld(numBots, mode)
+	w.PinMap(mapIdx)
+	w.SetDifficulty(diff)
+	w.SetAimAssist(aimAssist)
+	return &offlineSession{w: w, me: w.AddPlayer([3]float64{}, vehicle)}
+}
