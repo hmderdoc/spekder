@@ -476,6 +476,8 @@ const (
 	aEdUp            // editor: fly camera up (R)
 	aEdDown          // editor: fly camera down (F)
 	aEdMenu          // editor: open the file menu (M)
+	aEdSelect        // editor: enter select/edit mode (E)
+	aEdDelete        // editor: delete the selected object (X)
 	aCount
 )
 
@@ -599,6 +601,10 @@ func (in *input) reader(t Term) {
 				in.hit(aEdDown)
 			case c == 'm' || c == 'M': // editor: file menu
 				in.hit(aEdMenu)
+			case c == 'e' || c == 'E': // editor: select/edit mode
+				in.hit(aEdSelect)
+			case c == 'x' || c == 'X': // editor: delete selected
+				in.hit(aEdDelete)
 			}
 		}
 	}

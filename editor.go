@@ -94,12 +94,197 @@ const (
 	edNav = iota
 	edPalette
 	edPlace
-	edFile // file menu: save / load / new
-	edName // typing a map name (to save)
-	edLoad // picking a usermap to load
+	edFile   // file menu: save / load / new
+	edName   // typing a map name (to save)
+	edLoad   // picking a usermap to load
+	edSelect // selecting/editing a placed object
 )
 
 var fileMenu = []string{"SAVE", "LOAD", "NEW", "BACK"}
+
+// ---------------------------------------------------------------------------
+// selection + field editing
+// ---------------------------------------------------------------------------
+
+const (
+	selObstacle = iota
+	selRamp
+	selEntity
+	selSpawn
+	selPickup
+)
+
+// selRef points at one placed object across the map's heterogeneous slices.
+type selRef struct {
+	kind, idx int
+}
+
+// listSelectables returns every placed object in a stable order for cycling.
+func listSelectables(m gm.Map) []selRef {
+	var out []selRef
+	for i := range m.Entities {
+		out = append(out, selRef{selEntity, i})
+	}
+	for i := range m.Obstacles {
+		out = append(out, selRef{selObstacle, i})
+	}
+	for i := range m.Ramps {
+		out = append(out, selRef{selRamp, i})
+	}
+	for i := range m.Spawns {
+		out = append(out, selRef{selSpawn, i})
+	}
+	for i := range m.Pickups {
+		out = append(out, selRef{selPickup, i})
+	}
+	return out
+}
+
+// selPos is the world position of a selected object (for the highlight marker).
+func selPos(m *gm.Map, r selRef) gm.V3 {
+	switch r.kind {
+	case selObstacle:
+		return m.Obstacles[r.idx].Pos
+	case selRamp:
+		return m.Ramps[r.idx].Pos
+	case selEntity:
+		return m.Entities[r.idx].Pos
+	case selSpawn:
+		return m.Spawns[r.idx]
+	case selPickup:
+		return m.Pickups[r.idx]
+	}
+	return gm.V3{}
+}
+
+// selLabel names the selected object for the edit panel.
+func selLabel(m *gm.Map, r selRef) string {
+	switch r.kind {
+	case selObstacle:
+		return "WALL/BOX"
+	case selRamp:
+		return "RAMP"
+	case selEntity:
+		return strings.ToUpper(m.Entities[r.idx].Kind)
+	case selSpawn:
+		return "SPAWN"
+	case selPickup:
+		return "PICKUP"
+	}
+	return "?"
+}
+
+// deleteSel removes the selected object from its slice.
+func deleteSel(m *gm.Map, r selRef) {
+	switch r.kind {
+	case selObstacle:
+		m.Obstacles = append(m.Obstacles[:r.idx], m.Obstacles[r.idx+1:]...)
+	case selRamp:
+		m.Ramps = append(m.Ramps[:r.idx], m.Ramps[r.idx+1:]...)
+	case selEntity:
+		m.Entities = append(m.Entities[:r.idx], m.Entities[r.idx+1:]...)
+	case selSpawn:
+		m.Spawns = append(m.Spawns[:r.idx], m.Spawns[r.idx+1:]...)
+	case selPickup:
+		m.Pickups = append(m.Pickups[:r.idx], m.Pickups[r.idx+1:]...)
+	}
+}
+
+// editField is one tweakable value of a selected object.
+type editField struct {
+	name string
+	get  func() float64
+	set  func(float64)
+	step float64
+}
+
+func vecFields(label string, p *gm.V3, includeY bool) []editField {
+	f := []editField{
+		{label + "x", func() float64 { return p.X }, func(v float64) { p.X = v }, 0.5},
+	}
+	if includeY {
+		f = append(f, editField{label + "y", func() float64 { return p.Y }, func(v float64) { p.Y = v }, 0.25})
+	}
+	f = append(f, editField{label + "z", func() float64 { return p.Z }, func(v float64) { p.Z = v }, 0.5})
+	return f
+}
+
+// fieldsFor returns the editable fields of the selected object (position, size,
+// and any trait params). Pointers into the map slices are valid because editing
+// never appends (so the backing arrays don't move).
+func fieldsFor(m *gm.Map, r selRef) []editField {
+	switch r.kind {
+	case selObstacle:
+		b := &m.Obstacles[r.idx]
+		f := vecFields("pos", &b.Pos, true)
+		return append(f, vecFields("half", &b.Half, true)...)
+	case selRamp:
+		rp := &m.Ramps[r.idx]
+		f := vecFields("pos", &rp.Pos, false)
+		f = append(f, vecFields("half", &rp.Half, false)...)
+		f = append(f,
+			editField{"height", func() float64 { return rp.H }, func(v float64) { rp.H = v }, 0.5},
+			editField{"dir(0-3)", func() float64 { return float64(rp.Dir) }, func(v float64) { rp.Dir = ((int(v) % 4) + 4) % 4 }, 1})
+		return f
+	case selSpawn:
+		return vecFields("pos", &m.Spawns[r.idx], false)
+	case selPickup:
+		return vecFields("pos", &m.Pickups[r.idx], false)
+	case selEntity:
+		e := &m.Entities[r.idx]
+		f := vecFields("pos", &e.Pos, true)
+		f = append(f, vecFields("half", &e.Half, true)...)
+		if t := e.Turret; t != nil {
+			f = append(f,
+				editField{"range", func() float64 { return t.Range }, func(v float64) { t.Range = maxF(v, 0) }, 1},
+				editField{"dmg", func() float64 { return float64(t.Dmg) }, func(v float64) { t.Dmg = int(maxF(v, 0)) }, 1},
+				editField{"fireDelay", func() float64 { return t.FireDelay }, func(v float64) { t.FireDelay = maxF(v, 0) }, 0.1},
+				editField{"turnRate", func() float64 { return t.TurnRate }, func(v float64) { t.TurnRate = maxF(v, 0) }, 0.1})
+		}
+		if h := e.Hazard; h != nil {
+			f = append(f, editField{"dps", func() float64 { return h.DPS }, func(v float64) { h.DPS = maxF(v, 0) }, 1})
+		}
+		if tp := e.Teleport; tp != nil {
+			f = append(f,
+				editField{"destX", func() float64 { return tp.Dest.X }, func(v float64) { tp.Dest.X = v }, 0.5},
+				editField{"destZ", func() float64 { return tp.Dest.Z }, func(v float64) { tp.Dest.Z = v }, 0.5},
+				editField{"cooldown", func() float64 { return tp.Cooldown }, func(v float64) { tp.Cooldown = maxF(v, 0) }, 0.1})
+		}
+		if d := e.Destruct; d != nil {
+			f = append(f, editField{"maxHp", func() float64 { return float64(d.MaxHP) }, func(v float64) { d.MaxHP = int(maxF(v, 1)) }, 5})
+		}
+		if rs := e.Respawn; rs != nil {
+			f = append(f, editField{"respawn", func() float64 { return rs.Delay }, func(v float64) { rs.Delay = maxF(v, 0) }, 1})
+		}
+		if b := e.Bounce; b != nil {
+			f = append(f, editField{"power", func() float64 { return b.Power }, func(v float64) { b.Power = maxF(v, 0.1) }, 0.5})
+		}
+		if fl := e.Flag; fl != nil {
+			f = append(f, editField{"team(-1/0/1)", func() float64 { return float64(fl.Team) }, func(v float64) { fl.Team = clampI(int(v), -1, 1) }, 1})
+		}
+		if z := e.Zone; z != nil {
+			f = append(f, editField{"capture", func() float64 { return z.Capture }, func(v float64) { z.Capture = maxF(v, 0.5) }, 0.5})
+		}
+		return f
+	}
+	return nil
+}
+
+func maxF(v, lo float64) float64 {
+	if v < lo {
+		return lo
+	}
+	return v
+}
+func clampI(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
 
 // runEditor is the in-door map editor (Phase C). Stages 1-2: free-fly / top-down
 // views, a catalog palette, ghost preview, and placement (3D gun-sight raycast or
@@ -121,9 +306,11 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 	const grid = 1.0
 	const flySpeed, lookRate, cursorSpeed = 16.0, 1.7, 18.0
 	var prev []byte
-	prevFire, prevMenu := false, false
+	prevFire, prevMenu, prevSel, prevDel := false, false, false, false
 	status, statusT := "", 0.0
 	setStatus := func(s string) { status, statusT = s, 3.0 }
+	var selList []selRef
+	selIdx, fieldIdx, adjustT := 0, 0, 0.0
 
 	rebuild := func() { buildArena(m); prev = nil }
 
@@ -230,6 +417,10 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 						if len(loadList) > 0 {
 							loadIdx = (loadIdx - 1 + len(loadList)) % len(loadList)
 						}
+					case edSelect:
+						if n := len(fieldsFor(&m, selList[selIdx])); n > 0 {
+							fieldIdx = (fieldIdx - 1 + n) % n
+						}
 					}
 				case mkDown:
 					switch mode {
@@ -241,6 +432,20 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 						if len(loadList) > 0 {
 							loadIdx = (loadIdx + 1) % len(loadList)
 						}
+					case edSelect:
+						if n := len(fieldsFor(&m, selList[selIdx])); n > 0 {
+							fieldIdx = (fieldIdx + 1) % n
+						}
+					}
+				case mkLeft:
+					if mode == edSelect && len(selList) > 0 {
+						selIdx = (selIdx - 1 + len(selList)) % len(selList)
+						fieldIdx = 0
+					}
+				case mkRight:
+					if mode == edSelect && len(selList) > 0 {
+						selIdx = (selIdx + 1) % len(selList)
+						fieldIdx = 0
 					}
 				}
 			default:
@@ -250,13 +455,55 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 
 		in := ip.snapshot()
 
-		// M opens the file menu from nav (edge-triggered).
+		// M opens the file menu from nav; E enters select/edit (both edge-triggered).
 		if menuNow := ip.held(aEdMenu); menuNow && !prevMenu && mode == edNav {
 			mode, fileIdx, prev = edFile, 0, nil
-		} else {
-			_ = menuNow
 		}
 		prevMenu = ip.held(aEdMenu)
+		if selNow := ip.held(aEdSelect); selNow && !prevSel && mode == edNav {
+			selList = listSelectables(m)
+			if len(selList) == 0 {
+				setStatus("nothing placed to edit")
+			} else {
+				selIdx, fieldIdx, mode, prev = 0, 0, edSelect, nil
+			}
+		}
+		prevSel = ip.held(aEdSelect)
+
+		// In select mode: ,/. adjust the current field (throttled while held); X deletes.
+		if mode == edSelect && len(selList) > 0 {
+			r := selList[selIdx]
+			fields := fieldsFor(&m, r)
+			if fieldIdx >= len(fields) {
+				fieldIdx = 0
+			}
+			adjustT -= dt
+			if (in.TurretL || in.TurretR) && adjustT <= 0 && len(fields) > 0 {
+				adjustT = 0.07
+				f := fields[fieldIdx]
+				if in.TurretL {
+					f.set(f.get() - f.step)
+				} else {
+					f.set(f.get() + f.step)
+				}
+				if r.kind == selObstacle || r.kind == selRamp {
+					rebuild() // static geometry changed
+				}
+			}
+			if delNow := ip.held(aEdDelete); delNow && !prevDel {
+				deleteSel(&m, r)
+				rebuild()
+				selList = listSelectables(m)
+				if len(selList) == 0 {
+					mode = edNav
+				} else if selIdx >= len(selList) {
+					selIdx = len(selList) - 1
+				}
+				fieldIdx = 0
+				setStatus("deleted")
+			}
+			prevDel = ip.held(aEdDelete)
+		}
 
 		if statusT > 0 {
 			statusT -= dt
@@ -321,13 +568,25 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 			}
 			rc = Cam{pos: gm.V3{Y: camY}, yaw: 0, pitch: math.Pi / 2}
 		}
-		entT := m.Entities
+		entT := append([]gm.Entity(nil), m.Entities...)
 		entS := editorEntSnaps(m)
-		if mode == edPlace { // append the ghost preview
+		addMarker := func(p gm.V3, half gm.V3, col [3]float64) {
+			entT = append(entT, gm.Entity{Kind: "wall", Pos: p, Half: half, Color: col})
+			entS = append(entS, gm.EntitySnap{})
+		}
+		for _, s := range m.Spawns { // make spawns/pickups visible in the editor
+			addMarker(gm.V3{X: s.X, Y: 0.5, Z: s.Z}, gm.V3{X: 0.5, Y: 0.5, Z: 0.5}, [3]float64{0.30, 0.85, 0.40})
+		}
+		for _, s := range m.Pickups {
+			addMarker(gm.V3{X: s.X, Y: 0.4, Z: s.Z}, gm.V3{X: 0.4, Y: 0.4, Z: 0.4}, [3]float64{0.90, 0.80, 0.30})
+		}
+		if mode == edPlace { // ghost preview of the item to drop
 			it := catItems[itemIdx]
-			g := gm.Entity{Kind: it.kind, Pos: gm.V3{X: ghost.X, Y: ghost.Y + it.half.Y, Z: ghost.Z}, Half: it.half, Color: [3]float64{0.45, 0.95, 1.0}}
-			entT = append(append([]gm.Entity(nil), m.Entities...), g)
-			entS = append(entS, gm.EntitySnap{Yaw: 0})
+			addMarker(gm.V3{X: ghost.X, Y: ghost.Y + it.half.Y, Z: ghost.Z}, it.half, [3]float64{0.45, 0.95, 1.0})
+		}
+		if mode == edSelect && len(selList) > 0 { // highlight the selected object
+			p := selPos(&m, selList[selIdx])
+			addMarker(gm.V3{X: p.X, Y: p.Y + 0.05, Z: p.Z}, gm.V3{X: 1.3, Y: 1.3, Z: 1.3}, [3]float64{1.0, 1.0, 0.25})
 		}
 		reticle := [3]byte{120, 220, 140}
 		rnd.renderWorld(rc, now.Sub(start).Seconds(), nil, nil, nil, nil,
@@ -350,6 +609,10 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 			}
 		case edName:
 			drawNameEntry(w, cols, rows, m.Name)
+		case edSelect:
+			if len(selList) > 0 {
+				drawEditPanel(w, rows, selLabel(&m, selList[selIdx]), selIdx+1, len(selList), fieldsFor(&m, selList[selIdx]), fieldIdx)
+			}
 		}
 		if statusT > 0 {
 			fmt.Fprintf(w, "\x1b[2;1H\x1b[0;1;33m %s \x1b[0m", clip(status, cols-2))
@@ -476,8 +739,10 @@ func drawEditorBar(w *bufio.Writer, cols, rows int, m gm.Map, topdown bool, mode
 			catItems[itemIdx].name, ghost.X, ghost.Z)
 	case edFile, edName, edLoad:
 		help = "up/dn pick   ENTER choose   BKSP cancel"
+	case edSelect:
+		help = "</> object   up/dn field   ,/. adjust   X delete   BKSP done"
 	default:
-		help = "WASD fly  ,/. + arrows look  R/F up/down  ENTER catalog  M file  TAB view  BKSP exit"
+		help = "WASD fly  ,/. + arrows look  R/F up/down  ENTER catalog  E edit  M file  TAB view  BKSP exit"
 	}
 	fmt.Fprintf(w, "\x1b[%d;1H\x1b[0;90m%s\x1b[0m", rows, clip(centered(help, width), width))
 }
@@ -505,6 +770,24 @@ func drawListOverlay(w *bufio.Writer, cols, rows int, title string, items []stri
 		}
 		line := marker + it
 		fmt.Fprintf(w, "\x1b[%d;%dH%s  %s  \x1b[0m", row+i, (cols-len(line)-4)/2+1, style, line)
+	}
+}
+
+// drawEditPanel lists the selected object's editable fields down the left edge,
+// highlighting the current field.
+func drawEditPanel(w *bufio.Writer, rows int, label string, n, total int, fields []editField, sel int) {
+	row := 3
+	fmt.Fprintf(w, "\x1b[%d;2H\x1b[1;97mEDIT %s (%d/%d)\x1b[0m", row, label, n, total)
+	for i, f := range fields {
+		row++
+		if row >= rows {
+			break
+		}
+		style := "\x1b[0;37m"
+		if i == sel {
+			style = "\x1b[1;30;46m"
+		}
+		fmt.Fprintf(w, "\x1b[%d;2H%s %-12s %7.2f \x1b[0m", row, style, f.name, f.get())
 	}
 }
 
