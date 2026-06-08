@@ -420,6 +420,8 @@ const (
 	botKeepDist  = 7.0
 	botFireDelay = 1.2
 
+	pickupSeekRange = 12.0 // how far a SeekPickups bot will divert for a power-up
+
 	turretAimHeight = 0.9 // aim point above a target tank's feet (body center)
 )
 
@@ -610,6 +612,49 @@ func veh(i int) Vehicle {
 	return Vehicles[i]
 }
 
+// Difficulty indexes the BotProfile table. See DIFFICULTY.md.
+type Difficulty int
+
+const (
+	DiffEasy Difficulty = iota
+	DiffBeginner
+	DiffNormal
+	DiffHard
+	DiffUltimate
+)
+
+// BotProfile is the tunable bot-AI parameter set for a difficulty tier. The tier
+// sets the center; each bot rolls per-bot jitter around it at spawn (rollBotAI)
+// so a tier is a band of varied opponents, not a uniform wall.
+type BotProfile struct {
+	Name         string
+	Sight        float64 // target acquire/track range (0 = unlimited)
+	ReactDelay   float64 // sec to react to a newly acquired target (can't aim/fire yet)
+	TrackRate    float64 // turret tracking speed (rad/s)
+	Wobble       float64 // per-shot random aim error (radians)
+	FireDelayMul float64 // bot reload multiplier (>1 = slower)
+	SeekPickups  bool    // diverts to grab nearby power-ups
+}
+
+// BotProfiles is the difficulty ladder, indexed by Difficulty. HARD is roughly
+// today's lethality; NORMAL (the new-player default) is gentler; ULTIMATE is the
+// one step above today. Tune in playtest - these are centers, not gospel.
+var BotProfiles = []BotProfile{
+	DiffEasy:     {Name: "EASY", Sight: 14, ReactDelay: 0.9, TrackRate: 1.2, Wobble: 0.20, FireDelayMul: 1.9},
+	DiffBeginner: {Name: "BEGINNER", Sight: 19, ReactDelay: 0.6, TrackRate: 1.7, Wobble: 0.12, FireDelayMul: 1.5},
+	DiffNormal:   {Name: "NORMAL", Sight: 26, ReactDelay: 0.35, TrackRate: 2.1, Wobble: 0.07, FireDelayMul: 1.2},
+	DiffHard:     {Name: "HARD", Sight: 0, ReactDelay: 0.10, TrackRate: 2.6, Wobble: 0.02, FireDelayMul: 1.0},
+	DiffUltimate: {Name: "ULTIMATE", Sight: 0, ReactDelay: 0.0, TrackRate: 3.3, Wobble: 0.0, FireDelayMul: 0.8, SeekPickups: true},
+}
+
+// ProfileFor returns a difficulty's BotProfile (clamped; default NORMAL).
+func ProfileFor(d Difficulty) BotProfile {
+	if int(d) < 0 || int(d) >= len(BotProfiles) {
+		return BotProfiles[DiffNormal]
+	}
+	return BotProfiles[d]
+}
+
 // BotPalette / PlayerPalette give tanks distinct colors by slot.
 var BotPalette = [][3]float64{
 	{0.78, 0.26, 0.26}, {0.72, 0.60, 0.22}, {0.30, 0.70, 0.35},
@@ -675,6 +720,13 @@ type Tank struct {
 	hazardDebt float64 // hazard-trait: fractional HP damage carried between ticks
 	teleT      float64 // teleporter debounce remaining (sec); 0 = can teleport
 	holdScore  int     // King of the Hill (FFA): hold-points accrued this match
+
+	// per-bot AI, rolled from the active BotProfile at spawn (all 0 on humans, so
+	// fire() wobble / reload-mul and AI gating are no-ops for players).
+	aiSight, aiReact, aiTrack, aiWobble, aiFireMul, aiKeep float64
+	aiSeek                                                 bool
+	acquireT                                               float64 // reaction countdown after acquiring a target
+	lastTgt                                                int     // last target index (to detect re-acquire); -1 = none
 }
 
 // TankSnap is the renderable/transmittable view of a tank: exported, flat, no
@@ -846,6 +898,33 @@ type World struct {
 
 	entities []Entity // runtime trait-objects, instanced from ActiveMap().Entities
 	zones    []Zone   // King of the Hill control zones (when the ruleset uses them)
+
+	bots BotProfile // active difficulty profile (bot AI reads it; default NORMAL)
+}
+
+// SetDifficulty sets the active bot profile; takes effect at the next match start
+// (when bots re-roll their per-bot AI). Offline play sets this from the user's
+// chosen tier; the arena server sets it from its config.
+func (w *World) SetDifficulty(d Difficulty) { w.bots = ProfileFor(d) }
+
+// rollBotAI rolls a bot's per-bot AI params around the active profile's centers,
+// so bots within a tier vary (engagement distance, react/track, wobble, cadence).
+func (w *World) rollBotAI(i int) {
+	p := w.bots
+	jit := func(c, frac float64) float64 { return c * (1 + (rand.Float64()*2-1)*frac) }
+	b := &w.Tanks[i]
+	b.aiTrack = jit(p.TrackRate, 0.15)
+	b.aiReact = jit(p.ReactDelay, 0.35)
+	b.aiWobble = jit(p.Wobble, 0.35)
+	b.aiFireMul = jit(p.FireDelayMul, 0.10)
+	b.aiKeep = jit(botKeepDist, 0.30)
+	if p.Sight <= 0 {
+		b.aiSight = 0 // unlimited
+	} else {
+		b.aiSight = jit(p.Sight, 0.15)
+	}
+	b.aiSeek = p.SeekPickups
+	b.acquireT, b.lastTgt = 0, -1
 }
 
 // Entities returns per-tick dynamic snapshots of the world's entities, aligned
@@ -1061,7 +1140,8 @@ func rampHeight(r Ramp, x, z float64) (float64, bool) {
 // (indices 0..numBots-1). Human players are added afterward with AddPlayer. The
 // match starts in a countdown.
 func NewWorld(numBots int, mode Mode) *World {
-	w := &World{Mode: mode, Phase: PhaseCountdown, Timer: countdownTime, WinnerID: -1}
+	w := &World{Mode: mode, Phase: PhaseCountdown, Timer: countdownTime, WinnerID: -1,
+		bots: ProfileFor(DiffNormal)} // gentler default; SetDifficulty overrides
 	if len(Maps) > 0 {
 		w.MapIdx = rand.Intn(len(Maps)) // start on a random map, not always the empty one
 	}
@@ -1072,6 +1152,7 @@ func NewWorld(numBots int, mode Mode) *World {
 			Color: BotPalette[b%len(BotPalette)], Team: -1, Carrying: -1,
 		})
 		w.Tanks[b].Pos = w.spawnPoint(b)
+		w.rollBotAI(b)
 	}
 	return w
 }
@@ -1166,7 +1247,12 @@ func (w *World) half() float64 { return MapHalf(w.ActiveMap()) }
 
 func (w *World) fire(owner int) {
 	t := &w.Tanks[owner]
-	d := aimDir(t.HullYaw+t.TurretYaw, t.TurretPitch)
+	yaw, pitch := t.HullYaw+t.TurretYaw, t.TurretPitch
+	if t.aiWobble > 0 { // bots miss by their tier+jitter; humans have aiWobble 0
+		yaw += (rand.Float64()*2 - 1) * t.aiWobble
+		pitch += (rand.Float64()*2 - 1) * t.aiWobble
+	}
+	d := aimDir(yaw, pitch)
 	w.Shots = append(w.Shots, Projectile{
 		// muzzle: gun height above the tank's feet, offset forward along the aim.
 		Pos:   V3{t.Pos.X + d.X*1.7, t.Pos.Y + EyeHeight + d.Y*1.7, t.Pos.Z + d.Z*1.7},
@@ -1177,6 +1263,9 @@ func (w *World) fire(owner int) {
 	delay := veh(t.Vehicle).FireDelay
 	if t.rapidT > 0 {
 		delay *= rapidFireMul
+	}
+	if t.aiFireMul > 0 { // bot reload cadence (humans aiFireMul 0 -> unchanged)
+		delay *= t.aiFireMul
 	}
 	t.cooldown = delay
 }
@@ -1291,6 +1380,9 @@ func (w *World) startMatch() {
 		t.TurretYaw, t.TurretPitch = 0, 0
 		if r.Lives > 0 && !(r.Bots == BotWaves && t.Bot) {
 			t.lives = r.Lives // wave bots are exempt (infinite); everyone else gets lives
+		}
+		if t.Bot {
+			w.rollBotAI(i) // re-roll per-bot variation each match
 		}
 	}
 	w.pickups, w.pickupTimer = nil, pickupInterval
@@ -1564,6 +1656,7 @@ func (w *World) spawnWave() {
 			t.Color = BotPalette[act%len(BotPalette)]
 			t.Pos = w.spawnPoint(i)
 			t.HullYaw = w.faceTarget(i)
+			w.rollBotAI(i)
 			act++
 		} else {
 			t.gone, t.Dead = true, true
@@ -2229,24 +2322,62 @@ func (w *World) botAI(i int, dt float64) {
 	b := &w.Tanks[i]
 	tgt := w.nearestEnemy(i)
 	if tgt < 0 {
-		return // no one to chase
+		b.lastTgt, b.acquireT = -1, 0
+		return // no one in sight to chase
 	}
+	if tgt != b.lastTgt { // newly acquired target: take a beat to react
+		b.lastTgt, b.acquireT = tgt, b.aiReact
+	}
+	if b.acquireT > 0 {
+		b.acquireT -= dt
+	}
+	reacting := b.acquireT > 0
 	v := veh(b.Vehicle)
 	d := w.Tanks[tgt].Pos.Sub(b.Pos)
 	dist := math.Hypot(d.X, d.Z)
 	angTo := math.Atan2(d.X, d.Z)
 	b.HullYaw = turnToward(b.HullYaw, angTo, v.HullTurn*dt)
-	b.TurretYaw = turnToward(b.TurretYaw, angDiff(angTo, b.HullYaw), turretRate*dt) // bots track responsively
 	wantPitch := clampPitch(math.Atan2((w.Tanks[tgt].Pos.Y+turretAimHeight)-(b.Pos.Y+EyeHeight), dist))
-	b.TurretPitch = turnToward(b.TurretPitch, wantPitch, turretRate*dt)
-	if dist > botKeepDist {
+	if !reacting { // hold turret while reacting, then track at the bot's rate
+		b.TurretYaw = turnToward(b.TurretYaw, angDiff(angTo, b.HullYaw), b.aiTrack*dt)
+		b.TurretPitch = turnToward(b.TurretPitch, wantPitch, b.aiTrack*dt)
+	}
+	// Movement: smart bots divert to a nearby power-up, else hold engagement range.
+	if pp, ok := w.botSeekTarget(b); ok {
+		ang := math.Atan2(pp.X-b.Pos.X, pp.Z-b.Pos.Z)
+		b.HullYaw = turnToward(b.HullYaw, ang, v.HullTurn*dt)
+		w.driveForward(i, dt, 0.8)
+	} else if dist > b.aiKeep {
 		w.driveForward(i, dt, 0.7)
 	}
 	b.Pos.Y = w.ground(b.Pos.X, b.Pos.Z, b.Pos.Y+stepUp)
-	if dist < botFireRange && math.Abs(angDiff(b.HullYaw+b.TurretYaw, angTo)) < botAimTol &&
+	if !reacting && dist < botFireRange && math.Abs(angDiff(b.HullYaw+b.TurretYaw, angTo)) < botAimTol &&
 		math.Abs(wantPitch-b.TurretPitch) < botAimTol && b.cooldown <= 0 {
-		w.fire(i) // fire() sets cooldown to the bot's vehicle FireDelay
+		w.fire(i) // fire() applies this bot's wobble + reload cadence
 	}
+}
+
+// botSeekTarget returns a power-up a SeekPickups bot should divert toward (the
+// nearest within range; preferring a repair when hurt), or ok=false.
+func (w *World) botSeekTarget(b *Tank) (V3, bool) {
+	if !b.aiSeek || len(w.pickups) == 0 {
+		return V3{}, false
+	}
+	best, bestD := -1, pickupSeekRange*pickupSeekRange
+	for pi := range w.pickups {
+		p := w.pickups[pi]
+		dx, dz := p.Pos.X-b.Pos.X, p.Pos.Z-b.Pos.Z
+		dd := dx*dx + dz*dz
+		if dd > bestD {
+			continue
+		}
+		// When healthy, only bother with a repair if badly hurt; else grab anything close.
+		bestD, best = dd, pi
+	}
+	if best < 0 {
+		return V3{}, false
+	}
+	return w.pickups[best].Pos, true
 }
 
 // ctfBotAI drives a CTF bot by objective: carry the enemy flag home, else fetch
@@ -2283,16 +2414,26 @@ func (w *World) ctfBotAI(i int, dt float64) {
 	}
 	// Turret tracks/fires at the nearest enemy regardless of where we're driving.
 	if tgt >= 0 {
+		if tgt != b.lastTgt {
+			b.lastTgt, b.acquireT = tgt, b.aiReact
+		}
+		if b.acquireT > 0 {
+			b.acquireT -= dt
+		}
 		d := w.Tanks[tgt].Pos.Sub(b.Pos)
 		dist := math.Hypot(d.X, d.Z)
 		angTo := math.Atan2(d.X, d.Z)
-		b.TurretYaw = turnToward(b.TurretYaw, angDiff(angTo, b.HullYaw), turretRate*dt)
 		wantPitch := clampPitch(math.Atan2((w.Tanks[tgt].Pos.Y+turretAimHeight)-(b.Pos.Y+EyeHeight), dist))
-		b.TurretPitch = turnToward(b.TurretPitch, wantPitch, turretRate*dt)
-		if dist < botFireRange && math.Abs(angDiff(b.HullYaw+b.TurretYaw, angTo)) < botAimTol &&
-			math.Abs(wantPitch-b.TurretPitch) < botAimTol && b.cooldown <= 0 {
-			w.fire(i)
+		if b.acquireT <= 0 {
+			b.TurretYaw = turnToward(b.TurretYaw, angDiff(angTo, b.HullYaw), b.aiTrack*dt)
+			b.TurretPitch = turnToward(b.TurretPitch, wantPitch, b.aiTrack*dt)
+			if dist < botFireRange && math.Abs(angDiff(b.HullYaw+b.TurretYaw, angTo)) < botAimTol &&
+				math.Abs(wantPitch-b.TurretPitch) < botAimTol && b.cooldown <= 0 {
+				w.fire(i)
+			}
 		}
+	} else {
+		b.lastTgt, b.acquireT = -1, 0
 	}
 	b.Pos.Y = w.ground(b.Pos.X, b.Pos.Z, b.Pos.Y+stepUp)
 }
@@ -2323,6 +2464,7 @@ func (w *World) driveForward(i int, dt, frac float64) {
 // nearestEnemy returns the closest live opponent. In free-for-all that's anyone
 // else; in CTF it's the closest tank on the other team (so allies aren't targets).
 func (w *World) nearestEnemy(self int) int {
+	sight := w.Tanks[self].aiSight // 0 = unlimited (high tiers see the whole map)
 	best, bestD := -1, math.MaxFloat64
 	for j := range w.Tanks {
 		t := &w.Tanks[j]
@@ -2333,7 +2475,11 @@ func (w *World) nearestEnemy(self int) int {
 			continue
 		}
 		d := t.Pos.Sub(w.Tanks[self].Pos)
-		if dd := d.X*d.X + d.Z*d.Z; dd < bestD {
+		dd := d.X*d.X + d.Z*d.Z
+		if sight > 0 && dd > sight*sight {
+			continue // beyond this bot's sight: it doesn't notice you
+		}
+		if dd < bestD {
 			bestD, best = dd, j
 		}
 	}
