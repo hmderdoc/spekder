@@ -1073,6 +1073,64 @@ func runVehicleMenu(w *bufio.Writer, cols, rows int, ip *input) (int, bool) {
 	}
 }
 
+// runMapPicker lists the available maps (embedded + usermaps) plus RANDOM for an
+// offline game. Returns the chosen map index (-1 = random), or quit/back flags.
+func runMapPicker(w *bufio.Writer, cols, rows int, ip *input) (idx int, back, quit bool) {
+	names := []string{"RANDOM"}
+	for _, mm := range gm.Maps {
+		n := mm.Name
+		if n == "" {
+			n = "(unnamed)"
+		}
+		names = append(names, n)
+	}
+	sel := 0
+	winRows := rows - 7
+	if winRows < 4 {
+		winRows = 4
+	}
+	draw := func() {
+		w.WriteString("\x1b[2J\x1b[H")
+		hdr := "SELECT  MAP"
+		fmt.Fprintf(w, "\x1b[2;%dH\x1b[1;96m%s\x1b[0m", (cols-len(hdr))/2+1, hdr)
+		top := 0
+		if sel >= winRows {
+			top = sel - winRows + 1
+		}
+		for i := top; i < len(names) && i < top+winRows; i++ {
+			row := 5 + (i - top)
+			style, mark := "\x1b[0;36m", "  "
+			if i == sel {
+				style, mark = "\x1b[1;30;46m", "> "
+			}
+			fmt.Fprintf(w, "\x1b[%d;%dH%s %-20s \x1b[0m", row, (cols-22)/2+1, style, clip(mark+names[i], 20))
+		}
+		foot := "up/down  select     ENTER  play     BKSP  back"
+		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;90m%s\x1b[0m", rows-1, (cols-len(foot))/2+1, foot)
+		w.Flush()
+	}
+	draw()
+	for {
+		select {
+		case <-ip.quitCh:
+			return 0, false, true
+		case k := <-ip.events:
+			switch k {
+			case mkUp:
+				sel = (sel - 1 + len(names)) % len(names)
+				draw()
+			case mkDown:
+				sel = (sel + 1) % len(names)
+				draw()
+			case mkEnter:
+				return sel - 1, false, false // sel 0 -> RANDOM (-1)
+			case mkBack:
+				return 0, true, false
+			}
+		}
+	}
+}
+
 // drawCountdown overlays the big count-in number (or GO) plus the mode name.
 func drawCountdown(w *bufio.Writer, cols, rows int, v viewState) {
 	n := int(math.Ceil(v.timer))
@@ -1415,7 +1473,20 @@ func main() {
 			}
 			sess = ns
 		} else {
-			sess = newOfflineSession(offlineBots, choice.mode, vehicle, settings.difficulty, settings.aimAssist)
+			mapIdx, back, mquit := runMapPicker(w, cols, rows, ip)
+			if mquit {
+				cleanup()
+				return
+			}
+			if back {
+				note = ""
+				continue // back to the main menu
+			}
+			if mapIdx >= 0 {
+				sess = newOfflineOnMap(mapIdx, offlineBots, choice.mode, vehicle, settings.difficulty, settings.aimAssist)
+			} else {
+				sess = newOfflineSession(offlineBots, choice.mode, vehicle, settings.difficulty, settings.aimAssist)
+			}
 		}
 		note = ""
 		quit := playMatch(w, cols, rows, rows3d, rnd, ip, sess)
