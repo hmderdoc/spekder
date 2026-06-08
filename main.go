@@ -481,6 +481,7 @@ const (
 	aEdMenu          // editor: open the file menu (M)
 	aEdSelect        // editor: enter select/edit mode (E)
 	aEdDelete        // editor: delete the selected object (X)
+	aEdGrid          // editor: cycle grid-snap size (G)
 	aCount
 )
 
@@ -608,6 +609,8 @@ func (in *input) reader(t Term) {
 				in.hit(aEdSelect)
 			case c == 'x' || c == 'X': // editor: delete selected
 				in.hit(aEdDelete)
+			case c == 'g' || c == 'G': // editor: cycle grid snap
+				in.hit(aEdGrid)
 			}
 		}
 	}

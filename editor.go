@@ -23,6 +23,9 @@ type catItem struct {
 	kind  string // ghost render kind ("turret"/"trampoline"/"hazard"/... else a box)
 	half  gm.V3  // ghost footprint
 	place func(m *gm.Map, p gm.V3)
+	// dragMake (nil = not draggable) builds an object spanning two points a->b, for
+	// extended walls / platforms: drag a line for a wall, a rectangle for a floor.
+	dragMake func(m *gm.Map, a, b gm.V3)
 }
 
 var (
@@ -37,46 +40,61 @@ var (
 
 // Placers take p = the surface point under the cursor (p.Y = top of any obstacle/
 // ramp there, else 0), so things stack on platforms/ramps instead of the floor.
+// WALL/PLATFORM also support drag (dragMake): SPACE to anchor, SPACE to span.
 var catItems = []catItem{
-	{"WALL", "wall", gm.V3{X: 1, Y: 1, Z: 1}, func(m *gm.Map, p gm.V3) {
-		m.Obstacles = append(m.Obstacles, gm.Box{Pos: gm.V3{X: p.X, Y: p.Y + 1, Z: p.Z}, Half: gm.V3{X: 1, Y: 1, Z: 1}, Color: colWall})
-	}},
-	{"PLATFORM", "wall", gm.V3{X: 3, Y: 0.4, Z: 3}, func(m *gm.Map, p gm.V3) {
-		m.Obstacles = append(m.Obstacles, gm.Box{Pos: gm.V3{X: p.X, Y: p.Y + 0.4, Z: p.Z}, Half: gm.V3{X: 3, Y: 0.4, Z: 3}, Color: colPlat})
-	}},
-	{"RAMP", "wall", gm.V3{X: 2.5, Y: 1.5, Z: 3}, func(m *gm.Map, p gm.V3) {
+	{name: "WALL", kind: "wall", half: gm.V3{X: 1, Y: 1, Z: 1}, dragMake: spanBox(1, 0.5, colWall),
+		place: func(m *gm.Map, p gm.V3) {
+			m.Obstacles = append(m.Obstacles, gm.Box{Pos: gm.V3{X: p.X, Y: p.Y + 1, Z: p.Z}, Half: gm.V3{X: 1, Y: 1, Z: 1}, Color: colWall})
+		}},
+	{name: "PLATFORM", kind: "wall", half: gm.V3{X: 3, Y: 0.4, Z: 3}, dragMake: spanBox(0.4, 1.5, colPlat),
+		place: func(m *gm.Map, p gm.V3) {
+			m.Obstacles = append(m.Obstacles, gm.Box{Pos: gm.V3{X: p.X, Y: p.Y + 0.4, Z: p.Z}, Half: gm.V3{X: 3, Y: 0.4, Z: 3}, Color: colPlat})
+		}},
+	{name: "RAMP", kind: "wall", half: gm.V3{X: 2.5, Y: 1.5, Z: 3}, place: func(m *gm.Map, p gm.V3) {
 		m.Ramps = append(m.Ramps, gm.Ramp{Pos: gm.V3{X: p.X, Y: p.Y, Z: p.Z}, Half: gm.V3{X: 2.5, Z: 3}, H: 3, Dir: 0, Color: colPlat})
 	}},
-	{"TURRET", "turret", gm.V3{X: 0.7, Y: 0.7, Z: 0.7}, func(m *gm.Map, p gm.V3) {
+	{name: "TURRET", kind: "turret", half: gm.V3{X: 0.7, Y: 0.7, Z: 0.7}, place: func(m *gm.Map, p gm.V3) {
 		m.Entities = append(m.Entities, gm.Entity{Kind: "turret", Pos: gm.V3{X: p.X, Y: p.Y + 0.7, Z: p.Z}, Half: gm.V3{X: 0.7, Y: 0.7, Z: 0.7},
 			Color: colTurr, Solid: true, Turret: &gm.TurretTrait{Range: 22, FireDelay: 1.4, Dmg: 14, TurnRate: 1.6},
 			Destruct: &gm.DestructTrait{MaxHP: 60}, Respawn: &gm.RespawnTrait{Delay: 14}})
 	}},
-	{"HAZARD", "hazard", gm.V3{X: 2, Y: 0.2, Z: 2}, func(m *gm.Map, p gm.V3) {
+	{name: "HAZARD", kind: "hazard", half: gm.V3{X: 2, Y: 0.2, Z: 2}, place: func(m *gm.Map, p gm.V3) {
 		m.Entities = append(m.Entities, gm.Entity{Kind: "hazard", Pos: gm.V3{X: p.X, Y: p.Y + 0.2, Z: p.Z}, Half: gm.V3{X: 2, Y: 0.2, Z: 2},
 			Color: colHaz, Hazard: &gm.HazardTrait{DPS: 20}})
 	}},
-	{"TELEPORTER", "teleporter", gm.V3{X: 1, Y: 0.2, Z: 1}, func(m *gm.Map, p gm.V3) {
+	{name: "TELEPORTER", kind: "teleporter", half: gm.V3{X: 1, Y: 0.2, Z: 1}, place: func(m *gm.Map, p gm.V3) {
 		m.Entities = append(m.Entities, gm.Entity{Kind: "teleporter", Pos: gm.V3{X: p.X, Y: p.Y + 0.2, Z: p.Z}, Half: gm.V3{X: 1, Y: 0.2, Z: 1},
 			Color: colTele, Teleport: &gm.TeleportTrait{Dest: gm.V3{X: -p.X, Z: -p.Z}, Cooldown: 1.5}})
 	}},
-	{"TRAMPOLINE", "trampoline", gm.V3{X: 1.5, Y: 0.2, Z: 1.5}, func(m *gm.Map, p gm.V3) {
+	{name: "TRAMPOLINE", kind: "trampoline", half: gm.V3{X: 1.5, Y: 0.2, Z: 1.5}, place: func(m *gm.Map, p gm.V3) {
 		m.Entities = append(m.Entities, gm.Entity{Kind: "trampoline", Pos: gm.V3{X: p.X, Y: p.Y + 0.2, Z: p.Z}, Half: gm.V3{X: 1.5, Y: 0.2, Z: 1.5},
 			Color: colTram, Bounce: &gm.BounceTrait{Power: 13}})
 	}},
-	{"FLAG (NEUTRAL)", "flag", gm.V3{X: 0.5, Y: 0.5, Z: 0.5}, placeFlag(-1)},
-	{"FLAG (RED)", "flag", gm.V3{X: 0.5, Y: 0.5, Z: 0.5}, placeFlag(0)},
-	{"FLAG (BLUE)", "flag", gm.V3{X: 0.5, Y: 0.5, Z: 0.5}, placeFlag(1)},
-	{"ZONE (HILL)", "zone", gm.V3{X: 4, Y: 1, Z: 4}, func(m *gm.Map, p gm.V3) {
+	{name: "FLAG (NEUTRAL)", kind: "flag", half: gm.V3{X: 0.5, Y: 0.5, Z: 0.5}, place: placeFlag(-1)},
+	{name: "FLAG (RED)", kind: "flag", half: gm.V3{X: 0.5, Y: 0.5, Z: 0.5}, place: placeFlag(0)},
+	{name: "FLAG (BLUE)", kind: "flag", half: gm.V3{X: 0.5, Y: 0.5, Z: 0.5}, place: placeFlag(1)},
+	{name: "ZONE (HILL)", kind: "zone", half: gm.V3{X: 4, Y: 1, Z: 4}, place: func(m *gm.Map, p gm.V3) {
 		m.Entities = append(m.Entities, gm.Entity{Kind: "zone", Pos: gm.V3{X: p.X, Y: p.Y, Z: p.Z}, Half: gm.V3{X: 4, Y: 1, Z: 4},
 			Color: colZone, Zone: &gm.ZoneTrait{Capture: 4}})
 	}},
-	{"SPAWN POINT", "wall", gm.V3{X: 0.6, Y: 0.6, Z: 0.6}, func(m *gm.Map, p gm.V3) {
+	{name: "SPAWN POINT", kind: "wall", half: gm.V3{X: 0.6, Y: 0.6, Z: 0.6}, place: func(m *gm.Map, p gm.V3) {
 		m.Spawns = append(m.Spawns, gm.V3{X: p.X, Z: p.Z})
 	}},
-	{"PICKUP SPOT", "wall", gm.V3{X: 0.4, Y: 0.4, Z: 0.4}, func(m *gm.Map, p gm.V3) {
+	{name: "PICKUP SPOT", kind: "wall", half: gm.V3{X: 0.4, Y: 0.4, Z: 0.4}, place: func(m *gm.Map, p gm.V3) {
 		m.Pickups = append(m.Pickups, gm.V3{X: p.X, Z: p.Z})
 	}},
+}
+
+// spanBox returns a dragMake that adds a box spanning a->b with the given half-
+// height and edge padding (so dragging a line makes a wall, a rectangle a floor).
+func spanBox(halfY, pad float64, col [3]float64) func(m *gm.Map, a, b gm.V3) {
+	return func(m *gm.Map, a, b gm.V3) {
+		cx, cz := (a.X+b.X)/2, (a.Z+b.Z)/2
+		hx := math.Abs(b.X-a.X)/2 + pad
+		hz := math.Abs(b.Z-a.Z)/2 + pad
+		base := math.Max(a.Y, b.Y)
+		m.Obstacles = append(m.Obstacles, gm.Box{Pos: gm.V3{X: cx, Y: base + halfY, Z: cz}, Half: gm.V3{X: hx, Y: halfY, Z: hz}, Color: col})
+	}
 }
 
 // playtestMode picks a sensible mode for the working map: CTF if it has team
@@ -332,10 +350,14 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 	loadIdx := 0 // load-list selection
 	var loadList []string
 	cursor := gm.V3{} // top-down placement cursor
-	const grid = 1.0
+	grid := 1.0       // snap step (cycled with G; 0 = free)
+	gridSteps := []float64{1, 2, 0.5, 0}
+	gridIdx := 0
 	const flySpeed, lookRate, cursorSpeed = 16.0, 1.7, 18.0
 	var prev []byte
-	prevFire, prevMenu, prevSel, prevDel := false, false, false, false
+	var dragging bool // extended wall/platform: anchor set, awaiting the end point
+	var anchor gm.V3
+	prevFire, prevMenu, prevSel, prevDel, prevGrid := false, false, false, false, false
 	status, statusT := "", 0.0
 	setStatus := func(s string) { status, statusT = s, 3.0 }
 	var selList []selRef
@@ -394,6 +416,12 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 					case edName:
 						if len(m.Name) > 0 { // backspace deletes a char while naming
 							m.Name = m.Name[:len(m.Name)-1]
+						}
+					case edPlace:
+						if dragging { // cancel an in-progress drag, stay in place mode
+							dragging = false
+						} else {
+							mode, prev = edNav, nil
 						}
 					default:
 						mode = edNav
@@ -517,6 +545,16 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 			}
 		}
 		prevSel = ip.held(aEdSelect)
+		if gridNow := ip.held(aEdGrid); gridNow && !prevGrid {
+			gridIdx = (gridIdx + 1) % len(gridSteps)
+			grid = gridSteps[gridIdx]
+			if grid == 0 {
+				setStatus("grid snap OFF")
+			} else {
+				setStatus(fmt.Sprintf("grid snap %.1f", grid))
+			}
+		}
+		prevGrid = ip.held(aEdGrid)
 
 		// In select mode: ,/. adjust the current field (throttled while held); X deletes.
 		if mode == edSelect && len(selList) > 0 {
@@ -599,12 +637,26 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 		ghost = snap(ghost, grid)
 		ghost.Y = gm.GroundHeight(m, ghost.X, ghost.Z, 1e9) // stack on the surface under the cursor
 
-		// Place on a fresh SPACE press (edge-triggered) while in place mode.
+		// Place on a fresh SPACE press (edge-triggered) while in place mode. Draggable
+		// items (wall/platform) use two presses: anchor, then span.
 		if mode == edPlace && in.Fire && !prevFire {
-			catItems[itemIdx].place(&m, ghost)
-			rebuild()
+			it := catItems[itemIdx]
+			switch {
+			case it.dragMake != nil && !dragging:
+				anchor, dragging = ghost, true
+			case it.dragMake != nil && dragging:
+				it.dragMake(&m, anchor, ghost)
+				dragging = false
+				rebuild()
+			default:
+				it.place(&m, ghost)
+				rebuild()
+			}
 		}
 		prevFire = in.Fire
+		if mode != edPlace {
+			dragging = false
+		}
 
 		// --- render ---
 		rc := cam
@@ -630,7 +682,15 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 		}
 		if mode == edPlace { // ghost preview of the item to drop
 			it := catItems[itemIdx]
-			addMarker(gm.V3{X: ghost.X, Y: ghost.Y + it.half.Y, Z: ghost.Z}, it.half, [3]float64{0.45, 0.95, 1.0})
+			gcol := [3]float64{0.45, 0.95, 1.0}
+			if dragging { // span preview from the anchor to the cursor
+				cx, cz := (anchor.X+ghost.X)/2, (anchor.Z+ghost.Z)/2
+				hx := math.Abs(ghost.X-anchor.X)/2 + 0.5
+				hz := math.Abs(ghost.Z-anchor.Z)/2 + 0.5
+				addMarker(gm.V3{X: cx, Y: math.Max(anchor.Y, ghost.Y) + it.half.Y, Z: cz}, gm.V3{X: hx, Y: it.half.Y, Z: hz}, gcol)
+			} else {
+				addMarker(gm.V3{X: ghost.X, Y: ghost.Y + it.half.Y, Z: ghost.Z}, it.half, gcol)
+			}
 		}
 		if mode == edSelect && len(selList) > 0 { // highlight the selected object
 			p := selPos(&m, selList[selIdx])
@@ -643,7 +703,15 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 		prev = cur
 		w.Write(frame)
 
-		drawEditorBar(w, cols, rows, m, topdown, mode, itemIdx, ghost)
+		errs, warns := 0, 0
+		for _, is := range gm.ValidateMap(m) {
+			if is.Fatal {
+				errs++
+			} else {
+				warns++
+			}
+		}
+		drawEditorBar(w, cols, rows, m, topdown, mode, itemIdx, ghost, grid, errs, warns)
 		switch mode {
 		case edPalette:
 			drawListOverlay(w, cols, rows, "CATALOG", catNames(), palIdx)
@@ -768,14 +836,23 @@ func editorZoneSnaps(m gm.Map) []gm.ZoneSnap {
 // editor HUD
 // ---------------------------------------------------------------------------
 
-func drawEditorBar(w *bufio.Writer, cols, rows int, m gm.Map, topdown bool, mode, itemIdx int, ghost gm.V3) {
+func drawEditorBar(w *bufio.Writer, cols, rows int, m gm.Map, topdown bool, mode, itemIdx int, ghost gm.V3, grid float64, errs, warns int) {
 	view := "3D"
 	if topdown {
 		view = "TOP"
 	}
+	gridS := "off"
+	if grid > 0 {
+		gridS = fmt.Sprintf("%.1f", grid)
+	}
+	valid := "ok"
+	if errs > 0 || warns > 0 {
+		valid = fmt.Sprintf("%dx %d!", errs, warns) // x = errors, ! = warnings
+	}
 	// Width capped at cols-1: never touch the bottom-right cell (autowrap scroll).
 	width := cols - 1
-	top := fmt.Sprintf(" EDIT %s  [%s]  obst:%d ent:%d spawn:%d ", m.Name, view, len(m.Obstacles), len(m.Entities), len(m.Spawns))
+	top := fmt.Sprintf(" EDIT %s  [%s]  obst:%d ent:%d spawn:%d  grid:%s  chk:%s ",
+		m.Name, view, len(m.Obstacles), len(m.Entities), len(m.Spawns), gridS, valid)
 	fmt.Fprintf(w, "\x1b[1;1H\x1b[1;30;46m%-*s\x1b[0m", width, clip(top, width))
 
 	var help string
@@ -783,14 +860,18 @@ func drawEditorBar(w *bufio.Writer, cols, rows int, m gm.Map, topdown bool, mode
 	case edPalette:
 		help = "up/dn pick   ENTER choose   BKSP cancel"
 	case edPlace:
-		help = fmt.Sprintf("PLACING %s @ %.0f,%.0f   SPACE drop  R/F up/down  ENTER palette  TAB view  BKSP done",
-			catItems[itemIdx].name, ghost.X, ghost.Z)
+		drop := "SPACE drop"
+		if catItems[itemIdx].dragMake != nil {
+			drop = "SPACE anchor>span"
+		}
+		help = fmt.Sprintf("PLACING %s @ %.0f,%.0f   %s  R/F up/down  ENTER palette  TAB view  BKSP done",
+			catItems[itemIdx].name, ghost.X, ghost.Z, drop)
 	case edFile, edName, edLoad:
 		help = "up/dn pick   ENTER choose   BKSP cancel"
 	case edSelect:
 		help = "</> object   up/dn field   ,/. adjust   X delete   BKSP done"
 	default:
-		help = "WASD fly  ,/. + arrows look  R/F up/down  ENTER catalog  E edit  M file  TAB view  BKSP exit"
+		help = "WASD fly  arrows look  R/F up/down  ENTER catalog  E edit  G grid  M file  TAB view  BKSP exit"
 	}
 	fmt.Fprintf(w, "\x1b[%d;1H\x1b[0;90m%s\x1b[0m", rows, clip(centered(help, width), width))
 }
