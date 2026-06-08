@@ -270,7 +270,7 @@ func (s *netSession) step(dt float64, in gm.Input) viewState {
 		camPos: s.predPos, camYaw: s.predHull + s.predTur, viewTurret: s.predTur, viewPitch: s.predPitch,
 		mode: match.Mode, phase: match.Phase, timer: match.Timer, winnerID: match.WinnerID,
 		flags: flags, pickups: pickups, ents: ents, zones: zones, flagsLeft: match.FlagsLeft, flagsTotal: match.FlagsTotal, votes: match.Votes,
-		pairings: pairings, mapIdx: match.MapIdx, wave: match.Wave, teamScore: match.TeamScore,
+		pairings: pairings, kills: match.Kills, mapIdx: match.MapIdx, wave: match.Wave, teamScore: match.TeamScore,
 		winnerTeam: match.WinnerTeam, myTeam: self.Team, gmap: cmap,
 	}
 }

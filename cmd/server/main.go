@@ -60,7 +60,7 @@ func (s *server) handle(conn net.Conn) {
 	conn.SetReadDeadline(time.Time{})
 
 	s.mu.Lock()
-	tank := s.world.AddPlayer([3]float64{}, vehicle)
+	tank := s.world.AddPlayer([3]float64{}, vehicle, handle)
 	id := s.nextID
 	s.nextID++
 	c := &client{id: id, tank: tank, conn: conn}

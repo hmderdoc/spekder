@@ -441,6 +441,12 @@ func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.V3
 	w.u16(m.TeamScore[0])
 	w.u16(m.TeamScore[1])
 	w.i16(m.WinnerTeam)
+	w.u8(byte(min255(len(m.Kills)))) // kill feed (this tick)
+	for _, k := range m.Kills {
+		w.i16(k.Killer)
+		w.i16(k.Victim)
+		w.u8(byte(k.Cause))
+	}
 	w.u16(len(tanks))
 	for _, t := range tanks {
 		w.u16(t.ID)
@@ -484,6 +490,7 @@ func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.V3
 		w.i16(t.Lives)
 		w.i16(t.Team)
 		w.u16(t.HoldScore)
+		w.str(t.Name)
 	}
 	w.u16(len(shots))
 	for _, s := range shots {
@@ -551,6 +558,10 @@ func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, sh
 	m.TeamScore[0] = r.ru16()
 	m.TeamScore[1] = r.ru16()
 	m.WinnerTeam = r.ri16()
+	nk := int(r.ru8())
+	for i := 0; i < nk; i++ {
+		m.Kills = append(m.Kills, gm.KillEvent{Killer: r.ri16(), Victim: r.ri16(), Cause: gm.KillCause(r.ru8())})
+	}
 	nt := r.ru16()
 	for k := 0; k < nt; k++ {
 		var t gm.TankSnap
@@ -576,6 +587,7 @@ func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, sh
 		t.Lives = r.ri16()
 		t.Team = r.ri16()
 		t.HoldScore = r.ru16()
+		t.Name = r.rstr()
 		tanks = append(tanks, t)
 	}
 	ns := r.ru16()

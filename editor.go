@@ -311,7 +311,7 @@ func clampI(v, lo, hi int) int {
 // views, a catalog palette, ghost preview, and placement (3D gun-sight raycast or
 // top-down cursor). Backspace backs out of each mode (and exits to the menu from
 // nav); Q quits the program.
-func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, s *userSettings) {
+func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, s *userSettings, playerName string) {
 	m := gm.Map{Name: "UNTITLED", Size: 20, Spawns: []gm.V3{{X: -14, Z: -14}, {X: 14, Z: 14}}}
 	buildArena(m)
 
@@ -424,7 +424,7 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 								// Temporarily add the working map, play it, then remove it.
 								idx := len(gm.Maps)
 								gm.Maps = append(gm.Maps, m)
-								sess := newOfflineOnMap(idx, offlineBots, gm.EffectiveMode(m), 1, s.difficulty, s.aimAssist)
+								sess := newOfflineOnMap(idx, offlineBots, gm.EffectiveMode(m), 1, s.difficulty, s.aimAssist, playerName)
 								quit := playMatch(w, cols, rows, rows3d, rnd, ip, sess)
 								sess.close()
 								gm.Maps = gm.Maps[:idx]

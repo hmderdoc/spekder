@@ -13,8 +13,8 @@ func twoPlayerOpen(t *testing.T) (*World, int, int) {
 	if idx := FindMap("OPEN GRID"); idx >= 0 {
 		w.PinMap(idx)
 	}
-	me := w.AddPlayer([3]float64{}, 1)
-	tgt := w.AddPlayer([3]float64{}, 1)
+	me := w.AddPlayer([3]float64{}, 1, "P")
+	tgt := w.AddPlayer([3]float64{}, 1, "P")
 	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{me: {}, tgt: {}})
 	w.Tanks[me].Pos = V3{}
 	w.Tanks[me].HullYaw, w.Tanks[me].TurretYaw, w.Tanks[me].TurretPitch = 0, 0, 0
@@ -119,7 +119,7 @@ func TestAimLockTurretEntity(t *testing.T) {
 	if idx := FindMap("OPEN GRID"); idx >= 0 {
 		w.PinMap(idx)
 	}
-	me := w.AddPlayer([3]float64{}, 1)
+	me := w.AddPlayer([3]float64{}, 1, "P")
 	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{me: {}})
 	w.Tanks[me].Pos = V3{}
 	w.Tanks[me].HullYaw, w.Tanks[me].TurretYaw, w.Tanks[me].TurretPitch = 0, 0, 0

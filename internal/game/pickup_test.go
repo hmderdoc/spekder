@@ -5,7 +5,7 @@ import "testing"
 func startDM(t *testing.T, bots int) (*World, int) {
 	t.Helper()
 	w := NewWorld(bots, ModeDeathmatch)
-	me := w.AddPlayer([3]float64{}, 1)
+	me := w.AddPlayer([3]float64{}, 1, "P")
 	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{me: {}})
 	if w.Phase != PhaseActive {
 		t.Fatalf("expected active phase, got %v", w.Phase)

@@ -42,6 +42,7 @@ type viewState struct {
 	flagsTotal int
 	votes      []int              // lobby vote tally per map index (len = len(pairings))
 	pairings   []proto.LobbyEntry // votable map+mode candidates (online lobby)
+	kills      []gm.KillEvent     // kills this tick (kill feed / death banner)
 	mapIdx     int                // active map index
 	wave       int                // Survival: current wave
 	teamScore  [2]int             // CTF: captures per team
@@ -64,7 +65,7 @@ type offlineSession struct {
 	me int
 }
 
-func newOfflineSession(numBots int, mode gm.Mode, vehicle int, diff gm.Difficulty, aimAssist bool) *offlineSession {
+func newOfflineSession(numBots int, mode gm.Mode, vehicle int, diff gm.Difficulty, aimAssist bool, name string) *offlineSession {
 	w := gm.NewWorld(numBots, mode)
 	w.SetDifficulty(diff)
 	w.SetAimAssist(aimAssist)
@@ -90,7 +91,7 @@ func newOfflineSession(numBots int, mode gm.Mode, vehicle int, diff gm.Difficult
 			logf("offline: pinned to map %q (index %d)", want, idx)
 		}
 	}
-	return &offlineSession{w: w, me: w.AddPlayer([3]float64{}, vehicle)}
+	return &offlineSession{w: w, me: w.AddPlayer([3]float64{}, vehicle, name)}
 }
 
 func (s *offlineSession) step(dt float64, in gm.Input) viewState {
@@ -112,7 +113,7 @@ func (s *offlineSession) step(dt float64, in gm.Input) viewState {
 		mode: m.Mode, phase: m.Phase, timer: m.Timer, winnerID: m.WinnerID,
 		flags: flags, pickups: pickups, ents: ents, zones: zones, flagsLeft: m.FlagsLeft, flagsTotal: m.FlagsTotal, mapIdx: m.MapIdx,
 		wave: m.Wave, teamScore: m.TeamScore, winnerTeam: m.WinnerTeam, myTeam: self.Team,
-		gmap: s.w.ActiveMap(),
+		kills: m.Kills, gmap: s.w.ActiveMap(),
 	}
 }
 
@@ -120,10 +121,10 @@ func (s *offlineSession) close() {}
 
 // newOfflineOnMap builds an offline session pinned to a specific map index (used
 // by the editor's playtest, which temporarily appends the working map to gm.Maps).
-func newOfflineOnMap(mapIdx, numBots int, mode gm.Mode, vehicle int, diff gm.Difficulty, aimAssist bool) *offlineSession {
+func newOfflineOnMap(mapIdx, numBots int, mode gm.Mode, vehicle int, diff gm.Difficulty, aimAssist bool, name string) *offlineSession {
 	w := gm.NewWorld(numBots, mode)
 	w.PinMap(mapIdx)
 	w.SetDifficulty(diff)
 	w.SetAimAssist(aimAssist)
-	return &offlineSession{w: w, me: w.AddPlayer([3]float64{}, vehicle)}
+	return &offlineSession{w: w, me: w.AddPlayer([3]float64{}, vehicle, name)}
 }

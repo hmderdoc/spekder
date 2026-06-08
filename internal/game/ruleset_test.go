@@ -57,7 +57,7 @@ func TestTimeoutPicksLeader(t *testing.T) {
 // ends when one remains, and the survivor wins.
 func TestEliminationLastStanding(t *testing.T) {
 	w := NewWorld(2, ModeElimination)
-	me := w.AddPlayer([3]float64{}, 1)
+	me := w.AddPlayer([3]float64{}, 1, "P")
 	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{me: {}})
 	if w.Phase != PhaseActive {
 		t.Fatalf("expected active, got %v", w.Phase)
@@ -90,7 +90,7 @@ func TestEliminationLastStanding(t *testing.T) {
 // still respawns. (Survival shares this path; this guards the generalization.)
 func TestEliminationRespawnGate(t *testing.T) {
 	w := NewWorld(1, ModeElimination)
-	me := w.AddPlayer([3]float64{}, 1)
+	me := w.AddPlayer([3]float64{}, 1, "P")
 	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{me: {}})
 	w.Tanks[me].Dead, w.Tanks[me].lives, w.Tanks[me].respawn = true, 0, -1
 	w.respawns(1.0 / 30)
@@ -117,7 +117,7 @@ func TestAuthoredNeutralFlags(t *testing.T) {
 	})
 	w := NewWorld(0, ModeFlagRun)
 	w.PinMap(idx)
-	me := w.AddPlayer([3]float64{}, 1)
+	me := w.AddPlayer([3]float64{}, 1, "P")
 	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{me: {}})
 	if len(w.flags) != 2 {
 		t.Fatalf("expected 2 authored neutral flags, got %d (procedural fallback?)", len(w.flags))
@@ -137,7 +137,7 @@ func TestAuthoredTeamFlags(t *testing.T) {
 	})
 	w := NewWorld(2, ModeCTF)
 	w.PinMap(idx)
-	me := w.AddPlayer([3]float64{}, 1)
+	me := w.AddPlayer([3]float64{}, 1, "P")
 	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{me: {}})
 	if len(w.flags) != 2 {
 		t.Fatalf("expected 2 team flags, got %d", len(w.flags))
@@ -159,7 +159,7 @@ func TestProceduralFlagFallback(t *testing.T) {
 	Maps = append(Maps, Map{Name: "TEST-EMPTY", Size: 18, Spawns: []V3{{X: -10, Z: -10}}})
 	w := NewWorld(0, ModeFlagRun)
 	w.PinMap(idx)
-	me := w.AddPlayer([3]float64{}, 1)
+	me := w.AddPlayer([3]float64{}, 1, "P")
 	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{me: {}})
 	if len(w.flags) != flagCount {
 		t.Fatalf("no authored flags -> expected %d scattered, got %d", flagCount, len(w.flags))
@@ -170,7 +170,7 @@ func TestProceduralFlagFallback(t *testing.T) {
 // the capture time, then accrues hold-points each second; reaching the limit wins.
 func TestFFAKotHCaptureAndScore(t *testing.T) {
 	w := NewWorld(0, ModeFFAKotH)
-	me := w.AddPlayer([3]float64{}, 1)
+	me := w.AddPlayer([3]float64{}, 1, "P")
 	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{me: {}})
 	if len(w.zones) == 0 {
 		t.Fatal("KotH should have at least a fallback center zone")
@@ -209,8 +209,8 @@ func TestKotHContestedNoProgress(t *testing.T) {
 	Maps = append(Maps, Map{Name: "TEST-KOTH", Size: 18, Spawns: []V3{{X: -10, Z: -10}}})
 	w := NewWorld(0, ModeTeamKotH)
 	w.PinMap(idx)
-	a := w.AddPlayer([3]float64{}, 1)
-	b := w.AddPlayer([3]float64{}, 1)
+	a := w.AddPlayer([3]float64{}, 1, "P")
+	b := w.AddPlayer([3]float64{}, 1, "P")
 	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{a: {}, b: {}})
 	// Force opposing teams, both on the hill.
 	w.Tanks[a].Team, w.Tanks[b].Team = 0, 1
@@ -233,7 +233,7 @@ func TestKotHContestedNoProgress(t *testing.T) {
 // the clock — only its win condition can end it.
 func TestEndlessModeNoTimeout(t *testing.T) {
 	w := NewWorld(2, ModeSurvival)
-	me := w.AddPlayer([3]float64{}, 1)
+	me := w.AddPlayer([3]float64{}, 1, "P")
 	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{me: {}})
 	if w.Phase != PhaseActive {
 		t.Fatalf("expected active, got %v", w.Phase)

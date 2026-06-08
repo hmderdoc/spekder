@@ -7,7 +7,7 @@ import "testing"
 func startCTF(t *testing.T, bots int) (*World, int) {
 	t.Helper()
 	w := NewWorld(bots, ModeCTF)
-	me := w.AddPlayer([3]float64{}, 1)
+	me := w.AddPlayer([3]float64{}, 1, "P")
 	in := map[int]Input{me: {}}
 	drive(w, countdownTime+0.2, 1.0/30, in)
 	if w.Phase != PhaseActive {

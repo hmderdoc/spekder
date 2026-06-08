@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -860,6 +861,7 @@ type Tank struct {
 	TurretPitch float64 // gun elevation: + = aim up, - = aim down (radians)
 	HP          int
 	Color       [3]float64
+	Name        string // display name: human handle, or a bot callsign
 	Vehicle     int
 	Bot         bool
 	Dead        bool
@@ -910,6 +912,7 @@ type TankSnap struct {
 	TurretPitch            float64 // gun elevation (+ up)
 	HP                     int
 	Color                  [3]float64
+	Name                   string
 	Dead, Bot, Shield, Hit bool
 	Kills, Deaths          int
 	Vehicle                int
@@ -1010,6 +1013,39 @@ type ZoneSnap struct {
 }
 
 // MatchSnap is the transmittable match state (lifecycle, mode, clock, winner,
+// KillCause labels how a tank died, for the kill feed / death banner.
+type KillCause int
+
+const (
+	CauseCannon  KillCause = iota // a tank's main gun
+	CauseTurret                   // a map turret entity
+	CauseHazard                   // a hazard pad / environment
+	CauseSuicide                  // self / unknown
+)
+
+// Word is the "...with a X" / "the X" fragment for the kill feed.
+func (c KillCause) Word() string {
+	switch c {
+	case CauseTurret:
+		return "a turret"
+	case CauseHazard:
+		return "a hazard"
+	case CauseSuicide:
+		return "the void"
+	default:
+		return "a cannon"
+	}
+}
+
+// KillEvent is one kill this tick: who killed whom and how. Killer is -1 for
+// environment kills (hazard / turret). Travels in MatchSnap so clients can show
+// "X killed you", "KILLED Y", and a leaderboard +1.
+type KillEvent struct {
+	Killer int // tank index, or -1 (environment)
+	Victim int // tank index
+	Cause  KillCause
+}
+
 // and Flag Run progress).
 type MatchSnap struct {
 	Mode       Mode
@@ -1018,11 +1054,12 @@ type MatchSnap struct {
 	WinnerID   int
 	FlagsLeft  int
 	FlagsTotal int
-	Votes      []int  // lobby vote tally per map index (len = len(Maps)); mode is implied
-	MapIdx     int    // active map index
-	Wave       int    // Survival: current wave
-	TeamScore  [2]int // CTF: captures per team
-	WinnerTeam int    // CTF: winning team (0/1), -1 = tie/none
+	Votes      []int       // lobby vote tally per map index (len = len(Maps)); mode is implied
+	Kills      []KillEvent // kills that occurred this tick (kill feed / death banner)
+	MapIdx     int         // active map index
+	Wave       int         // Survival: current wave
+	TeamScore  [2]int      // CTF: captures per team
+	WinnerTeam int         // CTF: winning team (0/1), -1 = tie/none
 }
 
 // Match returns the current match state for the snapshot/wire.
@@ -1042,7 +1079,7 @@ func (w *World) Match() MatchSnap {
 	}
 	return MatchSnap{
 		Mode: w.Mode, Phase: w.Phase, Timer: w.Timer, WinnerID: w.WinnerID,
-		FlagsLeft: left, FlagsTotal: len(w.flags), Votes: votes, MapIdx: w.MapIdx, Wave: w.wave,
+		FlagsLeft: left, FlagsTotal: len(w.flags), Votes: votes, Kills: w.kills, MapIdx: w.MapIdx, Wave: w.wave,
 		TeamScore: w.teamScore, WinnerTeam: w.winnerTeam,
 	}
 }
@@ -1070,8 +1107,9 @@ type World struct {
 	entities []Entity // runtime trait-objects, instanced from ActiveMap().Entities
 	zones    []Zone   // King of the Hill control zones (when the ruleset uses them)
 
-	bots      BotProfile // active difficulty profile (bot AI reads it; default NORMAL)
-	assistAim bool       // sticky aim assist for human players (default on)
+	bots      BotProfile  // active difficulty profile (bot AI reads it; default NORMAL)
+	assistAim bool        // sticky aim assist for human players (default on)
+	kills     []KillEvent // kills recorded this tick (consumed into MatchSnap)
 }
 
 // SetAimAssist toggles sticky aim assist for human players.
@@ -1324,7 +1362,7 @@ func NewWorld(numBots int, mode Mode) *World {
 		vi := rand.Intn(len(Vehicles))
 		w.Tanks = append(w.Tanks, Tank{
 			Bot: true, HP: veh(vi).MaxHP, guard: spawnGuardTime, vote: -1, Vehicle: vi,
-			Color: BotPalette[b%len(BotPalette)], Team: -1, Carrying: -1,
+			Color: BotPalette[b%len(BotPalette)], Name: botName(b), Team: -1, Carrying: -1,
 		})
 		w.Tanks[b].Pos = w.spawnPoint(b)
 		w.rollBotAI(b)
@@ -1332,14 +1370,32 @@ func NewWorld(numBots int, mode Mode) *World {
 	return w
 }
 
+// BotCallsigns name the AI tanks (better feedback than "yellow tank"). Beyond the
+// pool, names get a numeric suffix so they stay unique.
+var BotCallsigns = []string{
+	"RAZOR", "VIPER", "GHOST", "NOMAD", "HAVOC", "ROOK", "ZEALOT", "BISHOP",
+	"OMEN", "TANGO", "DELTA", "WIDOW", "CINDER", "JACKAL", "ONYX", "REBEL",
+}
+
+func botName(i int) string {
+	n := BotCallsigns[i%len(BotCallsigns)]
+	if i >= len(BotCallsigns) {
+		n += strconv.Itoa(i/len(BotCallsigns) + 1)
+	}
+	return n
+}
+
 // AddPlayer inserts a human tank (reusing a vacated slot if any) and returns its
 // index. color may be the zero value to auto-pick from PlayerPalette.
-func (w *World) AddPlayer(color [3]float64, vehicle int) int {
+func (w *World) AddPlayer(color [3]float64, vehicle int, name string) int {
 	if color == ([3]float64{}) {
 		color = PlayerPalette[w.humanCount()%len(PlayerPalette)]
 	}
+	if name == "" {
+		name = "PLAYER"
+	}
 	mk := func(i int) Tank {
-		t := Tank{HP: veh(vehicle).MaxHP, Color: color, guard: spawnGuardTime, vote: -1, Vehicle: vehicle, lives: survivalLives, Team: -1, Carrying: -1}
+		t := Tank{HP: veh(vehicle).MaxHP, Color: color, Name: name, guard: spawnGuardTime, vote: -1, Vehicle: vehicle, lives: survivalLives, Team: -1, Carrying: -1}
 		t.Pos = w.spawnPoint(i)
 		t.HullYaw = w.faceTarget(i)
 		return t
@@ -1449,6 +1505,7 @@ func (w *World) fire(owner int) {
 // buttons this tick (absent => idle); bots are driven by AI. The match
 // lifecycle (countdown -> active -> ended -> next countdown) gates simulation.
 func (w *World) Update(dt float64, inputs map[int]Input) {
+	w.kills = w.kills[:0] // kill feed is per-tick; Match() reads this tick's kills
 	w.Timer -= dt
 	switch w.Phase {
 	case PhaseCountdown:
@@ -1866,7 +1923,7 @@ func (w *World) setupSurvival() {
 		}
 	}
 	for bots < survivalPool {
-		w.Tanks = append(w.Tanks, Tank{Bot: true, gone: true, Dead: true, vote: -1, Vehicle: 1, HP: veh(1).MaxHP, Team: -1, Carrying: -1})
+		w.Tanks = append(w.Tanks, Tank{Bot: true, gone: true, Dead: true, vote: -1, Vehicle: 1, HP: veh(1).MaxHP, Name: botName(len(w.Tanks)), Team: -1, Carrying: -1})
 		bots++
 	}
 	for i := range w.Tanks {
@@ -2103,7 +2160,7 @@ func (w *World) stepHazard(e *Entity, dt float64) {
 		t.hazardDebt += e.Hazard.DPS * dt
 		if whole := int(t.hazardDebt); whole > 0 {
 			t.hazardDebt -= float64(whole)
-			w.hurt(ti, whole, -1)
+			w.hurt(ti, whole, -1, CauseHazard)
 		}
 	}
 }
@@ -2883,7 +2940,7 @@ func (w *World) nearestEnemy(self int) int {
 // deaths, buff clearing, Survival lives, CTF flag drop, kill credit). owner is
 // the firing tank index for kill credit; <0 means no credit (e.g. a turret or
 // a hazard killed them). Caller has already checked the tank is vulnerable.
-func (w *World) hurt(ti, dmg, owner int) {
+func (w *World) hurt(ti, dmg, owner int, cause KillCause) {
 	t := &w.Tanks[ti]
 	t.HP -= dmg
 	t.hitFlash = tankHitFlash
@@ -2904,9 +2961,12 @@ func (w *World) hurt(ti, dmg, owner int) {
 		f.Pos, f.dropTimer = V3{t.Pos.X, 0, t.Pos.Z}, flagReturnTime
 		t.Carrying = -1
 	}
+	killer := -1
 	if owner >= 0 && owner < len(w.Tanks) && owner != ti {
 		w.Tanks[owner].Kills++
+		killer = owner
 	}
+	w.kills = append(w.kills, KillEvent{Killer: killer, Victim: ti, Cause: cause})
 }
 
 // shotHitsEntity reports whether a projectile is absorbed by a map entity: a
@@ -2983,7 +3043,11 @@ func (w *World) stepProjectiles(dt float64) {
 				if dmg <= 0 {
 					dmg = projDmg
 				}
-				w.hurt(ti, dmg, s.owner)
+				cause := CauseCannon // a tank's shot; entity-fired shots have no tank owner
+				if s.owner < 0 {
+					cause = CauseTurret
+				}
+				w.hurt(ti, dmg, s.owner, cause)
 				hit = true
 				break
 			}
@@ -3132,7 +3196,7 @@ func (w *World) Snapshot() ([]TankSnap, []V3, []FlagSnap, []PickupSnap) {
 		}
 		ts = append(ts, TankSnap{
 			ID: i, Pos: t.Pos, HullYaw: t.HullYaw, TurretYaw: t.TurretYaw, TurretPitch: t.TurretPitch,
-			HP: t.HP, Color: t.Color, Dead: t.Dead, Bot: t.Bot,
+			HP: t.HP, Color: t.Color, Name: t.Name, Dead: t.Dead, Bot: t.Bot,
 			Shield: t.guard > 0 || t.shieldT > 0, Hit: t.hitFlash > 0,
 			Cloak: t.cloakT > 0, Rapid: t.rapidT > 0,
 			Vehicle: t.Vehicle, Lives: t.lives, Team: t.Team, Carrying: t.Carrying >= 0,

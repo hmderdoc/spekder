@@ -623,7 +623,7 @@ func (in *input) reader(t Term) {
 // drawLeaderboard overlays a live, color-coded standings list down the left
 // edge: a swatch in each tank's color + kills-deaths, sorted by kills, with your
 // row marked. Colors ARE the identity (same scheme as the tanks/radar).
-func drawLeaderboard(w *bufio.Writer, cols, rows int, v viewState) {
+func drawLeaderboard(w *bufio.Writer, cols, rows int, v viewState, recentKill map[int]float64) {
 	ranked := append([]gm.TankSnap(nil), v.tanks...)
 	sort.Slice(ranked, func(a, b int) bool {
 		if ranked[a].Kills != ranked[b].Kills {
@@ -643,10 +643,21 @@ func drawLeaderboard(w *bufio.Writer, cols, rows int, v viewState) {
 		if t.ID == v.me {
 			mark = "\x1b[1;37m>" // your row
 		}
-		fmt.Fprintf(w, "\x1b[%d;1H%s\x1b[38;2;%d;%d;%dm\xdb\xdb\x1b[0;37m %2d-%d\x1b[0m   ",
+		name := t.Name
+		if name == "" {
+			name = "BOT"
+		}
+		if len(name) > 8 {
+			name = name[:8]
+		}
+		plus := "   "
+		if recentKill[t.ID] > 0 { // just scored: a brief light-green +1
+			plus = "\x1b[1;92m+1\x1b[0m "
+		}
+		fmt.Fprintf(w, "\x1b[%d;1H%s\x1b[38;2;%d;%d;%dm\xdb\xdb\x1b[0;37m %2d-%d \x1b[0;36m%-8s\x1b[0m %s",
 			3+i, mark,
 			int(clampB(t.Color[0]*255)), int(clampB(t.Color[1]*255)), int(clampB(t.Color[2]*255)),
-			t.Kills, t.Deaths)
+			t.Kills, t.Deaths, name, plus)
 	}
 }
 
@@ -751,7 +762,7 @@ func drawStatus(w *bufio.Writer, cols int, v viewState, p *gm.TankSnap) {
 
 // drawDeathBanner overlays a big red TheDraw "DESTROYED" with a respawn count,
 // centered. Auto-fits the font to the screen width.
-func drawDeathBanner(w *bufio.Writer, cols, rows int, respawnIn float64) {
+func drawDeathBanner(w *bufio.Writer, cols, rows int, respawnIn float64, deathBy string) {
 	const word = "DESTROYED"
 	top := rows/2 - 2
 	if f, ok := tdf.Fit(word, cols-2, "untx", "union", "block"); ok {
@@ -765,8 +776,38 @@ func drawDeathBanner(w *bufio.Writer, cols, rows int, respawnIn float64) {
 		t := "** DESTROYED **"
 		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;31m%s\x1b[0m", top, (cols-len(t))/2+1, t)
 	}
+	if deathBy != "" { // who got you (kill feed)
+		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;1;91m%s\x1b[0m", top, (cols-len(deathBy))/2+1, clip(deathBy, cols-2))
+		top++
+	}
 	msg := fmt.Sprintf("RESPAWNING IN %.0f", respawnIn+0.99)
 	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;97m%s\x1b[0m", top+1, (cols-len(msg))/2+1, msg)
+}
+
+// drawKillBanner shows a transient "KILLED X" under the HP bar (top-center).
+func drawKillBanner(w *bufio.Writer, cols int, text string) {
+	fmt.Fprintf(w, "\x1b[3;%dH\x1b[1;92m%s\x1b[0m", (cols-len(text))/2+1, clip(text, cols-2))
+}
+
+// tankName resolves a tank id to its display name (fallback for left/unknown).
+func tankName(v viewState, id int) string {
+	for i := range v.tanks {
+		if v.tanks[i].ID == id {
+			if v.tanks[i].Name != "" {
+				return v.tanks[i].Name
+			}
+			break
+		}
+	}
+	return "a tank"
+}
+
+// deathText phrases who/what killed you for the death banner.
+func deathText(v viewState, k gm.KillEvent) string {
+	if k.Killer >= 0 {
+		return tankName(v, k.Killer) + " killed you with " + k.Cause.Word()
+	}
+	return "Killed by " + k.Cause.Word()
 }
 
 // overlaySig is a small key identifying the current overlay/HUD state; when it
@@ -974,7 +1015,8 @@ func runOptions(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *inpu
 					saveUserSettings(dropfile, *s)
 					draw()
 				case iEditor:
-					runEditor(w, cols, rows, rows3d, rnd, ip, s)
+					_, pn := door32Identity(dropfile)
+					runEditor(w, cols, rows, rows3d, rnd, ip, s, pn)
 					draw() // repaint the options menu on return
 				case iBack:
 					return
@@ -1283,15 +1325,18 @@ func drawScoreboard(w *bufio.Writer, cols, rows int, v viewState) {
 		if i >= 8 {
 			break
 		}
-		name := "BOT"
-		if !t.Bot {
-			name = "PLAYER"
+		name := t.Name
+		if name == "" {
+			name = "BOT"
+		}
+		if len(name) > 12 {
+			name = name[:12]
 		}
 		style := "\x1b[0;37m"
 		if t.ID == v.me {
-			name, style = "YOU", "\x1b[1;97m"
+			style = "\x1b[1;97m" // your row is bright
 		}
-		body := fmt.Sprintf("%-7s  %2d frags   %2d deaths", name, t.Kills, t.Deaths)
+		body := fmt.Sprintf("%-12s  %2d frags   %2d deaths", name, t.Kills, t.Deaths)
 		// color swatch in the tank's color, then the body
 		col := (cols-(len(body)+3))/2 + 1
 		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[38;2;%d;%d;%dm\xdb\xdb\x1b[0m %s%s\x1b[0m",
@@ -1463,6 +1508,7 @@ func main() {
 	// The menu drives everything: pick a single-player mode, join the arena, or
 	// open OPTIONS. Preferences are loaded per-BBS-user and editable in OPTIONS.
 	settings := loadUserSettings(dropfile)
+	_, playerName := door32Identity(dropfile) // the caller's handle, for scoreboards
 	note := ""
 	for {
 		choice := runMenu(w, cols, rows, ip, note)
@@ -1503,9 +1549,9 @@ func main() {
 				if r := gm.Maps[mapIdx].Rules; r != nil && r.Mode >= 0 {
 					mode = gm.Mode(r.Mode)
 				}
-				sess = newOfflineOnMap(mapIdx, offlineBots, mode, vehicle, settings.difficulty, settings.aimAssist)
+				sess = newOfflineOnMap(mapIdx, offlineBots, mode, vehicle, settings.difficulty, settings.aimAssist, playerName)
 			} else {
-				sess = newOfflineSession(offlineBots, choice.mode, vehicle, settings.difficulty, settings.aimAssist)
+				sess = newOfflineSession(offlineBots, choice.mode, vehicle, settings.difficulty, settings.aimAssist, playerName)
 			}
 		}
 		note = ""
@@ -1537,7 +1583,11 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 	fps := 0
 	voteMode := -1   // our lobby vote (map/pairing index), cycled with </>
 	lobbyN := 0      // number of votable pairings (from the server's MsgLobby)
-	curMapSig := "?" // signature of the currently-built map; rebuild on change
+	killBanner := "" // transient "KILLED X" top-center text
+	killBannerT := 0.0
+	deathBy := ""                   // "X killed you with Y" (shown on the death banner)
+	recentKill := map[int]float64{} // tank id -> seconds left to show a leaderboard +1
+	curMapSig := "?"                // signature of the currently-built map; rebuild on change
 	topdown := false
 	lastPhase := gm.PhaseActive
 
@@ -1594,6 +1644,32 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 			continue
 		}
 		p := v.self
+
+		// Kill feed: latch this tick's events into transient HUD state.
+		for _, k := range v.kills {
+			if k.Killer == v.me && k.Victim != v.me {
+				killBanner, killBannerT = "KILLED "+tankName(v, k.Victim), 3.5
+			}
+			if k.Victim == v.me {
+				deathBy = deathText(v, k)
+			}
+			if k.Killer >= 0 {
+				recentKill[k.Killer] = 5.0
+			}
+		}
+		if killBannerT > 0 {
+			if killBannerT -= dt; killBannerT <= 0 {
+				killBanner = ""
+			}
+		}
+		for id := range recentKill {
+			if recentKill[id] -= dt; recentKill[id] <= 0 {
+				delete(recentKill, id)
+			}
+		}
+		if !p.Dead {
+			deathBy = ""
+		}
 
 		// Rebuild the static geometry when the active map changes (and full repaint).
 		if sig := fmt.Sprintf("%s/%.0f/%d", v.gmap.Name, v.gmap.Size, len(v.gmap.Obstacles)); sig != curMapSig {
@@ -1673,12 +1749,15 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 			if !topdown {
 				drawRadarCorners(w, cols)
 			}
-			drawLeaderboard(w, cols, rows, v)
+			drawLeaderboard(w, cols, rows, v, recentKill)
 			drawStatus(w, cols, v, &p) // mode + clock + mode-specifics, row 2 (below HP bar)
 			if p.Dead {
-				drawDeathBanner(w, cols, rows, p.RespawnIn)
+				drawDeathBanner(w, cols, rows, p.RespawnIn, deathBy)
 			} else {
 				drawHPBar(w, &p)
+				if killBannerT > 0 {
+					drawKillBanner(w, cols, killBanner)
+				}
 			}
 		}
 		w.Flush()
