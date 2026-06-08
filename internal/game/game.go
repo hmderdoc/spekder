@@ -400,21 +400,24 @@ const (
 	pitchMax         = 0.70  // max elevation (aim up), ~40 deg
 	pitchMin         = -0.50 // max depression (aim down), ~-29 deg
 
-	// Aim assist (sticky aim): when the reticle is within these angular windows of
-	// an enemy on both axes, the turret eases onto the firing solution at
-	// assistRate (gradual, not a snap). Outside the windows, aiming is fully manual.
-	assistYawWin   = 0.13 // rad (~7.5 deg)
-	assistPitchWin = 0.13
-	assistRate     = 1.1 // rad/sec the assist closes the gap
-	fireDelay      = 0.55
-	jumpSpeed      = 8.5  // upward launch velocity (units/sec)
-	gravity        = 24.0 // downward acceleration (units/sec^2)
-	projSpeed      = 24.0
-	projLife       = 2.4
-	projDmg        = 34
-	tankMaxHP      = 100
-	hitRadius      = 1.15
-	tankBodyTop    = 1.9 // top of a tank's hittable body above its feet (×vehicle scale)
+	// Aim assist (lock-on-sweep): while the player is turning/elevating the turret,
+	// if the aim passes within these capture radii of a valid target on both axes,
+	// it LOCKS onto the target (snap + hold) so you can fire - catching small/fast-
+	// passing targets that discrete key steps overshoot. Holding still keeps the
+	// lock; turning for assistLockBreak sec releases it; Recenter / target-loss clear it.
+	assistCaptureYaw   = 0.22 // rad (~12.5 deg) lock-on radius
+	assistCapturePitch = 0.22
+	assistLockBreak    = 0.40 // sec of sustained turn to break a lock
+	assistBreakCool    = 0.50 // sec after a break before assist re-acquires
+	fireDelay          = 0.55
+	jumpSpeed          = 8.5  // upward launch velocity (units/sec)
+	gravity            = 24.0 // downward acceleration (units/sec^2)
+	projSpeed          = 24.0
+	projLife           = 2.4
+	projDmg            = 34
+	tankMaxHP          = 100
+	hitRadius          = 1.15
+	tankBodyTop        = 1.9 // top of a tank's hittable body above its feet (×vehicle scale)
 
 	ArenaA = 22.0 // default playfield half-extent (maps may override via Size)
 
@@ -756,6 +759,14 @@ type Tank struct {
 	aiSeek                                                 bool
 	acquireT                                               float64 // reaction countdown after acquiring a target
 	lastTgt                                                int     // last target index (to detect re-acquire); -1 = none
+
+	// aim-assist lock (human players): kind 0 none / 1 tank / 2 entity, idx into
+	// that slice; lockBreak accumulates sustained turn input to release the lock;
+	// lockCool suppresses re-acquire after a break so a held turn carries you off.
+	lockKind  int
+	lockIdx   int
+	lockBreak float64
+	lockCool  float64
 }
 
 // TankSnap is the renderable/transmittable view of a tank: exported, flat, no
@@ -2244,80 +2255,131 @@ func (w *World) simulate(dt float64, inputs map[int]Input) {
 	}
 }
 
-// assistAimStep is sticky aim assist: if the player's reticle is already within
-// the assist windows of a valid target (both yaw and pitch), with line of sight,
-// ease the turret onto the exact firing solution at assistRate (gradual). Valid
-// targets are live enemy tanks AND shootable map entities (turrets, destructible
-// cover) - the latter are exactly the small/elevated things that are hard to aim
-// at by hand. It never drags aim across the screen or picks targets; it only
-// finishes a shot the player is already lined up on.
-func (w *World) assistAimStep(i int, dt float64) {
+// aimAssistStep is lock-on-sweep aim assist for a human player. While the player
+// is turning/elevating the turret, if the aim is within the capture radius of a
+// valid target (both axes, in range, line of sight), it LOCKS onto that target:
+// the turret snaps on and tracks it so the player can fire, catching small/fast-
+// passing targets that discrete key steps overshoot. Holding still keeps the lock;
+// keeping a turn held for assistLockBreak sec releases it; Recenter and target
+// loss clear it. Valid targets are live enemy tanks and shootable entities
+// (turrets, destructibles) - the small/elevated things hardest to hit by hand.
+func (w *World) aimAssistStep(i int, turning, elevating bool, dt float64) {
 	if !w.assistAim {
 		return
 	}
 	t := &w.Tanks[i]
+	if t.lockCool > 0 {
+		t.lockCool -= dt
+	}
+	// Maintain an existing lock: hold/track it, or release on a sustained turn.
+	if t.lockKind != 0 {
+		if p, ok := w.lockPoint(i); ok {
+			if turning || elevating {
+				if t.lockBreak += dt; t.lockBreak >= assistLockBreak {
+					// released; suppress re-acquire so the held turn carries you off
+					t.lockKind, t.lockBreak, t.lockCool = 0, 0, assistBreakCool
+					return
+				}
+			} else {
+				t.lockBreak = 0
+			}
+			w.aimAt(t, p)
+			return
+		}
+		t.lockKind, t.lockBreak = 0, 0 // target gone
+	}
+	if (!turning && !elevating) || t.lockCool > 0 {
+		return // acquire only while actively aiming, and not during break cooldown
+	}
+	// Acquire: the valid target closest to the reticle within the capture radii.
 	aimYaw := t.HullYaw + t.TurretYaw
 	muzzleY := t.Pos.Y + EyeHeight
 	teamMode := w.rules().Teams == 2
-
-	bestOff := assistYawWin
-	var wantYaw, wantPitch float64
-	found := false
-	// consider weighs a candidate target point against the current best (closest
-	// to the reticle within both windows, in range, with line of sight).
-	consider := func(px, py, pz float64) {
-		dx, dz := px-t.Pos.X, pz-t.Pos.Z
+	best := assistCaptureYaw
+	bestKind, bestIdx := 0, -1
+	var bestP V3
+	consider := func(kind, idx int, p V3) {
+		dx, dz := p.X-t.Pos.X, p.Z-t.Pos.Z
 		dist := math.Hypot(dx, dz)
 		if dist < 0.5 || dist > botFireRange {
 			return
 		}
-		wy := math.Atan2(dx, dz)
-		yoff := math.Abs(angDiff(wy, aimYaw))
-		if yoff >= bestOff {
+		yoff := math.Abs(angDiff(math.Atan2(dx, dz), aimYaw))
+		if yoff >= best {
 			return
 		}
-		wp := clampPitch(math.Atan2(py-muzzleY, dist))
-		if math.Abs(wp-t.TurretPitch) >= assistPitchWin {
+		wp := clampPitch(math.Atan2(p.Y-muzzleY, dist))
+		if math.Abs(wp-t.TurretPitch) >= assistCapturePitch {
 			return
 		}
-		if w.aimBlocked(t.Pos, V3{px, py, pz}) {
+		if w.aimBlocked(t.Pos, p) {
 			return
 		}
-		bestOff, wantYaw, wantPitch, found = yoff, wy, wp, true
+		best, bestKind, bestIdx, bestP = yoff, kind, idx, p
 	}
-
-	for j := range w.Tanks { // live enemy tanks
+	for j := range w.Tanks {
 		e := &w.Tanks[j]
-		if j == i || e.Dead || e.gone || e.cloakT > 0 {
+		if j == i || e.Dead || e.gone || e.cloakT > 0 || (teamMode && e.Team == t.Team) {
 			continue
 		}
-		if teamMode && e.Team == t.Team {
-			continue
-		}
-		consider(e.Pos.X, e.Pos.Y+turretAimHeight, e.Pos.Z)
+		consider(1, j, V3{e.Pos.X, e.Pos.Y + turretAimHeight, e.Pos.Z})
 	}
-	for k := range w.entities { // shootable map entities (turrets, destructibles)
+	for k := range w.entities {
 		e := &w.entities[k]
 		if e.Dead || e.Destruct == nil {
 			continue
 		}
-		consider(e.Pos.X, e.Pos.Y, e.Pos.Z) // aim at the body center
+		consider(2, k, e.Pos)
 	}
-	if !found {
+	if bestKind == 0 {
 		return
 	}
-	t.TurretYaw = turnToward(t.TurretYaw, angDiff(wantYaw, t.HullYaw), assistRate*dt)
-	t.TurretPitch = clampPitch(approach(t.TurretPitch, wantPitch, assistRate*dt))
+	t.lockKind, t.lockIdx, t.lockBreak = bestKind, bestIdx, 0
+	w.aimAt(t, bestP)
 }
 
-// approach moves cur toward target by at most step.
-func approach(cur, target, step float64) float64 {
-	if d := target - cur; d > step {
-		return cur + step
-	} else if d < -step {
-		return cur - step
+// lockPoint resolves the current aim-lock's target world point and whether it's
+// still a valid lock (alive, in range, line of sight).
+func (w *World) lockPoint(i int) (V3, bool) {
+	t := &w.Tanks[i]
+	var p V3
+	switch t.lockKind {
+	case 1:
+		if t.lockIdx < 0 || t.lockIdx >= len(w.Tanks) {
+			return V3{}, false
+		}
+		e := &w.Tanks[t.lockIdx]
+		if e.Dead || e.gone || e.cloakT > 0 {
+			return V3{}, false
+		}
+		if w.rules().Teams == 2 && e.Team == t.Team {
+			return V3{}, false
+		}
+		p = V3{e.Pos.X, e.Pos.Y + turretAimHeight, e.Pos.Z}
+	case 2:
+		if t.lockIdx < 0 || t.lockIdx >= len(w.entities) {
+			return V3{}, false
+		}
+		e := &w.entities[t.lockIdx]
+		if e.Dead || e.Destruct == nil {
+			return V3{}, false
+		}
+		p = e.Pos
+	default:
+		return V3{}, false
 	}
-	return target
+	dx, dz := p.X-t.Pos.X, p.Z-t.Pos.Z
+	if math.Hypot(dx, dz) > botFireRange || w.aimBlocked(t.Pos, p) {
+		return V3{}, false
+	}
+	return p, true
+}
+
+// aimAt points a tank's turret (yaw + pitch) exactly at a world point.
+func (w *World) aimAt(t *Tank, p V3) {
+	dx, dz := p.X-t.Pos.X, p.Z-t.Pos.Z
+	t.TurretYaw = angDiff(math.Atan2(dx, dz), t.HullYaw)
+	t.TurretPitch = clampPitch(math.Atan2(p.Y-(t.Pos.Y+EyeHeight), math.Hypot(dx, dz)))
 }
 
 // aimBlocked reports whether a tall obstacle sits on the line between two points
@@ -2364,8 +2426,9 @@ func (w *World) applyInput(i int, in Input, dt float64) {
 	}
 	if in.Recenter {
 		t.TurretYaw, t.TurretPitch = 0, 0 // snap turret to hull-forward and level
+		t.lockKind, t.lockBreak = 0, 0    // clear any aim lock
 	} else {
-		w.assistAimStep(i, dt) // sticky aim: ease onto a near-reticle enemy
+		w.aimAssistStep(i, in.TurretL || in.TurretR, in.AimUp || in.AimDown, dt)
 	}
 	clampArena(&t.Pos, w.half())
 	w.collide(&t.Pos)
