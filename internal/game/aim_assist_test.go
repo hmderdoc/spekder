@@ -65,6 +65,42 @@ func TestAimAssistDisabled(t *testing.T) {
 	}
 }
 
+// TestAimAssistTargetsTurret: aim assist also eases onto shootable map entities
+// (turrets / destructibles) - the small, elevated, hard-to-hit things that the
+// feature is most needed for.
+func TestAimAssistTargetsTurret(t *testing.T) {
+	w := NewWorld(0, ModeDeathmatch)
+	if idx := FindMap("OPEN GRID"); idx >= 0 {
+		w.PinMap(idx)
+	}
+	me := w.AddPlayer([3]float64{}, 1)
+	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{me: {}})
+	w.Tanks[me].Pos = V3{}
+	w.Tanks[me].HullYaw, w.Tanks[me].TurretYaw, w.Tanks[me].TurretPitch = 0, 0, 0
+	w.SetAimAssist(true)
+	w.entities = []Entity{{
+		Kind: "turret", Pos: V3{X: 1, Y: 2, Z: 10}, Half: V3{X: 0.7, Y: 0.3, Z: 0.7},
+		Destruct: &DestructTrait{MaxHP: 50}, HP: 50, Turret: &TurretTrait{Range: 20},
+	}}
+	want := math.Atan2(1, 10)
+	for i := 0; i < 40; i++ {
+		w.assistAimStep(me, 1.0/30)
+	}
+	if aim := w.Tanks[me].HullYaw + w.Tanks[me].TurretYaw; math.Abs(aim-want) > 0.01 {
+		t.Fatalf("assist should settle on the turret entity (~%v), got %v", want, aim)
+	}
+	if w.Tanks[me].TurretPitch <= 0 {
+		t.Fatalf("assist should elevate toward the raised turret, pitch=%v", w.Tanks[me].TurretPitch)
+	}
+	// A destroyed entity is not a target.
+	w.entities[0].Dead = true
+	w.Tanks[me].TurretYaw, w.Tanks[me].TurretPitch = 0, 0
+	w.assistAimStep(me, 1.0/30)
+	if w.Tanks[me].TurretYaw != 0 {
+		t.Fatalf("should not assist onto a destroyed entity, turret moved to %v", w.Tanks[me].TurretYaw)
+	}
+}
+
 // TestAimAssistSkipsCloaked: a cloaked enemy in the window isn't assisted onto.
 func TestAimAssistSkipsCloaked(t *testing.T) {
 	w, me, tgt := twoPlayerOpen(t)

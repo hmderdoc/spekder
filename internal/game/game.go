@@ -2245,10 +2245,12 @@ func (w *World) simulate(dt float64, inputs map[int]Input) {
 }
 
 // assistAimStep is sticky aim assist: if the player's reticle is already within
-// the assist windows of an enemy (both yaw and pitch), and there's line of sight,
-// ease the turret onto the exact firing solution at assistRate (gradual). It never
-// drags the aim across the screen or picks targets - only finishes a shot the
-// player is already lined up on, fixing the discrete-arrow-step overshoot.
+// the assist windows of a valid target (both yaw and pitch), with line of sight,
+// ease the turret onto the exact firing solution at assistRate (gradual). Valid
+// targets are live enemy tanks AND shootable map entities (turrets, destructible
+// cover) - the latter are exactly the small/elevated things that are hard to aim
+// at by hand. It never drags aim across the screen or picks targets; it only
+// finishes a shot the player is already lined up on.
 func (w *World) assistAimStep(i int, dt float64) {
 	if !w.assistAim {
 		return
@@ -2257,9 +2259,34 @@ func (w *World) assistAimStep(i int, dt float64) {
 	aimYaw := t.HullYaw + t.TurretYaw
 	muzzleY := t.Pos.Y + EyeHeight
 	teamMode := w.rules().Teams == 2
-	best, bestOff := -1, assistYawWin
+
+	bestOff := assistYawWin
 	var wantYaw, wantPitch float64
-	for j := range w.Tanks {
+	found := false
+	// consider weighs a candidate target point against the current best (closest
+	// to the reticle within both windows, in range, with line of sight).
+	consider := func(px, py, pz float64) {
+		dx, dz := px-t.Pos.X, pz-t.Pos.Z
+		dist := math.Hypot(dx, dz)
+		if dist < 0.5 || dist > botFireRange {
+			return
+		}
+		wy := math.Atan2(dx, dz)
+		yoff := math.Abs(angDiff(wy, aimYaw))
+		if yoff >= bestOff {
+			return
+		}
+		wp := clampPitch(math.Atan2(py-muzzleY, dist))
+		if math.Abs(wp-t.TurretPitch) >= assistPitchWin {
+			return
+		}
+		if w.aimBlocked(t.Pos, V3{px, py, pz}) {
+			return
+		}
+		bestOff, wantYaw, wantPitch, found = yoff, wy, wp, true
+	}
+
+	for j := range w.Tanks { // live enemy tanks
 		e := &w.Tanks[j]
 		if j == i || e.Dead || e.gone || e.cloakT > 0 {
 			continue
@@ -2267,26 +2294,16 @@ func (w *World) assistAimStep(i int, dt float64) {
 		if teamMode && e.Team == t.Team {
 			continue
 		}
-		dx, dz := e.Pos.X-t.Pos.X, e.Pos.Z-t.Pos.Z
-		dist := math.Hypot(dx, dz)
-		if dist > botFireRange {
-			continue
-		}
-		wy := math.Atan2(dx, dz)
-		yoff := math.Abs(angDiff(wy, aimYaw))
-		if yoff >= bestOff {
-			continue
-		}
-		wp := clampPitch(math.Atan2((e.Pos.Y+turretAimHeight)-muzzleY, dist))
-		if math.Abs(wp-t.TurretPitch) >= assistPitchWin {
-			continue
-		}
-		if w.aimBlocked(t.Pos, e.Pos) {
-			continue // don't assist onto an enemy behind cover
-		}
-		best, bestOff, wantYaw, wantPitch = j, yoff, wy, wp
+		consider(e.Pos.X, e.Pos.Y+turretAimHeight, e.Pos.Z)
 	}
-	if best < 0 {
+	for k := range w.entities { // shootable map entities (turrets, destructibles)
+		e := &w.entities[k]
+		if e.Dead || e.Destruct == nil {
+			continue
+		}
+		consider(e.Pos.X, e.Pos.Y, e.Pos.Z) // aim at the body center
+	}
+	if !found {
 		return
 	}
 	t.TurretYaw = turnToward(t.TurretYaw, angDiff(wantYaw, t.HullYaw), assistRate*dt)
