@@ -23,11 +23,33 @@ var BotProfiles = []BotProfile{ /* Easy … Ultimate, indexed by tier */ }
 ```
 
 The World holds the active profile; the bot AI reads it instead of today's
-hardcoded `turretRate` / `botFireRange` / `botAimTol` / `botFireDelay`. The
-unset/zero default is **HARD** (today's behavior), so tests and any path that
-doesn't set difficulty are unchanged. Difficulty is a **sim parameter** — it never
-rides the wire. (Arena bot difficulty is the sysop's server config; the menu
-setting governs offline single-player.)
+hardcoded `turretRate` / `botFireRange` / `botAimTol` / `botFireDelay` /
+`botKeepDist`. Difficulty is a **sim parameter** — it never rides the wire.
+(Arena bot difficulty is the sysop's server config; the menu setting governs
+offline single-player.)
+
+**Tune for fun, not for the past.** The current behavior is a starting point, not a
+baseline to preserve — we change it freely to improve playability and rewrite tests
+to match the *intended* behavior. Tests assert tier *relationships* (e.g. EASY bots
+miss more and react slower than HARD) and mechanics, not a frozen legacy feel. The
+new-player default is NORMAL (gentler than today).
+
+## Per-bot variation (don't be static)
+
+Tiers alone would just give a *uniform* wall at five heights — every bot identical
+and predictable, which is a big part of why it isn't fun today. So each bot also
+rolls **per-bot jitter** within its tier at spawn, varying the static-feeling knobs
+so opponents feel individual and unpredictable:
+
+- engagement distance (today every bot holds the exact same `botKeepDist`),
+- reaction delay and turret track rate,
+- aim wobble,
+- a small aggression lean (push-in vs hold-and-poke).
+
+Same idea over time, not just per-bot: a bot's aim/aggression can drift slightly so
+it doesn't behave like a fixed turret. The profile sets the tier's *center*; the
+jitter spreads bots around it. This is what turns "five static walls" into five
+bands of varied opponents.
 
 ## Tiers (rough starting values; tune in playtest)
 
@@ -43,11 +65,12 @@ real need is.
 | HARD      | 0     | 0.10       | 2.6       | 0.02   | 1.0          | no          |
 | ULTIMATE  | 0     | 0.0        | 3.3       | 0.00   | 0.8          | yes          |
 
-**HARD ≈ today's bots** (current consts: track 2.6, reload 1.0, full sight, ~perfect
-aim, instant react) and is the **default for any unset/test path**, so existing
-behavior and tests don't regress. **NORMAL is the default for a new player** (gentler
-than today). EASY is meant to be beatable by anyone; ULTIMATE is the one step up — a
-wall that also seeks pickups.
+**HARD** is roughly today's lethality (track 2.6, full sight, near-perfect aim) — but
+even HARD gets per-bot variation so it's not the current uniform wall. **NORMAL is
+the new-player default** (gentler than today). EASY is beatable by anyone; ULTIMATE
+is the one step up — a wall that also seeks pickups. These are *centers*; per-bot
+jitter spreads each tier into a band. All values are starting points to tune in
+playtest, not anything to freeze.
 
 ## Bot-AI integration points (v1: cheap four + pickups)
 
