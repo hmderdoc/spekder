@@ -4,6 +4,9 @@ import (
 	"bufio"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	gm "spekder/internal/game"
@@ -32,38 +35,40 @@ var (
 	colZone = [3]float64{0.55, 0.55, 0.60}
 )
 
+// Placers take p = the surface point under the cursor (p.Y = top of any obstacle/
+// ramp there, else 0), so things stack on platforms/ramps instead of the floor.
 var catItems = []catItem{
 	{"WALL", "wall", gm.V3{X: 1, Y: 1, Z: 1}, func(m *gm.Map, p gm.V3) {
-		m.Obstacles = append(m.Obstacles, gm.Box{Pos: gm.V3{X: p.X, Y: 1, Z: p.Z}, Half: gm.V3{X: 1, Y: 1, Z: 1}, Color: colWall})
+		m.Obstacles = append(m.Obstacles, gm.Box{Pos: gm.V3{X: p.X, Y: p.Y + 1, Z: p.Z}, Half: gm.V3{X: 1, Y: 1, Z: 1}, Color: colWall})
 	}},
 	{"PLATFORM", "wall", gm.V3{X: 3, Y: 0.4, Z: 3}, func(m *gm.Map, p gm.V3) {
-		m.Obstacles = append(m.Obstacles, gm.Box{Pos: gm.V3{X: p.X, Y: 0.4, Z: p.Z}, Half: gm.V3{X: 3, Y: 0.4, Z: 3}, Color: colPlat})
+		m.Obstacles = append(m.Obstacles, gm.Box{Pos: gm.V3{X: p.X, Y: p.Y + 0.4, Z: p.Z}, Half: gm.V3{X: 3, Y: 0.4, Z: 3}, Color: colPlat})
 	}},
 	{"RAMP", "wall", gm.V3{X: 2.5, Y: 1.5, Z: 3}, func(m *gm.Map, p gm.V3) {
-		m.Ramps = append(m.Ramps, gm.Ramp{Pos: gm.V3{X: p.X, Z: p.Z}, Half: gm.V3{X: 2.5, Z: 3}, H: 3, Dir: 0, Color: colPlat})
+		m.Ramps = append(m.Ramps, gm.Ramp{Pos: gm.V3{X: p.X, Y: p.Y, Z: p.Z}, Half: gm.V3{X: 2.5, Z: 3}, H: 3, Dir: 0, Color: colPlat})
 	}},
 	{"TURRET", "turret", gm.V3{X: 0.7, Y: 0.7, Z: 0.7}, func(m *gm.Map, p gm.V3) {
-		m.Entities = append(m.Entities, gm.Entity{Kind: "turret", Pos: gm.V3{X: p.X, Y: 0.7, Z: p.Z}, Half: gm.V3{X: 0.7, Y: 0.7, Z: 0.7},
+		m.Entities = append(m.Entities, gm.Entity{Kind: "turret", Pos: gm.V3{X: p.X, Y: p.Y + 0.7, Z: p.Z}, Half: gm.V3{X: 0.7, Y: 0.7, Z: 0.7},
 			Color: colTurr, Solid: true, Turret: &gm.TurretTrait{Range: 22, FireDelay: 1.4, Dmg: 14, TurnRate: 1.6},
 			Destruct: &gm.DestructTrait{MaxHP: 60}, Respawn: &gm.RespawnTrait{Delay: 14}})
 	}},
 	{"HAZARD", "hazard", gm.V3{X: 2, Y: 0.2, Z: 2}, func(m *gm.Map, p gm.V3) {
-		m.Entities = append(m.Entities, gm.Entity{Kind: "hazard", Pos: gm.V3{X: p.X, Y: 0.2, Z: p.Z}, Half: gm.V3{X: 2, Y: 0.2, Z: 2},
+		m.Entities = append(m.Entities, gm.Entity{Kind: "hazard", Pos: gm.V3{X: p.X, Y: p.Y + 0.2, Z: p.Z}, Half: gm.V3{X: 2, Y: 0.2, Z: 2},
 			Color: colHaz, Hazard: &gm.HazardTrait{DPS: 20}})
 	}},
 	{"TELEPORTER", "teleporter", gm.V3{X: 1, Y: 0.2, Z: 1}, func(m *gm.Map, p gm.V3) {
-		m.Entities = append(m.Entities, gm.Entity{Kind: "teleporter", Pos: gm.V3{X: p.X, Y: 0.2, Z: p.Z}, Half: gm.V3{X: 1, Y: 0.2, Z: 1},
+		m.Entities = append(m.Entities, gm.Entity{Kind: "teleporter", Pos: gm.V3{X: p.X, Y: p.Y + 0.2, Z: p.Z}, Half: gm.V3{X: 1, Y: 0.2, Z: 1},
 			Color: colTele, Teleport: &gm.TeleportTrait{Dest: gm.V3{X: -p.X, Z: -p.Z}, Cooldown: 1.5}})
 	}},
 	{"TRAMPOLINE", "trampoline", gm.V3{X: 1.5, Y: 0.2, Z: 1.5}, func(m *gm.Map, p gm.V3) {
-		m.Entities = append(m.Entities, gm.Entity{Kind: "trampoline", Pos: gm.V3{X: p.X, Y: 0.2, Z: p.Z}, Half: gm.V3{X: 1.5, Y: 0.2, Z: 1.5},
+		m.Entities = append(m.Entities, gm.Entity{Kind: "trampoline", Pos: gm.V3{X: p.X, Y: p.Y + 0.2, Z: p.Z}, Half: gm.V3{X: 1.5, Y: 0.2, Z: 1.5},
 			Color: colTram, Bounce: &gm.BounceTrait{Power: 13}})
 	}},
 	{"FLAG (NEUTRAL)", "flag", gm.V3{X: 0.5, Y: 0.5, Z: 0.5}, placeFlag(-1)},
 	{"FLAG (RED)", "flag", gm.V3{X: 0.5, Y: 0.5, Z: 0.5}, placeFlag(0)},
 	{"FLAG (BLUE)", "flag", gm.V3{X: 0.5, Y: 0.5, Z: 0.5}, placeFlag(1)},
 	{"ZONE (HILL)", "zone", gm.V3{X: 4, Y: 1, Z: 4}, func(m *gm.Map, p gm.V3) {
-		m.Entities = append(m.Entities, gm.Entity{Kind: "zone", Pos: gm.V3{X: p.X, Z: p.Z}, Half: gm.V3{X: 4, Y: 1, Z: 4},
+		m.Entities = append(m.Entities, gm.Entity{Kind: "zone", Pos: gm.V3{X: p.X, Y: p.Y, Z: p.Z}, Half: gm.V3{X: 4, Y: 1, Z: 4},
 			Color: colZone, Zone: &gm.ZoneTrait{Capture: 4}})
 	}},
 	{"SPAWN POINT", "wall", gm.V3{X: 0.6, Y: 0.6, Z: 0.6}, func(m *gm.Map, p gm.V3) {
@@ -89,7 +94,12 @@ const (
 	edNav = iota
 	edPalette
 	edPlace
+	edFile // file menu: save / load / new
+	edName // typing a map name (to save)
+	edLoad // picking a usermap to load
 )
+
+var fileMenu = []string{"SAVE", "LOAD", "NEW", "BACK"}
 
 // runEditor is the in-door map editor (Phase C). Stages 1-2: free-fly / top-down
 // views, a catalog palette, ghost preview, and placement (3D gun-sight raycast or
@@ -102,13 +112,18 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 	cam := Cam{pos: gm.V3{X: 0, Y: 14, Z: -24}, yaw: 0, pitch: 0.5}
 	topdown := false
 	mode := edNav
-	palIdx := 0       // palette selection
-	itemIdx := 0      // chosen catalog item for placing
+	palIdx := 0  // palette selection
+	itemIdx := 0 // chosen catalog item for placing
+	fileIdx := 0 // file-menu selection
+	loadIdx := 0 // load-list selection
+	var loadList []string
 	cursor := gm.V3{} // top-down placement cursor
 	const grid = 1.0
 	const flySpeed, lookRate, cursorSpeed = 16.0, 1.7, 18.0
 	var prev []byte
-	prevFire := false
+	prevFire, prevMenu := false, false
+	status, statusT := "", 0.0
+	setStatus := func(s string) { status, statusT = s, 3.0 }
 
 	rebuild := func() { buildArena(m); prev = nil }
 
@@ -129,19 +144,41 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 		}
 		last = now
 
-		// Discrete events: mode transitions + palette navigation + view toggle.
+		// Text entry (map name): drain typed runes while in edName.
+		if mode == edName {
+		drainRunes:
+			for {
+				select {
+				case r := <-ip.runes:
+					if len(m.Name) < 24 && (r == ' ' || r == '-' || r == '_' ||
+						(r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+						m.Name += string(r)
+					}
+				default:
+					break drainRunes
+				}
+			}
+		}
+
+		// Discrete events: mode transitions + list navigation + view toggle.
 	drain:
 		for {
 			select {
 			case k := <-ip.events:
 				switch k {
 				case mkTab:
-					topdown = !topdown
-					prev = nil
+					if mode == edNav || mode == edPlace {
+						topdown = !topdown
+						prev = nil
+					}
 				case mkBack:
 					switch mode {
 					case edNav:
 						return // exit editor
+					case edName:
+						if len(m.Name) > 0 { // backspace deletes a char while naming
+							m.Name = m.Name[:len(m.Name)-1]
+						}
 					default:
 						mode = edNav
 						prev = nil
@@ -149,21 +186,61 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 				case mkEnter:
 					switch mode {
 					case edNav, edPlace:
-						mode = edPalette
-						palIdx = itemIdx
-						prev = nil
+						mode, palIdx, prev = edPalette, itemIdx, nil
 					case edPalette:
-						itemIdx = palIdx
-						mode = edPlace
-						prev = nil
+						itemIdx, mode, prev = palIdx, edPlace, nil
+					case edFile:
+						switch fileMenu[fileIdx] {
+						case "SAVE":
+							ip.drainRunes() // ignore keystrokes typed before the field opened
+							mode, prev = edName, nil
+						case "LOAD":
+							loadList = listUserMaps()
+							loadIdx, mode, prev = 0, edLoad, nil
+						case "NEW":
+							m = gm.Map{Name: "UNTITLED", Size: 20, Spawns: []gm.V3{{X: -14, Z: -14}, {X: 14, Z: 14}}}
+							rebuild()
+							setStatus("new map")
+							mode = edNav
+						case "BACK":
+							mode, prev = edNav, nil
+						}
+					case edName:
+						setStatus(saveEditorMap(m))
+						mode, prev = edNav, nil
+					case edLoad:
+						if loadIdx < len(loadList) {
+							if lm, err := loadUserMap(loadList[loadIdx]); err == nil {
+								m = lm
+								rebuild()
+								setStatus("loaded " + loadList[loadIdx])
+							} else {
+								setStatus("load failed")
+							}
+						}
+						mode, prev = edNav, nil
 					}
 				case mkUp:
-					if mode == edPalette {
+					switch mode {
+					case edPalette:
 						palIdx = (palIdx - 1 + len(catItems)) % len(catItems)
+					case edFile:
+						fileIdx = (fileIdx - 1 + len(fileMenu)) % len(fileMenu)
+					case edLoad:
+						if len(loadList) > 0 {
+							loadIdx = (loadIdx - 1 + len(loadList)) % len(loadList)
+						}
 					}
 				case mkDown:
-					if mode == edPalette {
+					switch mode {
+					case edPalette:
 						palIdx = (palIdx + 1) % len(catItems)
+					case edFile:
+						fileIdx = (fileIdx + 1) % len(fileMenu)
+					case edLoad:
+						if len(loadList) > 0 {
+							loadIdx = (loadIdx + 1) % len(loadList)
+						}
 					}
 				}
 			default:
@@ -173,8 +250,20 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 
 		in := ip.snapshot()
 
-		// Camera / cursor movement (not while the palette is open).
-		if mode != edPalette {
+		// M opens the file menu from nav (edge-triggered).
+		if menuNow := ip.held(aEdMenu); menuNow && !prevMenu && mode == edNav {
+			mode, fileIdx, prev = edFile, 0, nil
+		} else {
+			_ = menuNow
+		}
+		prevMenu = ip.held(aEdMenu)
+
+		if statusT > 0 {
+			statusT -= dt
+		}
+
+		// Camera / cursor movement only while navigating or placing.
+		if mode == edNav || mode == edPlace {
 			if topdown && mode == edPlace {
 				// Move the placement cursor on the X/Z plane.
 				s := cursorSpeed * dt
@@ -213,6 +302,7 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 			cursor = ghost
 		}
 		ghost = snap(ghost, grid)
+		ghost.Y = gm.GroundHeight(m, ghost.X, ghost.Z, 1e9) // stack on the surface under the cursor
 
 		// Place on a fresh SPACE press (edge-triggered) while in place mode.
 		if mode == edPlace && in.Fire && !prevFire {
@@ -235,7 +325,7 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 		entS := editorEntSnaps(m)
 		if mode == edPlace { // append the ghost preview
 			it := catItems[itemIdx]
-			g := gm.Entity{Kind: it.kind, Pos: gm.V3{X: ghost.X, Y: it.half.Y, Z: ghost.Z}, Half: it.half, Color: [3]float64{0.45, 0.95, 1.0}}
+			g := gm.Entity{Kind: it.kind, Pos: gm.V3{X: ghost.X, Y: ghost.Y + it.half.Y, Z: ghost.Z}, Half: it.half, Color: [3]float64{0.45, 0.95, 1.0}}
 			entT = append(append([]gm.Entity(nil), m.Entities...), g)
 			entS = append(entS, gm.EntitySnap{Yaw: 0})
 		}
@@ -247,8 +337,22 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 		w.Write(frame)
 
 		drawEditorBar(w, cols, rows, m, topdown, mode, itemIdx, ghost)
-		if mode == edPalette {
-			drawPalette(w, cols, rows, palIdx)
+		switch mode {
+		case edPalette:
+			drawListOverlay(w, cols, rows, "CATALOG", catNames(), palIdx)
+		case edFile:
+			drawListOverlay(w, cols, rows, "FILE", fileMenu, fileIdx)
+		case edLoad:
+			if len(loadList) == 0 {
+				drawListOverlay(w, cols, rows, "LOAD (none saved)", []string{"BKSP to cancel"}, 0)
+			} else {
+				drawListOverlay(w, cols, rows, "LOAD", loadList, loadIdx)
+			}
+		case edName:
+			drawNameEntry(w, cols, rows, m.Name)
+		}
+		if statusT > 0 {
+			fmt.Fprintf(w, "\x1b[2;1H\x1b[0;1;33m %s \x1b[0m", clip(status, cols-2))
 		}
 		w.Flush()
 
@@ -370,27 +474,112 @@ func drawEditorBar(w *bufio.Writer, cols, rows int, m gm.Map, topdown bool, mode
 	case edPlace:
 		help = fmt.Sprintf("PLACING %s @ %.0f,%.0f   SPACE drop  R/F up/down  ENTER palette  TAB view  BKSP done",
 			catItems[itemIdx].name, ghost.X, ghost.Z)
+	case edFile, edName, edLoad:
+		help = "up/dn pick   ENTER choose   BKSP cancel"
 	default:
-		help = "WASD fly  ,/. + arrows look  R/F up/down  ENTER catalog  TAB view  BKSP exit"
+		help = "WASD fly  ,/. + arrows look  R/F up/down  ENTER catalog  M file  TAB view  BKSP exit"
 	}
 	fmt.Fprintf(w, "\x1b[%d;1H\x1b[0;90m%s\x1b[0m", rows, clip(centered(help, width), width))
 }
 
-// drawPalette overlays the catalog list, highlighting the current selection.
-func drawPalette(w *bufio.Writer, cols, rows, sel int) {
-	title := "CATALOG"
-	row := rows/2 - len(catItems)/2 - 1
+func catNames() []string {
+	out := make([]string, len(catItems))
+	for i, it := range catItems {
+		out[i] = it.name
+	}
+	return out
+}
+
+// drawListOverlay centers a titled, selectable list (catalog / file / load).
+func drawListOverlay(w *bufio.Writer, cols, rows int, title string, items []string, sel int) {
+	row := rows/2 - len(items)/2 - 1
+	if row < 2 {
+		row = 2
+	}
 	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;97m%s\x1b[0m", row, (cols-len(title))/2+1, title)
 	row += 2
-	for i, it := range catItems {
-		style := "\x1b[0;36m"
-		marker := "  "
+	for i, it := range items {
+		style, marker := "\x1b[0;36m", "  "
 		if i == sel {
 			style, marker = "\x1b[1;30;46m", "> "
 		}
-		line := marker + it.name
+		line := marker + it
 		fmt.Fprintf(w, "\x1b[%d;%dH%s  %s  \x1b[0m", row+i, (cols-len(line)-4)/2+1, style, line)
 	}
+}
+
+// drawNameEntry overlays the map-name text field.
+func drawNameEntry(w *bufio.Writer, cols, rows int, name string) {
+	row := rows / 2
+	t := "NAME THIS MAP (type, ENTER to save, BKSP edits)"
+	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;97m%s\x1b[0m", row-1, (cols-len(t))/2+1, t)
+	field := "[ " + name + "_ ]"
+	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;30;46m %s \x1b[0m", row+1, (cols-len(field))/2, field)
+}
+
+// ---------------------------------------------------------------------------
+// save / load (usermaps/)
+// ---------------------------------------------------------------------------
+
+// saveEditorMap validates and writes a map to usermaps/<slug>.json, returning a
+// status message. Saved maps are loaded into the offline pool at the next launch.
+func saveEditorMap(m gm.Map) string {
+	if gm.FatalIssues(gm.ValidateMap(m)) {
+		return "NOT saved: map has errors (see mapcheck)"
+	}
+	name := strings.TrimSpace(m.Name)
+	if name == "" {
+		return "NOT saved: name required"
+	}
+	data, err := gm.MapJSON(m)
+	if err != nil {
+		return "save failed: " + err.Error()
+	}
+	dir := authorMapsDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "save failed: " + err.Error()
+	}
+	fn := filepath.Join(dir, slug(name)+".json")
+	if err := os.WriteFile(fn, data, 0o644); err != nil {
+		return "save failed: " + err.Error()
+	}
+	return "saved " + filepath.Base(fn) + " (playable next launch)"
+}
+
+// listUserMaps returns the saved author-map filenames (base names) for the load list.
+func listUserMaps() []string {
+	files, _ := filepath.Glob(filepath.Join(authorMapsDir(), "*.json"))
+	out := make([]string, 0, len(files))
+	for _, f := range files {
+		out = append(out, filepath.Base(f))
+	}
+	return out
+}
+
+// loadUserMap reads and parses a saved author map by base filename.
+func loadUserMap(base string) (gm.Map, error) {
+	data, err := os.ReadFile(filepath.Join(authorMapsDir(), base))
+	if err != nil {
+		return gm.Map{}, err
+	}
+	return gm.ParseMapJSON(data)
+}
+
+// slug makes a filename-safe, lowercase fragment from a map name.
+func slug(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == ' ' || r == '-' || r == '_':
+			b.WriteRune('-')
+		}
+	}
+	if b.Len() == 0 {
+		return "untitled"
+	}
+	return b.String()
 }
 
 func clip(s string, n int) string {

@@ -425,12 +425,32 @@ type input struct {
 	any    time.Time         // last time any byte arrived (for "press any key")
 	quitCh chan struct{}
 	events chan menuKey // discrete nav events for menus (buffered; drops if full)
+	runes  chan rune    // printable chars (for editor text entry; buffered, best-effort)
 }
 
 func (in *input) pushKey(k menuKey) {
 	select {
 	case in.events <- k:
 	default: // menu not listening / buffer full: discrete events are best-effort
+	}
+}
+
+func (in *input) pushRune(r rune) {
+	select {
+	case in.runes <- r:
+	default: // not in a text field / buffer full: best-effort
+	}
+}
+
+// drainRunes discards buffered typed chars (called when opening a text field so
+// keystrokes from before it opened don't leak into the field).
+func (in *input) drainRunes() {
+	for {
+		select {
+		case <-in.runes:
+		default:
+			return
+		}
 	}
 }
 
@@ -455,6 +475,7 @@ const (
 	aAimDown         // depress the gun (down arrow)
 	aEdUp            // editor: fly camera up (R)
 	aEdDown          // editor: fly camera down (F)
+	aEdMenu          // editor: open the file menu (M)
 	aCount
 )
 
@@ -496,12 +517,17 @@ func (in *input) reader(t Term) {
 		in.markAny()
 		for i := 0; i < n; i++ {
 			c := buf[i]
-			switch {
-			case iac > 0:
+			// Escape/control-sequence handling first; each consumes the byte.
+			if iac > 0 {
 				iac--
-			case c == 0xFF: // telnet IAC: skip the next two bytes
+				continue
+			}
+			if c == 0xFF { // telnet IAC: skip the next two bytes
 				iac = 2
-			case csi:
+				continue
+			}
+			if csi {
+				csi = false
 				switch c {
 				case 'A': // up arrow -> elevate gun (aim up)
 					in.hit(aAimUp)
@@ -516,19 +542,26 @@ func (in *input) reader(t Term) {
 					in.hit(aTurretL)
 					in.pushKey(mkLeft)
 				}
-				csi = false
-			case esc:
+				continue
+			}
+			if esc {
 				esc = false
 				if c == '[' {
 					csi = true // CSI sequence (arrows); next byte is the final
-				} else {
-					// Lone ESC or an unsupported intro (e.g. SS3 'ESC O'): do NOT
-					// swallow this byte. Reprocess it as a normal key so Q / Ctrl-C
-					// still register even after a stray or fragmented ESC.
-					i--
+					continue
 				}
-			case c == 27:
+				// Lone ESC or an unsupported intro (e.g. SS3 'ESC O'): fall through
+				// and treat c as a normal key so Q / Ctrl-C still register.
+			}
+			if c == 27 {
 				esc = true
+				continue
+			}
+			// Normal key. Expose printable chars for editor text entry (map naming).
+			if c >= 0x20 && c < 0x7f {
+				in.pushRune(rune(c))
+			}
+			switch {
 			case c == 'q' || c == 'Q' || c == 3:
 				logf("reader exit: quit key %d", c)
 				close(in.quitCh)
@@ -564,6 +597,8 @@ func (in *input) reader(t Term) {
 				in.hit(aEdUp)
 			case c == 'f' || c == 'F': // editor: fly down
 				in.hit(aEdDown)
+			case c == 'm' || c == 'M': // editor: file menu
+				in.hit(aEdMenu)
 			}
 		}
 	}
@@ -1323,7 +1358,7 @@ func main() {
 	// Raw mode is set inside openTerm. The input reader blocks in its own
 	// goroutine; Term.Read tolerates the non-blocking inherited door socket.
 	fmt.Fprint(term, "\x1b[?25l\x1b[?7l") // hide cursor, disable auto-wrap
-	ip := &input{quitCh: make(chan struct{}), events: make(chan menuKey, 32)}
+	ip := &input{quitCh: make(chan struct{}), events: make(chan menuKey, 32), runes: make(chan rune, 64)}
 	go ip.reader(term)
 	logf("setup done: grid %dx%d (rows3d=%d), entering loop", cols, rows, rows3d)
 
