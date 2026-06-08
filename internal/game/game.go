@@ -516,8 +516,15 @@ const (
 	PhaseLobby // between matches (server only): vote for the next mode
 )
 
-// votable lists the modes the lobby rotates/votes between.
-var votable = []Mode{ModeDeathmatch, ModeFlagRun, ModeSurvival, ModeCTF}
+// VotableModes lists the modes the lobby rotates/votes between - every ruleset
+// in table order. Exported so the door's lobby renders straight from it.
+func VotableModes() []Mode {
+	out := make([]Mode, len(Rulesets))
+	for i := range Rulesets {
+		out[i] = Mode(i)
+	}
+	return out
+}
 
 const (
 	countdownTime = 4.0   // sec of "get ready" before a match
@@ -734,7 +741,7 @@ type MatchSnap struct {
 	WinnerID   int
 	FlagsLeft  int
 	FlagsTotal int
-	Votes      [4]int // lobby vote tally per mode index
+	Votes      []int  // lobby vote tally per mode index (len = len(Rulesets))
 	MapIdx     int    // active map index
 	Wave       int    // Survival: current wave
 	TeamScore  [2]int // CTF: captures per team
@@ -749,7 +756,7 @@ func (w *World) Match() MatchSnap {
 			left++
 		}
 	}
-	var votes [4]int
+	votes := make([]int, len(Rulesets))
 	for i := range w.Tanks {
 		t := &w.Tanks[i]
 		if !t.Bot && !t.gone && t.vote >= 0 && t.vote < len(votes) {
@@ -1156,6 +1163,7 @@ func (w *World) applyVotes(inputs map[int]Input) {
 // pickNextMode chooses the next mode from votes (highest wins), else advances the
 // rotation so an empty/idle arena still cycles.
 func (w *World) pickNextMode() Mode {
+	votable := VotableModes()
 	best, bestN := Mode(-1), 0
 	for _, m := range votable {
 		n := 0

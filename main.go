@@ -894,19 +894,22 @@ func drawCountdown(w *bufio.Writer, cols, rows int, v viewState) {
 	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;36m%s\x1b[0m", rows/2-5, (cols-len(m))/2+1, m)
 }
 
-// cycleVote moves a mode vote among the votable modes (DM, Flag Run).
+// cycleVote moves a mode vote among the votable modes (every ruleset).
 func cycleVote(cur, dir int) int {
-	v := []int{int(gm.ModeDeathmatch), int(gm.ModeFlagRun)}
+	modes := gm.VotableModes()
+	if len(modes) == 0 {
+		return cur
+	}
 	if cur < 0 {
-		return v[0]
+		return int(modes[0])
 	}
 	pos := 0
-	for i, m := range v {
-		if m == cur {
+	for i, m := range modes {
+		if int(m) == cur {
 			pos = i
 		}
 	}
-	return v[(pos+dir+len(v))%len(v)]
+	return int(modes[(pos+dir+len(modes))%len(modes)])
 }
 
 // drawLobby overlays the between-match vote lobby: mode options with live vote
@@ -915,32 +918,33 @@ func drawLobby(w *bufio.Writer, cols, rows int, v viewState, voteMode int) {
 	if f, ok := tdf.Fit("LOBBY", cols-2, "union", "untx", "block"); ok {
 		w.WriteString(f.RenderCentered("LOBBY", cols, 1, tdf.RenderOpts{Recolor: true, FG: 11, Transparent: true}))
 	}
+	votesOf := func(idx int) int {
+		if idx >= 0 && idx < len(v.votes) {
+			return v.votes[idx]
+		}
+		return 0
+	}
+	modes := gm.VotableModes()
 	lead, leadN := -1, 0
-	for _, m := range []int{int(gm.ModeDeathmatch), int(gm.ModeFlagRun)} {
-		if v.votes[m] > leadN {
-			leadN, lead = v.votes[m], m
+	for _, m := range modes {
+		if n := votesOf(int(m)); n > leadN {
+			leadN, lead = n, int(m)
 		}
 	}
-	row := rows/2 - 2
+	row := rows/2 - len(modes)/2 - 1
 	hdr := "VOTE THE NEXT MODE"
 	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;1;37m%s\x1b[0m", row, (cols-len(hdr))/2+1, hdr)
 	row += 2
-	opts := []struct {
-		idx  int
-		name string
-	}{
-		{int(gm.ModeDeathmatch), "DEATHMATCH"},
-		{int(gm.ModeFlagRun), "FLAG RUN"},
-	}
-	for _, o := range opts {
+	for _, m := range modes {
+		idx := int(m)
 		marker, style := "  ", "\x1b[0;36m"
-		if o.idx == voteMode {
+		if idx == voteMode {
 			marker, style = "> ", "\x1b[1;33m"
 		}
-		if o.idx == lead && leadN > 0 {
+		if idx == lead && leadN > 0 {
 			style = "\x1b[1;30;46m" // leading: black on cyan
 		}
-		line := fmt.Sprintf("%s%-12s %d votes", marker, o.name, v.votes[o.idx])
+		line := fmt.Sprintf("%s%-16s %d votes", marker, gm.RulesetFor(m).Name, votesOf(idx))
 		fmt.Fprintf(w, "\x1b[%d;%dH%s%s\x1b[0m", row, (cols-len(line))/2+1, style, line)
 		row++
 	}

@@ -326,6 +326,7 @@ func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.V3
 	w.i16(m.WinnerID)
 	w.u16(m.FlagsLeft)
 	w.u16(m.FlagsTotal)
+	w.u8(byte(min255(len(m.Votes))))
 	for _, v := range m.Votes {
 		w.u8(byte(min255(v)))
 	}
@@ -426,7 +427,9 @@ func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, sh
 		FlagsLeft:  r.ru16(),
 		FlagsTotal: r.ru16(),
 	}
-	for i := 0; i < 4; i++ {
+	nv := int(r.ru8())
+	m.Votes = make([]int, nv)
+	for i := 0; i < nv; i++ {
 		m.Votes[i] = int(r.ru8())
 	}
 	m.MapIdx = int(r.ru8())

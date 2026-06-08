@@ -38,7 +38,7 @@ type viewState struct {
 	ents       []gm.EntitySnap // per-tick dynamic state of gmap.Entities (aligned by index)
 	flagsLeft  int
 	flagsTotal int
-	votes      [4]int // lobby vote tally per mode index
+	votes      []int  // lobby vote tally per mode index (len = len(gm.Rulesets))
 	mapIdx     int    // active map index
 	wave       int    // Survival: current wave
 	teamScore  [2]int // CTF: captures per team
