@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	gm "spekder/internal/game"
+	"spekder/internal/proto"
 )
 
 // viewState is what one tick of a session yields: the tanks/projectiles to draw,
@@ -39,13 +40,14 @@ type viewState struct {
 	zones      []gm.ZoneSnap   // King of the Hill control zones to draw
 	flagsLeft  int
 	flagsTotal int
-	votes      []int  // lobby vote tally per mode index (len = len(gm.Rulesets))
-	mapIdx     int    // active map index
-	wave       int    // Survival: current wave
-	teamScore  [2]int // CTF: captures per team
-	winnerTeam int    // CTF: winning team (-1 = tie/none)
-	myTeam     int    // CTF: our team (-1 if none)
-	gmap       gm.Map // active map definition (renderer rebuilds geometry on change)
+	votes      []int              // lobby vote tally per map index (len = len(pairings))
+	pairings   []proto.LobbyEntry // votable map+mode candidates (online lobby)
+	mapIdx     int                // active map index
+	wave       int                // Survival: current wave
+	teamScore  [2]int             // CTF: captures per team
+	winnerTeam int                // CTF: winning team (-1 = tie/none)
+	myTeam     int                // CTF: our team (-1 if none)
+	gmap       gm.Map             // active map definition (renderer rebuilds geometry on change)
 }
 
 // session feeds one tick of input and yields a viewState. Offline runs the sim

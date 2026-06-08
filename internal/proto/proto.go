@@ -18,6 +18,7 @@ const (
 	MsgInput   = 0x10 // client->server: held-button bitfield
 	MsgState   = 0x20 // server->client: full snapshot
 	MsgMap     = 0x21 // server->client: full map definition (on join / map change)
+	MsgLobby   = 0x22 // server->client: votable (map name + implied mode) candidates
 	MsgPublish = 0x30 // client->server: publish an author map to the arena repo
 	MsgPubAck  = 0x31 // server->client: publish result (ok flag + message)
 )
@@ -328,6 +329,44 @@ func DecodeMap(p []byte) (gm.Map, bool) {
 		return gm.Map{}, false
 	}
 	return m, true
+}
+
+// ---- LOBBY (votable map+mode pairings) ----
+
+// LobbyEntry is one votable pairing: a map name and the mode it plays in. The
+// vote index (Input.Vote) is the index into this list (== map index server-side).
+type LobbyEntry struct {
+	Name string
+	Mode gm.Mode
+}
+
+// EncodeLobby sends the votable pairings (one per map in the pool). The caller
+// must hold whatever lock guards gm.Maps.
+func EncodeLobby() []byte {
+	w := &cursor{}
+	w.u8(MsgLobby)
+	w.u16(len(gm.Maps))
+	for i := range gm.Maps {
+		w.str(gm.Maps[i].Name)
+		w.u8(byte(gm.NaturalMode(gm.Maps[i])))
+	}
+	return w.b
+}
+
+func DecodeLobby(p []byte) ([]LobbyEntry, bool) {
+	if len(p) == 0 || p[0] != MsgLobby {
+		return nil, false
+	}
+	r := &cursor{b: p, i: 1}
+	n := r.ru16()
+	out := make([]LobbyEntry, 0, n)
+	for ; n > 0; n-- {
+		out = append(out, LobbyEntry{Name: r.rstr(), Mode: gm.Mode(r.ru8())})
+	}
+	if r.err {
+		return nil, false
+	}
+	return out, true
 }
 
 // ---- PUBLISH ----

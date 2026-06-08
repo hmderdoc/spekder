@@ -1149,26 +1149,19 @@ func drawCountdown(w *bufio.Writer, cols, rows int, v viewState) {
 	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;36m%s\x1b[0m", rows/2-5, (cols-len(m))/2+1, m)
 }
 
-// cycleVote moves a mode vote among the votable modes (every ruleset).
-func cycleVote(cur, dir int) int {
-	modes := gm.VotableModes()
-	if len(modes) == 0 {
+// cycleVote moves a vote among n map+mode pairings (wraps).
+func cycleVote(cur, dir, n int) int {
+	if n == 0 {
 		return cur
 	}
 	if cur < 0 {
-		return int(modes[0])
+		return 0
 	}
-	pos := 0
-	for i, m := range modes {
-		if int(m) == cur {
-			pos = i
-		}
-	}
-	return int(modes[(pos+dir+len(modes))%len(modes)])
+	return (cur + dir + n) % n
 }
 
-// drawLobby overlays the between-match vote lobby: mode options with live vote
-// tallies, your pick, the roster, and a countdown to the next match.
+// drawLobby overlays the between-match vote lobby: the votable map+mode pairings
+// with live tallies, your pick, the roster, and a countdown to the next match.
 func drawLobby(w *bufio.Writer, cols, rows int, v viewState, voteMode int) {
 	if f, ok := tdf.Fit("LOBBY", cols-2, "union", "untx", "block"); ok {
 		w.WriteString(f.RenderCentered("LOBBY", cols, 1, tdf.RenderOpts{Recolor: true, FG: 11, Transparent: true}))
@@ -1179,27 +1172,50 @@ func drawLobby(w *bufio.Writer, cols, rows int, v viewState, voteMode int) {
 		}
 		return 0
 	}
-	modes := gm.VotableModes()
+	pairs := v.pairings
+	hdr := "VOTE THE NEXT MAP"
+	if len(pairs) == 0 {
+		msg := "waiting for arena..."
+		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;37m%s\x1b[0m", rows/2, (cols-len(msg))/2+1, msg)
+		return
+	}
 	lead, leadN := -1, 0
-	for _, m := range modes {
-		if n := votesOf(int(m)); n > leadN {
-			leadN, lead = n, int(m)
+	for i := range pairs {
+		if n := votesOf(i); n > leadN {
+			leadN, lead = n, i
 		}
 	}
-	row := rows/2 - len(modes)/2 - 1
-	hdr := "VOTE THE NEXT MODE"
+	// Window the list around the player's current pick (the pool can be large).
+	winRows := rows - 9
+	if winRows < 4 {
+		winRows = 4
+	}
+	if winRows > len(pairs) {
+		winRows = len(pairs)
+	}
+	top := 0
+	if voteMode >= winRows {
+		top = voteMode - winRows + 1
+	}
+	if top > len(pairs)-winRows {
+		top = len(pairs) - winRows
+	}
+	row := rows/2 - winRows/2 - 1
 	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;1;37m%s\x1b[0m", row, (cols-len(hdr))/2+1, hdr)
 	row += 2
-	for _, m := range modes {
-		idx := int(m)
+	for i := top; i < top+winRows && i < len(pairs); i++ {
 		marker, style := "  ", "\x1b[0;36m"
-		if idx == voteMode {
+		if i == voteMode {
 			marker, style = "> ", "\x1b[1;33m"
 		}
-		if idx == lead && leadN > 0 {
+		if i == lead && leadN > 0 {
 			style = "\x1b[1;30;46m" // leading: black on cyan
 		}
-		line := fmt.Sprintf("%s%-16s %d votes", marker, gm.RulesetFor(m).Name, votesOf(idx))
+		name := pairs[i].Name
+		if len(name) > 14 {
+			name = name[:14]
+		}
+		line := fmt.Sprintf("%s%-14s %-8s %dv", marker, name, pairs[i].Mode.String(), votesOf(i))
 		fmt.Fprintf(w, "\x1b[%d;%dH%s%s\x1b[0m", row, (cols-len(line))/2+1, style, line)
 		row++
 	}
@@ -1515,7 +1531,8 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 	fpsT := start
 	frames := 0
 	fps := 0
-	voteMode := -1   // our lobby vote (mode index), cycled with </>
+	voteMode := -1   // our lobby vote (map/pairing index), cycled with </>
+	lobbyN := 0      // number of votable pairings (from the server's MsgLobby)
 	curMapSig := "?" // signature of the currently-built map; rebuild on change
 	topdown := false
 	lastPhase := gm.PhaseActive
@@ -1549,9 +1566,9 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 				case k == mkBack:
 					return false // back out of the match to the menu / editor
 				case lastPhase == gm.PhaseLobby && k == mkLeft:
-					voteMode = cycleVote(voteMode, -1)
+					voteMode = cycleVote(voteMode, -1, lobbyN)
 				case lastPhase == gm.PhaseLobby && k == mkRight:
-					voteMode = cycleVote(voteMode, +1)
+					voteMode = cycleVote(voteMode, +1, lobbyN)
 				}
 			default:
 				break drainEvents
@@ -1562,6 +1579,7 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 
 		v := sess.step(dt, gin)
 		lastPhase = v.phase
+		lobbyN = len(v.pairings)
 		if !v.ready { // no view yet (awaiting first STATE from the server)
 			fmt.Fprint(w, "\x1b[2J\x1b[H\x1b[0;1;37m  Connecting to arena...\x1b[0m")
 			w.Flush()

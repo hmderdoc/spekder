@@ -65,16 +65,19 @@ func (s *server) handle(conn net.Conn) {
 	s.nextID++
 	c := &client{id: id, tank: tank, conn: conn}
 	s.clients[id] = c
+	if s.world.HumanCount() == 1 {
+		s.world.ForceLobby() // first human in a bot arena: open the pick lobby
+	}
+	curMap := s.world.ActiveMap()
+	lobby := proto.EncodeLobby()
 	s.mu.Unlock()
 
 	if err := proto.WriteMsg(conn, proto.EncodeWelcome(tank)); err != nil {
 		s.drop(id, tank)
 		return
 	}
-	s.mu.Lock()
-	curMap := s.world.ActiveMap()
-	s.mu.Unlock()
 	proto.WriteMsg(conn, proto.EncodeMap(curMap)) // so the client can render/collide it
+	proto.WriteMsg(conn, lobby)                   // votable map+mode pairings
 	log.Printf("join: %q@%q -> tank %d (%d online)", handle, bbsid, tank, len(s.clients))
 
 	for {
@@ -160,6 +163,7 @@ func (s *server) run(tickHz float64) {
 	defer ticker.Stop()
 	var tick uint32
 	lastMap := -1
+	lastPhase := gm.Phase(-1)
 	for range ticker.C {
 		s.mu.Lock()
 		inputs := make(map[int]gm.Input, len(s.clients))
@@ -180,6 +184,11 @@ func (s *server) run(tickHz float64) {
 			mapMsg = proto.EncodeMap(s.world.ActiveMap())
 			lastMap = s.world.MapIdx
 		}
+		var lobbyMsg []byte
+		if match.Phase == gm.PhaseLobby && lastPhase != gm.PhaseLobby {
+			lobbyMsg = proto.EncodeLobby() // entering the vote lobby: refresh candidates
+		}
+		lastPhase = match.Phase
 		s.mu.Unlock()
 
 		state := proto.EncodeState(tick, match, tanks, shots, flags, pickups, ents, zones)
@@ -188,6 +197,9 @@ func (s *server) run(tickHz float64) {
 			conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 			if mapMsg != nil {
 				_ = proto.WriteMsg(conn, mapMsg)
+			}
+			if lobbyMsg != nil {
+				_ = proto.WriteMsg(conn, lobbyMsg)
 			}
 			_ = proto.WriteMsg(conn, state) // a failing write trips the reader loop, which drops the client
 		}

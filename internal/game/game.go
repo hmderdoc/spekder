@@ -646,16 +646,6 @@ const (
 	PhaseLobby // between matches (server only): vote for the next mode
 )
 
-// VotableModes lists the modes the lobby rotates/votes between - every ruleset
-// in table order. Exported so the door's lobby renders straight from it.
-func VotableModes() []Mode {
-	out := make([]Mode, len(Rulesets))
-	for i := range Rulesets {
-		out[i] = Mode(i)
-	}
-	return out
-}
-
 const (
 	countdownTime = 4.0   // sec of "get ready" before a match
 	matchTime     = 180.0 // sec per match
@@ -980,7 +970,7 @@ type MatchSnap struct {
 	WinnerID   int
 	FlagsLeft  int
 	FlagsTotal int
-	Votes      []int  // lobby vote tally per mode index (len = len(Rulesets))
+	Votes      []int  // lobby vote tally per map index (len = len(Maps)); mode is implied
 	MapIdx     int    // active map index
 	Wave       int    // Survival: current wave
 	TeamScore  [2]int // CTF: captures per team
@@ -995,7 +985,7 @@ func (w *World) Match() MatchSnap {
 			left++
 		}
 	}
-	votes := make([]int, len(Rulesets))
+	votes := make([]int, len(Maps)) // lobby votes are per map (mode implied by the map)
 	for i := range w.Tanks {
 		t := &w.Tanks[i]
 		if !t.Bot && !t.gone && t.vote >= 0 && t.vote < len(votes) {
@@ -1426,7 +1416,8 @@ func (w *World) Update(dt float64, inputs map[int]Input) {
 	case PhaseLobby:
 		w.applyVotes(inputs)
 		if w.Timer <= 0 {
-			w.startCountdown(w.pickNextMode())
+			mapIdx, mode := w.pickNextPairing()
+			w.startCountdownMap(mode, mapIdx)
 		}
 		return // frozen lobby
 	}
@@ -1448,10 +1439,74 @@ func (w *World) afterEnded() {
 }
 
 func (w *World) startCountdown(mode Mode) {
-	w.Mode, w.Phase, w.Timer, w.WinnerID = mode, PhaseCountdown, countdownTime, -1
 	if len(Maps) > 1 && !w.pinned {
-		w.MapIdx = (w.MapIdx + 1) % len(Maps) // rotate the map each match
+		w.MapIdx = (w.MapIdx + 1) % len(Maps) // rotate the map each match (offline/solo)
 	}
+	w.Mode, w.Phase, w.Timer, w.WinnerID = mode, PhaseCountdown, countdownTime, -1
+}
+
+// startCountdownMap begins the count-in on a specific map+mode (the lobby's voted
+// pairing), bypassing the rotation in startCountdown.
+func (w *World) startCountdownMap(mode Mode, mapIdx int) {
+	if mapIdx >= 0 && mapIdx < len(Maps) {
+		w.MapIdx = mapIdx
+	}
+	w.Mode, w.Phase, w.Timer, w.WinnerID = mode, PhaseCountdown, countdownTime, -1
+}
+
+// NaturalMode is the mode a map is built for: CTF if it has team flags, King of
+// the Hill if it has a zone, Flag Run for neutral flags, else Deathmatch. Lobby
+// pairings vote on a map; this picks the mode that map implies.
+func NaturalMode(m Map) Mode {
+	hasZone, teamFlag, neutralFlag := false, false, false
+	for _, e := range m.Entities {
+		if e.Zone != nil {
+			hasZone = true
+		}
+		if e.Flag != nil {
+			if e.Flag.Team >= 0 {
+				teamFlag = true
+			} else {
+				neutralFlag = true
+			}
+		}
+	}
+	switch {
+	case teamFlag:
+		return ModeCTF
+	case hasZone:
+		return ModeFFAKotH
+	case neutralFlag:
+		return ModeFlagRun
+	default:
+		return ModeDeathmatch
+	}
+}
+
+// pickNextPairing chooses the next (map, mode) from per-map votes: the most-voted
+// map wins (mode = its NaturalMode); with no votes it advances the rotation so an
+// idle arena still cycles. A lone human's vote therefore decides the pairing.
+func (w *World) pickNextPairing() (mapIdx int, mode Mode) {
+	if len(Maps) == 0 {
+		return 0, w.Mode
+	}
+	best, bestN := -1, 0
+	for mi := 0; mi < len(Maps); mi++ {
+		n := 0
+		for i := range w.Tanks {
+			t := &w.Tanks[i]
+			if !t.Bot && !t.gone && t.vote == mi {
+				n++
+			}
+		}
+		if n > bestN {
+			bestN, best = n, mi
+		}
+	}
+	if best < 0 {
+		best = (w.MapIdx + 1) % len(Maps) // no votes: rotate
+	}
+	return best, NaturalMode(Maps[best])
 }
 
 func (w *World) applyVotes(inputs map[int]Input) {
@@ -1466,28 +1521,28 @@ func (w *World) applyVotes(inputs map[int]Input) {
 	}
 }
 
-// pickNextMode chooses the next mode from votes (highest wins), else advances the
-// rotation so an empty/idle arena still cycles.
-func (w *World) pickNextMode() Mode {
-	votable := VotableModes()
-	best, bestN := Mode(-1), 0
-	for _, m := range votable {
-		n := 0
-		for i := range w.Tanks {
-			t := &w.Tanks[i]
-			if !t.Bot && !t.gone && t.vote == int(m) {
-				n++
-			}
-		}
-		if n > bestN {
-			bestN, best = n, m
+// HumanCount returns the number of connected (non-bot, present) players.
+func (w *World) HumanCount() int {
+	n := 0
+	for i := range w.Tanks {
+		if !w.Tanks[i].Bot && !w.Tanks[i].gone {
+			n++
 		}
 	}
-	if bestN > 0 {
-		return best
+	return n
+}
+
+// ForceLobby drops a running bot-only arena into a short vote lobby so a freshly
+// arrived first human can pick the next map+mode instead of waiting out the bots.
+// No-op unless the lobby is enabled and a match is currently active.
+func (w *World) ForceLobby() {
+	if !w.Lobby || w.Phase != PhaseActive {
+		return
 	}
-	w.rotIdx = (w.rotIdx + 1) % len(votable)
-	return votable[w.rotIdx]
+	for i := range w.Tanks {
+		w.Tanks[i].vote = -1
+	}
+	w.Phase, w.Timer = PhaseLobby, lobbyTime
 }
 
 // startMatch begins active play: full reset of scores, health, and positions.

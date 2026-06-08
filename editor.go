@@ -97,35 +97,6 @@ func spanBox(halfY, pad float64, col [3]float64) func(m *gm.Map, a, b gm.V3) {
 	}
 }
 
-// playtestMode picks a sensible mode for the working map: CTF if it has team
-// flags, King of the Hill if it has a zone, Flag Run for neutral flags, else
-// Deathmatch.
-func playtestMode(m gm.Map) gm.Mode {
-	hasZone, teamFlag, neutralFlag := false, false, false
-	for _, e := range m.Entities {
-		if e.Zone != nil {
-			hasZone = true
-		}
-		if e.Flag != nil {
-			if e.Flag.Team >= 0 {
-				teamFlag = true
-			} else {
-				neutralFlag = true
-			}
-		}
-	}
-	switch {
-	case teamFlag:
-		return gm.ModeCTF
-	case hasZone:
-		return gm.ModeFFAKotH
-	case neutralFlag:
-		return gm.ModeFlagRun
-	default:
-		return gm.ModeDeathmatch
-	}
-}
-
 func placeFlag(team int) func(m *gm.Map, p gm.V3) {
 	return func(m *gm.Map, p gm.V3) {
 		m.Entities = append(m.Entities, gm.Entity{Kind: "flag", Pos: gm.V3{X: p.X, Z: p.Z}, Half: gm.V3{X: 0.5, Y: 0.5, Z: 0.5},
@@ -449,7 +420,7 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 								// Temporarily add the working map, play it, then remove it.
 								idx := len(gm.Maps)
 								gm.Maps = append(gm.Maps, m)
-								sess := newOfflineOnMap(idx, offlineBots, playtestMode(m), 1, s.difficulty, s.aimAssist)
+								sess := newOfflineOnMap(idx, offlineBots, gm.NaturalMode(m), 1, s.difficulty, s.aimAssist)
 								quit := playMatch(w, cols, rows, rows3d, rnd, ip, sess)
 								sess.close()
 								gm.Maps = gm.Maps[:idx]

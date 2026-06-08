@@ -109,7 +109,8 @@ type netSession struct {
 	buf       []stamped
 	lastSelf  gm.TankSnap
 	lastMatch gm.MatchSnap
-	curMap    gm.Map // active map, sent by the server (MsgMap)
+	curMap    gm.Map             // active map, sent by the server (MsgMap)
+	pairings  []proto.LobbyEntry // votable map+mode candidates (MsgLobby)
 	haveSelf  bool
 	dead      bool
 
@@ -171,6 +172,15 @@ func (s *netSession) readLoop() {
 			}
 			continue
 		}
+		if len(msg) > 0 && msg[0] == proto.MsgLobby {
+			if ps, ok := proto.DecodeLobby(msg); ok {
+				s.mu.Lock()
+				s.pairings = ps
+				s.mu.Unlock()
+				logf("received %d lobby pairings", len(ps))
+			}
+			continue
+		}
 		_, match, tanks, shots, flags, pickups, ents, zones, ok := proto.DecodeState(msg)
 		if !ok {
 			continue
@@ -207,6 +217,7 @@ func (s *netSession) step(dt float64, in gm.Input) viewState {
 	self := s.lastSelf
 	match := s.lastMatch
 	cmap := s.curMap
+	pairings := s.pairings
 	buf := append([]stamped(nil), s.buf...) // shallow copy of headers (entries immutable)
 	s.mu.Unlock()
 
@@ -259,7 +270,7 @@ func (s *netSession) step(dt float64, in gm.Input) viewState {
 		camPos: s.predPos, camYaw: s.predHull + s.predTur, viewTurret: s.predTur, viewPitch: s.predPitch,
 		mode: match.Mode, phase: match.Phase, timer: match.Timer, winnerID: match.WinnerID,
 		flags: flags, pickups: pickups, ents: ents, zones: zones, flagsLeft: match.FlagsLeft, flagsTotal: match.FlagsTotal, votes: match.Votes,
-		mapIdx: match.MapIdx, wave: match.Wave, teamScore: match.TeamScore,
+		pairings: pairings, mapIdx: match.MapIdx, wave: match.Wave, teamScore: match.TeamScore,
 		winnerTeam: match.WinnerTeam, myTeam: self.Team, gmap: cmap,
 	}
 }
