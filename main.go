@@ -416,6 +416,7 @@ const (
 	mkRight
 	mkEnter
 	mkTab
+	mkBack // Backspace: exit a screen back to the previous menu (no program quit)
 )
 
 type input struct {
@@ -555,6 +556,8 @@ func (in *input) reader(t Term) {
 				in.pushKey(mkEnter)
 			case c == '\t': // TAB: toggle top-down view
 				in.pushKey(mkTab)
+			case c == 0x7f || c == 0x08: // Backspace: back / exit a screen
+				in.pushKey(mkBack)
 			}
 		}
 	}
@@ -867,7 +870,7 @@ func drawListMenu(w *bufio.Writer, cols, rows int, title string, names, blurbs [
 
 // runOptions is the OPTIONS sub-menu: Difficulty + Aim Assist (live), Map Editor
 // + Controls (coming soon). Mutates and persists the user's settings in place.
-func runOptions(w *bufio.Writer, cols, rows int, ip *input, dropfile string, s *userSettings) {
+func runOptions(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, dropfile string, s *userSettings) {
 	const (
 		iDiff = iota
 		iAssist
@@ -877,7 +880,7 @@ func runOptions(w *bufio.Writer, cols, rows int, ip *input, dropfile string, s *
 	)
 	names := []string{"DIFFICULTY", "AIM ASSIST", "MAP EDITOR", "CONTROLS", "BACK"}
 	blurbs := []string{"", "", "Build and edit arenas.", "Customize key bindings.", "Return to the main menu."}
-	dim := []bool{false, false, true, true, false}
+	dim := []bool{false, false, false, true, false}
 	onOff := func(b bool) string {
 		if b {
 			return "ON"
@@ -917,6 +920,9 @@ func runOptions(w *bufio.Writer, cols, rows int, ip *input, dropfile string, s *
 					s.aimAssist = !s.aimAssist
 					saveUserSettings(dropfile, *s)
 					draw()
+				case iEditor:
+					runEditor(w, cols, rows, rows3d, rnd, ip)
+					draw() // repaint the options menu on return
 				case iBack:
 					return
 				default:
@@ -1343,7 +1349,7 @@ func main() {
 			return
 		}
 		if choice.options {
-			runOptions(w, cols, rows, ip, dropfile, &settings)
+			runOptions(w, cols, rows, rows3d, rnd, ip, dropfile, &settings)
 			note = ""
 			continue
 		}
