@@ -43,21 +43,22 @@ they capture intent so nothing is lost between sessions. Newest themes first.
   rejected: keeps radar/scaling honest and avoids symmetry/bounds edge cases;
   use obstacles + spawn placement for corridors.
 
+- **Difficulty settings** — bot AI is data-driven: a `BotProfile` per tier
+  (EASY..ULTIMATE) plus per-bot variation (no more uniform perfect-aim wall).
+  Selectable from a new OPTIONS menu, saved per BBS user. HARD ~= the old
+  lethality; NORMAL is the gentler new default. See `DIFFICULTY.md`. Deferred to a
+  later bot pass: evasion, teleporter-use, smarter pathfinding.
+
 ## Backlog
 
-### Bot AI: difficulty tiers
-Tiers (e.g. Easy / Beginner / Normal / Hard / Ultimate) selectable from a new
-**Game Options** view off the main menu. A tier is a parameter set — cleanest as
-a `BotProfile` struct the World holds, replacing today's scattered bot constants
-(`botAimTol`, `botFireRange`, `botFireDelay`, `turretRate`, pitch-tracking rate).
-Scaling axes:
-- **Aiming latency** — reaction delay before tracking a new target, so the player
-  can break line of fire.
-- **Range / sight** — engagement/acquire distance cap (prevents bot sniping).
-- **Aim wobble** — chance and magnitude of aim error.
-- **Decision-making** — item pickup seek + usage, pathfinding / obstacle handling,
-  teleporter usage.
-- **Maneuver bias** — evasive vs. offensive.
+### Bot AI: difficulty tiers — SHIPPED (core), with a later behavioral pass
+DONE: `BotProfile` tiers (EASY..ULTIMATE) + per-bot variation, OPTIONS→Difficulty,
+per-user save (see `DIFFICULTY.md`). Implemented axes: aiming latency (react +
+track), range/sight, aim wobble, fire cadence, and pickup-seeking (ULTIMATE).
+Remaining for a later **bot behavioral pass**:
+- **Decision-making** — smarter pathfinding / obstacle handling, teleporter usage.
+- **Maneuver bias** — evasive vs. offensive (dodge / back off when threatened).
+- Per-bot params could also drift over time, not just at spawn.
 
 ### Bot jump AI
 Bots never use the jump mechanic. Add a `canJump` gate + situational logic

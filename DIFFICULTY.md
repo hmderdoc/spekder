@@ -1,5 +1,11 @@
 # Difficulty Settings — design
 
+> **Status: shipped.** BotProfile tiers (EASY..ULTIMATE) + per-bot variation drive
+> the bot AI; selectable from OPTIONS → Difficulty; saved per BBS user. The doc
+> below is the design of record. Deferred: evasion, teleporter-use, smarter
+> pathfinding (a later behavioral pass).
+
+
 Adds an **OPTIONS** menu with **Difficulty** (this doc), plus Map Editor and
 Controls as later items. Difficulty makes the bots tunable across five tiers so
 single-player isn't punishing — the game's main "it's too hard" complaint.
