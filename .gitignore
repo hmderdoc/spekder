@@ -15,3 +15,9 @@
 /door.log
 /spekder.ini
 /door.ini
+
+# Runtime data dirs (per-user settings, editor saves, server's published maps).
+# Anchored so a like-named source dir elsewhere isn't ignored.
+/data/
+/usermaps/
+/maps/
