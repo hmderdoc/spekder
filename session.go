@@ -62,8 +62,9 @@ type offlineSession struct {
 	me int
 }
 
-func newOfflineSession(numBots int, mode gm.Mode, vehicle int) *offlineSession {
+func newOfflineSession(numBots int, mode gm.Mode, vehicle int, diff gm.Difficulty) *offlineSession {
 	w := gm.NewWorld(numBots, mode)
+	w.SetDifficulty(diff)
 	// Pin offline play to a specific map (no rotation) so a layout can be reached
 	// deterministically. Source order: the SPEKDER_MAP env var overrides a
 	// "map = <name|index>" key in spekder.ini/door.ini. Until there's an in-game

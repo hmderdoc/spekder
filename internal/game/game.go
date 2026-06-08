@@ -655,6 +655,28 @@ func ProfileFor(d Difficulty) BotProfile {
 	return BotProfiles[d]
 }
 
+func (d Difficulty) String() string { return ProfileFor(d).Name }
+
+// ParseDifficulty resolves a tier name (case-insensitive) to a Difficulty; ok is
+// false for an unknown name (caller should fall back to the default).
+func ParseDifficulty(s string) (Difficulty, bool) {
+	for i := range BotProfiles {
+		if strings.EqualFold(BotProfiles[i].Name, s) {
+			return Difficulty(i), true
+		}
+	}
+	return DiffNormal, false
+}
+
+// Difficulties returns the tiers in ladder order (for the door's picker).
+func Difficulties() []Difficulty {
+	out := make([]Difficulty, len(BotProfiles))
+	for i := range BotProfiles {
+		out[i] = Difficulty(i)
+	}
+	return out
+}
+
 // BotPalette / PlayerPalette give tanks distinct colors by slot.
 var BotPalette = [][3]float64{
 	{0.78, 0.26, 0.26}, {0.72, 0.60, 0.22}, {0.30, 0.70, 0.35},

@@ -68,6 +68,10 @@ func TestPickupCloakHidesFromBots(t *testing.T) {
 	if bot < 0 {
 		t.Skip("no bot present")
 	}
+	// Put them within sight (bots now have a difficulty-tier sight range, so a
+	// far spawn wouldn't be acquired regardless of cloak).
+	w.Tanks[bot].Pos = V3{}
+	w.Tanks[me].Pos = V3{X: 5}
 	// With no cloak, the bot's nearest enemy is the human.
 	if got := w.nearestEnemy(bot); got != me {
 		t.Fatalf("bot should target the human, got %d", got)

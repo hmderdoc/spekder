@@ -736,9 +736,10 @@ func overlaySig(v viewState, p *gm.TankSnap) string {
 // menuChoice is what the menu returns: quit, join the online arena, or a
 // single-player mode.
 type menuChoice struct {
-	quit   bool
-	online bool
-	mode   gm.Mode
+	quit    bool
+	online  bool
+	options bool
+	mode    gm.Mode
 }
 
 // runMenu shows the TDF-titled menu: single-player modes plus ONLINE ARENA
@@ -748,6 +749,7 @@ func runMenu(w *bufio.Writer, cols, rows int, ip *input, note string) menuChoice
 	type entry struct {
 		name, blurb string
 		online      bool
+		options     bool
 		mode        gm.Mode
 		ready       bool
 	}
@@ -764,6 +766,7 @@ func runMenu(w *bufio.Writer, cols, rows int, ip *input, note string) menuChoice
 		items = append(items, entry{name: rs.Name, blurb: rs.Desc, mode: gm.Mode(m), ready: true})
 	}
 	items = append(items, entry{name: "ONLINE ARENA", blurb: onlineBlurb, online: true, ready: haveArena})
+	items = append(items, entry{name: "OPTIONS", blurb: "Difficulty, map editor, and controls.", options: true, ready: true})
 	sel := 0
 	titleF, _ := tdf.Fit("SPEKDER", cols-2, "block", "union", "untx")
 	draw := func() {
@@ -827,7 +830,120 @@ func runMenu(w *bufio.Writer, cols, rows int, ip *input, note string) menuChoice
 					draw()
 					continue
 				}
-				return menuChoice{online: it.online, mode: it.mode}
+				return menuChoice{online: it.online, options: it.options, mode: it.mode}
+			}
+		}
+	}
+}
+
+// drawListMenu renders a centered title + vertical item list with a selection
+// marker and a blurb line, shared by the OPTIONS sub-menus.
+func drawListMenu(w *bufio.Writer, cols, rows int, title string, names, blurbs []string, dim []bool, sel int) {
+	w.WriteString("\x1b[2J\x1b[H")
+	if f, ok := tdf.Fit(title, cols-2, "union", "untx", "block"); ok {
+		w.WriteString(f.RenderCentered(title, cols, 1, tdf.RenderOpts{Recolor: true, FG: 11, Transparent: true}))
+	}
+	row := rows/2 - len(names)/2 - 1
+	for i, nm := range names {
+		marker, style := "  ", "\x1b[0;36m"
+		if dim != nil && dim[i] {
+			style = "\x1b[0;90m"
+			nm += "  (soon)"
+		}
+		if i == sel {
+			style = "\x1b[1;30;46m"
+		}
+		line := marker + nm
+		fmt.Fprintf(w, "\x1b[%d;%dH%s  %s  \x1b[0m", row+i, (cols-len(line)-4)/2+1, style, line)
+	}
+	if sel >= 0 && sel < len(blurbs) {
+		b := blurbs[sel]
+		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;37m%s\x1b[0m", row+len(names)+2, (cols-len(b))/2+1, b)
+	}
+	foot := "up/down  select     ENTER  choose     </ back"
+	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;90m%s\x1b[0m", rows-1, (cols-len(foot))/2+1, foot)
+	w.Flush()
+}
+
+// runOptions is the OPTIONS sub-menu: Difficulty (live), Map Editor + Controls
+// (coming soon). Returns the (possibly changed) difficulty.
+func runOptions(w *bufio.Writer, cols, rows int, ip *input, dropfile string, diff gm.Difficulty) gm.Difficulty {
+	names := []string{"DIFFICULTY", "MAP EDITOR", "CONTROLS", "BACK"}
+	blurbs := []string{"", "Build and edit arenas.", "Customize key bindings.", "Return to the main menu."}
+	dim := []bool{false, true, true, false}
+	sel := 0
+	draw := func() {
+		blurbs[0] = "Set bot skill (current: " + diff.String() + ")."
+		drawListMenu(w, cols, rows, "OPTIONS", names, blurbs, dim, sel)
+	}
+	draw()
+	for {
+		select {
+		case <-ip.quitCh:
+			return diff // propagate quit; the main menu will exit
+		case k := <-ip.events:
+			switch k {
+			case mkUp:
+				sel = (sel - 1 + len(names)) % len(names)
+				draw()
+			case mkDown:
+				sel = (sel + 1) % len(names)
+				draw()
+			case mkLeft:
+				return diff // back
+			case mkEnter:
+				switch sel {
+				case 0:
+					diff = runDifficulty(w, cols, rows, ip, dropfile, diff)
+					draw()
+				case 3:
+					return diff
+				default:
+					draw() // soon: no-op
+				}
+			}
+		}
+	}
+}
+
+// runDifficulty is the tier picker; ENTER saves the choice for this caller.
+func runDifficulty(w *bufio.Writer, cols, rows int, ip *input, dropfile string, cur gm.Difficulty) gm.Difficulty {
+	tiers := gm.Difficulties()
+	names := make([]string, len(tiers))
+	blurbs := make([]string, len(tiers))
+	for i, d := range tiers {
+		names[i] = gm.ProfileFor(d).Name
+		blurbs[i] = "ENTER to play at this skill level."
+	}
+	sel := 0
+	for i, d := range tiers {
+		if d == cur {
+			sel = i
+		}
+	}
+	draw := func() {
+		blurbs[sel] = "current: " + cur.String() + "  -  ENTER to set"
+		drawListMenu(w, cols, rows, "DIFFICULTY", names, blurbs, nil, sel)
+	}
+	draw()
+	for {
+		select {
+		case <-ip.quitCh:
+			return cur
+		case k := <-ip.events:
+			switch k {
+			case mkUp:
+				sel = (sel - 1 + len(tiers)) % len(tiers)
+				draw()
+			case mkDown:
+				sel = (sel + 1) % len(tiers)
+				draw()
+			case mkLeft:
+				return cur // back without changing
+			case mkEnter:
+				cur = tiers[sel]
+				saveUserDifficulty(dropfile, cur)
+				return cur
 			}
 		}
 	}
@@ -1190,7 +1306,9 @@ func main() {
 	w := bufio.NewWriterSize(term, 1<<16)
 	splash(w, cols, rows, ip)
 
-	// The menu drives everything: pick a single-player mode, or join the arena.
+	// The menu drives everything: pick a single-player mode, join the arena, or
+	// open OPTIONS. Difficulty is loaded per-BBS-user and editable in OPTIONS.
+	difficulty := loadUserDifficulty(dropfile)
 	var sess session
 	note := ""
 	for {
@@ -1199,13 +1317,18 @@ func main() {
 			cleanup()
 			return
 		}
+		if choice.options {
+			difficulty = runOptions(w, cols, rows, ip, dropfile, difficulty)
+			note = ""
+			continue
+		}
 		vehicle, vquit := runVehicleMenu(w, cols, rows, ip)
 		if vquit {
 			cleanup()
 			return
 		}
 		if !choice.online {
-			sess = newOfflineSession(offlineBots, choice.mode, vehicle)
+			sess = newOfflineSession(offlineBots, choice.mode, vehicle, difficulty)
 			break
 		}
 		ns, err := connectArena(vehicle)
