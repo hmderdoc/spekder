@@ -28,16 +28,31 @@ the test suite for the embedded set, so this document and the validator agree.
 
 | field       | type             | notes |
 |-------------|------------------|-------|
-| `version`   | int              | schema version (current: 2). Absent = 1. |
-| `name`      | string           | **required**; shown in selection, sent on the wire. |
-| `size`      | number           | arena half-extent. 0/absent = 22. |
-| `obstacles` | array of Box     | solid, collidable blocks (cover, walls, pillars). |
-| `ramps`     | array of Ramp    | drive-up sloped surfaces. |
-| `scenery`   | array of Prop    | decorative only (no collision). |
-| `spawns`    | array of `[x,z]` | tank start points. 0 = random fallback. |
-| `pickups`   | array of `[x,z]` | reserved power-up drop spots. |
-| `entities`  | array of Entity  | trait-driven objects (turrets, hazards, …). |
-| `rules`     | Rules (optional) | **v2**; per-map victory conditions. Absent = implied by objectives. |
+| `version`     | int                | schema version (current: 3). Absent = 1. |
+| `name`        | string             | **required**; shown in selection, sent on the wire. |
+| `size`        | number             | arena half-extent. 0/absent = 22. |
+| `obstacles`   | array of Box       | solid, collidable blocks (cover, walls, pillars). |
+| `ramps`       | array of Ramp      | drive-up sloped surfaces. |
+| `scenery`     | array of Prop      | decorative only (no collision). |
+| `spawns`      | array of `[x,z]`   | tank start points. 0 = random fallback. |
+| `pickups`     | array of `[x,z]`   | **v1/v2 legacy**: untyped power-up spots (read-only; load as "any"). |
+| `pickupSpots` | array of PickupSpot | **v3**: typed power-up spots (written by the editor). |
+| `entities`    | array of Entity    | trait-driven objects (turrets, hazards, …). |
+| `rules`       | Rules (optional)   | **v2**; per-map victory conditions. Absent = implied by objectives. |
+
+### PickupSpot (v3)
+
+Where a power-up appears, and what it is. A spot with `kind: -1` ("any") behaves
+like the old untyped spot — the periodic spawner picks a random power-up there.
+
+| field    | type       | notes |
+|----------|------------|-------|
+| `pos`    | `[x,z]`    | location. |
+| `kind`   | int        | `-1` = any (random); else a power-up: 0 repair, 1 shield, 2 rapid, 3 cloak, 4 ammo, 5 weapon. |
+| `weapon` | int (opt)  | for `kind: 5` (weapon): which weapon to grant (0 = random). |
+
+Saving any map (re)writes pickups in the `pickupSpots` form; the legacy `pickups`
+array is still read so older maps load unchanged.
 
 ### Rules (v2, optional)
 

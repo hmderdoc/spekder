@@ -81,7 +81,7 @@ var catItems = []catItem{
 		m.Spawns = append(m.Spawns, gm.V3{X: p.X, Z: p.Z})
 	}},
 	{name: "PICKUP SPOT", kind: "wall", half: gm.V3{X: 0.4, Y: 0.4, Z: 0.4}, place: func(m *gm.Map, p gm.V3) {
-		m.Pickups = append(m.Pickups, gm.V3{X: p.X, Z: p.Z})
+		m.Pickups = append(m.Pickups, gm.MapPickup{Pos: gm.V3{X: p.X, Z: p.Z}, Kind: -1}) // -1 = any (set in edit panel)
 	}},
 }
 
@@ -173,7 +173,7 @@ func selPos(m *gm.Map, r selRef) gm.V3 {
 	case selSpawn:
 		return m.Spawns[r.idx]
 	case selPickup:
-		return m.Pickups[r.idx]
+		return m.Pickups[r.idx].Pos
 	}
 	return gm.V3{}
 }
@@ -250,13 +250,18 @@ func fieldsFor(m *gm.Map, r selRef) []editField {
 	case selSpawn:
 		return vecFields("pos", &m.Spawns[r.idx], false)
 	case selPickup:
-		return vecFields("pos", &m.Pickups[r.idx], false)
+		pk := &m.Pickups[r.idx]
+		f := vecFields("pos", &pk.Pos, false)
+		return append(f,
+			editField{"kind", func() float64 { return float64(pk.Kind) }, func(v float64) { pk.Kind = clampI(int(v), -1, gm.PickWeapon) }, 1},
+			editField{"weapon", func() float64 { return float64(pk.Weapon) }, func(v float64) { pk.Weapon = clampI(int(v), 0, len(gm.Weapons)-1) }, 1})
 	case selEntity:
 		e := &m.Entities[r.idx]
 		f := vecFields("pos", &e.Pos, true)
 		f = append(f, vecFields("half", &e.Half, true)...)
 		if t := e.Turret; t != nil {
 			f = append(f,
+				editField{"weapon", func() float64 { return float64(e.Weapon) }, func(v float64) { e.Weapon = clampI(int(v), 0, len(gm.Weapons)-1) }, 1},
 				editField{"range", func() float64 { return t.Range }, func(v float64) { t.Range = maxF(v, 0) }, 1},
 				editField{"dmg", func() float64 { return float64(t.Dmg) }, func(v float64) { t.Dmg = int(maxF(v, 0)) }, 1},
 				editField{"fireDelay", func() float64 { return t.FireDelay }, func(v float64) { t.FireDelay = maxF(v, 0) }, 0.1},
@@ -424,7 +429,7 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 								// Temporarily add the working map, play it, then remove it.
 								idx := len(gm.Maps)
 								gm.Maps = append(gm.Maps, m)
-								sess := newOfflineOnMap(idx, offlineBots, gm.EffectiveMode(m), 1, s.difficulty, s.aimAssist, playerName)
+								sess := newOfflineOnMap(idx, offlineBots, gm.EffectiveMode(m), 1, s.difficulty, s.aimAssist, playerName, gm.SelectColors[0], nil, gm.BodyTank)
 								quit := playMatch(w, cols, rows, rows3d, rnd, ip, sess)
 								sess.close()
 								gm.Maps = gm.Maps[:idx]
@@ -688,8 +693,8 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 		for _, s := range m.Spawns { // make spawns/pickups visible in the editor
 			addMarker(gm.V3{X: s.X, Y: 0.5, Z: s.Z}, gm.V3{X: 0.5, Y: 0.5, Z: 0.5}, [3]float64{0.30, 0.85, 0.40})
 		}
-		for _, s := range m.Pickups {
-			addMarker(gm.V3{X: s.X, Y: 0.4, Z: s.Z}, gm.V3{X: 0.4, Y: 0.4, Z: 0.4}, [3]float64{0.90, 0.80, 0.30})
+		for _, s := range m.Pickups { // colored by kind so typed spots read at a glance
+			addMarker(gm.V3{X: s.Pos.X, Y: 0.4, Z: s.Pos.Z}, gm.V3{X: 0.4, Y: 0.4, Z: 0.4}, pickupColor(s.Kind))
 		}
 		if mode == edPlace { // ghost preview of the item to drop
 			it := catItems[itemIdx]
@@ -931,8 +936,43 @@ func drawEditPanel(w *bufio.Writer, rows int, label string, n, total int, fields
 		if i == sel {
 			style = "\x1b[1;30;46m"
 		}
-		fmt.Fprintf(w, "\x1b[%d;2H%s %-12s %7.2f \x1b[0m", row, style, f.name, f.get())
+		if f.name == "weapon" { // show the palette name, not the index
+			fmt.Fprintf(w, "\x1b[%d;2H%s %-12s %-8s \x1b[0m", row, style, f.name, weaponName(int(f.get())))
+		} else if f.name == "kind" { // pickup kind by name
+			fmt.Fprintf(w, "\x1b[%d;2H%s %-12s %-8s \x1b[0m", row, style, f.name, pickKindName(int(f.get())))
+		} else {
+			fmt.Fprintf(w, "\x1b[%d;2H%s %-12s %7.2f \x1b[0m", row, style, f.name, f.get())
+		}
 	}
+}
+
+// weaponName is the palette name for a weapon index (for the edit panel).
+func weaponName(i int) string {
+	if i >= 0 && i < len(gm.Weapons) {
+		return gm.Weapons[i].Name
+	}
+	return "?"
+}
+
+// pickKindName labels a pickup kind (-1 = any) for the edit panel.
+func pickKindName(k int) string {
+	switch k {
+	case -1:
+		return "ANY"
+	case gm.PickRepair:
+		return "REPAIR"
+	case gm.PickShield:
+		return "SHIELD"
+	case gm.PickRapid:
+		return "RAPID"
+	case gm.PickCloak:
+		return "CLOAK"
+	case gm.PickAmmo:
+		return "AMMO"
+	case gm.PickWeapon:
+		return "WEAPON"
+	}
+	return "?"
 }
 
 // adjustRule steps one victory-condition field; -1 means "default" for each, with

@@ -1,0 +1,18 @@
+### Bot improvements
+- bots should not just stand still if they can't detected an enemy they should "explore"
+- bots should have different vehicle types that effect their behavior.  heavy, slow and powerful vehicles might confront things head on and never flee.  light, fast and weak vehicles might try to flee damage and attack from behind the opposing tank when health is low.
+- teamwork and targetting behavior.  bots should have a concept of teamwork when working together depending on their skills.  support players should play like support, tank (meaning high damage and HP) players should play like tank.
+
+### Vehicles / Enemy Types
+- we should have vehicles that look different from each other, maybe some powerful tanks have larger hitboxes that nerf them somewhat
+- we should add the ability to create custom vehicles based on a point allottment.
+- opponents / players can also have different weapons, and maybe we can have primary and secondary weapon systems.  some weapons might be fast, accurate and semi-powerful like our current system, but we could have slow things like grenades that have a huge blast radius (maybe different aim-style) or bombs/mines which could be similar but dropped and triggered differently (timer / tripped).  we could have lasers.  we could have recharge times on secondary weapons.  maybe we could also allow for picking up new weapons in game as a drop, or extra ammo capacity, increased damage, etc.
+- as we move forward with tanks / characters / assets, it might be useful to come up with different verbiage than "tank" for everything.  I'd like to make this flexible enough so we could add dinosaurs when we feel like it, it's just a tank skinned like a dino.
+
+### Different weapon effects
+It'd be good to get a system setup just so we don't lose track of this, even if it's not used yet - I think really in the level designer assigning these effects is where you could see some interesting stuff.  You could have a support player who doesn't deal a lot of damage (maybe having a low damage weapon) but can deal boosts by shooting at teammates: healing shots, speed boosts, shields, damage reduction and other power ups.  You could have someone in another support role who can nerf opponents doing opposite effect: wounding shots, slowdowns, shield busters, defense down/damage up, etc.  You could have teleporter weapons where you can grab a player from one place and shoot them another.  
+
+### Controls
+- We should have a way to use / fire the secondary weapon. "B" might make sense since it's above the spacebar directly and sort of maps to "B" bomb.
+- I guess we are going to make it so the user can set custom controls, so we don't need to overthink that default key for now.
+- I'd like to consider adding 4 new keys and a driving mode I'd call "cruise-control", maybe it will be on by default but something the user can turn off.  The way I see it working is this, basically you have 'awsd' lowercase for driving right now as we do normally.  What we'd do is handle 'AWSD' uppercase as if they are "cruise control" keys.  The idea is when you trigger cruise control, the tank keeps moving automatically in that direction while you're free to aim and take shots without standing still.  You could use shift or CAPSLOCK.  I think the way it should work is you'd actually press the key twice quickly to engage cruise control, otherwise a single key will be a short movement in the direction pressed.  To disengage cruise control, you can press the key a third time, or a different navigation key, upper or lowercase.

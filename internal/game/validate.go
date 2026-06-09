@@ -78,8 +78,8 @@ func ValidateMap(m Map) []MapIssue {
 		}
 	}
 	for i, p := range m.Pickups {
-		if !inBounds(p) {
-			mapIssue("pickups", fmt.Sprintf("pickup spot %d %v is outside the arena", i, []float64{p.X, p.Z}), false)
+		if !inBounds(p.Pos) {
+			mapIssue("pickups", fmt.Sprintf("pickup spot %d %v is outside the arena", i, []float64{p.Pos.X, p.Pos.Z}), false)
 		}
 	}
 

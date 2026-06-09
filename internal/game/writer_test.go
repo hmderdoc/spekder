@@ -12,10 +12,10 @@ func TestMapJSONRoundTrip(t *testing.T) {
 		Ramps:     []Ramp{{Pos: V3{X: -5, Z: 0}, Half: V3{X: 2, Z: 3}, H: 3, Dir: 2, Color: [3]float64{0.3, 0.4, 0.5}}},
 		Scenery:   []Prop{{Kind: "obelisk", Pos: V3{}, H: 7, Color: [3]float64{0.8, 0.3, 0.6}}},
 		Spawns:    []V3{{X: -14, Z: -14}, {X: 14, Z: 14}},
-		Pickups:   []V3{{X: 0, Z: 10}},
+		Pickups:   []MapPickup{{Pos: V3{X: 0, Z: 10}, Kind: PickAmmo}, {Pos: V3{X: 2, Z: 2}, Kind: PickWeapon, Weapon: 6}},
 		Rules:     &MapRules{Mode: int(ModeCTF), TimeLimit: 120, Target: 5, Lives: 3},
 		Entities: []Entity{
-			{Kind: "turret", Pos: V3{Y: 2}, Half: V3{X: 0.7, Y: 0.3, Z: 0.7}, Solid: true,
+			{Kind: "turret", Pos: V3{Y: 2}, Half: V3{X: 0.7, Y: 0.3, Z: 0.7}, Solid: true, Weapon: 1,
 				Turret:   &TurretTrait{Range: 22, FireDelay: 1.4, Dmg: 16, TurnRate: 1.6},
 				Destruct: &DestructTrait{MaxHP: 60}, Respawn: &RespawnTrait{Delay: 12}},
 			{Kind: "trampoline", Pos: V3{X: 8, Y: 0.2, Z: 0}, Half: V3{X: 1.5, Y: 0.2, Z: 1.5}, Bounce: &BounceTrait{Power: 13}},
@@ -40,8 +40,11 @@ func TestMapJSONRoundTrip(t *testing.T) {
 	if len(got.Ramps) != 1 || got.Ramps[0].Dir != 2 || got.Ramps[0].H != 3 {
 		t.Fatalf("ramp lost: %+v", got.Ramps)
 	}
-	if len(got.Spawns) != 2 || got.Spawns[1].Z != 14 || len(got.Pickups) != 1 {
+	if len(got.Spawns) != 2 || got.Spawns[1].Z != 14 || len(got.Pickups) != 2 {
 		t.Fatalf("spawns/pickups lost: %+v %+v", got.Spawns, got.Pickups)
+	}
+	if got.Pickups[0].Kind != PickAmmo || got.Pickups[1].Kind != PickWeapon || got.Pickups[1].Weapon != 6 {
+		t.Fatalf("typed pickups lost: %+v", got.Pickups)
 	}
 	if len(got.Entities) != 4 {
 		t.Fatalf("want 4 entities, got %d", len(got.Entities))
@@ -49,6 +52,9 @@ func TestMapJSONRoundTrip(t *testing.T) {
 	e := got.Entities[0]
 	if e.Turret == nil || e.Turret.Dmg != 16 || e.Destruct == nil || e.Destruct.MaxHP != 60 || e.Respawn == nil {
 		t.Fatalf("turret entity traits lost: %+v", e)
+	}
+	if e.Weapon != 1 {
+		t.Fatalf("turret weapon lost: %d want 1", e.Weapon)
 	}
 	if got.Entities[1].Bounce == nil || got.Entities[1].Bounce.Power != 13 {
 		t.Fatalf("bounce lost: %+v", got.Entities[1])

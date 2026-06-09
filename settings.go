@@ -16,10 +16,18 @@ import (
 type userSettings struct {
 	difficulty gm.Difficulty
 	aimAssist  bool
+
+	// Custom point-buy vehicle (see VEHICLES.md). hasCustom gates the CUSTOM entry
+	// in the selector; chassis is the builtin body it renders as; levels are the
+	// per-stat pips (see pbStats) the build was tuned to.
+	hasCustom     bool
+	customChassis int
+	customBody    int // render silhouette for the custom build (BodyTank or a creature)
+	customLevels  [pbStatCount]int
 }
 
 func defaultSettings() userSettings {
-	return userSettings{difficulty: gm.DiffNormal, aimAssist: true}
+	return userSettings{difficulty: gm.DiffNormal, aimAssist: true, customChassis: 1, customBody: gm.BodyTank, customLevels: defaultCustomLevels()}
 }
 
 // sanitizeKey reduces a handle to a safe, stable filename fragment.
@@ -74,7 +82,48 @@ func loadUserSettings(dropfile string) userSettings {
 	case "on", "true", "1", "yes":
 		s.aimAssist = true
 	}
+	if c, ok := atoiOK(ini["customchassis"]); ok && c >= 0 && c < gm.BuiltinVehicles() {
+		s.customChassis = c
+	}
+	if b, ok := atoiOK(ini["custombody"]); ok && b >= 0 && b < gm.BodyKinds {
+		s.customBody = b
+	}
+	if lv, ok := parseLevels(ini["customlevels"]); ok {
+		s.customLevels = lv
+		s.hasCustom = true
+	}
 	return s
+}
+
+// parseLevels reads a comma-separated pip list ("4,4,3,4,3,4") into a level array.
+func parseLevels(s string) ([pbStatCount]int, bool) {
+	var lv [pbStatCount]int
+	parts := strings.Split(s, ",")
+	if len(parts) != pbStatCount {
+		return lv, false
+	}
+	for i, p := range parts {
+		n, ok := atoiOK(strings.TrimSpace(p))
+		if !ok {
+			return lv, false
+		}
+		lv[i] = clampLevel(i, n)
+	}
+	return lv, true
+}
+
+func atoiOK(s string) (int, bool) {
+	if s == "" {
+		return 0, false
+	}
+	n := 0
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return 0, false
+		}
+		n = n*10 + int(r-'0')
+	}
+	return n, true
 }
 
 // saveUserSettings persists the caller's preferences (best-effort, both keys).
@@ -86,5 +135,12 @@ func saveUserSettings(dropfile string, s userSettings) {
 		aa = "on"
 	}
 	body := fmt.Sprintf("difficulty = %s\naimassist = %s\n", s.difficulty.String(), aa)
+	if s.hasCustom {
+		parts := make([]string, pbStatCount)
+		for i, v := range s.customLevels {
+			parts[i] = fmt.Sprintf("%d", v)
+		}
+		body += fmt.Sprintf("customchassis = %d\ncustombody = %d\ncustomlevels = %s\n", s.customChassis, s.customBody, strings.Join(parts, ","))
+	}
 	_ = os.WriteFile(p, []byte(body), 0o644)
 }

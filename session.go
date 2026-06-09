@@ -15,7 +15,7 @@ import (
 type viewState struct {
 	ready  bool // false until the first server snapshot arrives (net only)
 	tanks  []gm.TankSnap
-	shots  []gm.V3
+	shots  []gm.ShotSnap
 	me     int
 	self   gm.TankSnap // our tank, authoritative (HUD/flash)
 	camPos gm.V3       // our tank ground position (caller adds eye height)
@@ -65,7 +65,7 @@ type offlineSession struct {
 	me int
 }
 
-func newOfflineSession(numBots int, mode gm.Mode, vehicle int, diff gm.Difficulty, aimAssist bool, name string) *offlineSession {
+func newOfflineSession(numBots int, mode gm.Mode, vehicle int, diff gm.Difficulty, aimAssist bool, name string, color [3]float64, custom *gm.CustomStats, body int) *offlineSession {
 	w := gm.NewWorld(numBots, mode)
 	w.SetDifficulty(diff)
 	w.SetAimAssist(aimAssist)
@@ -91,7 +91,7 @@ func newOfflineSession(numBots int, mode gm.Mode, vehicle int, diff gm.Difficult
 			logf("offline: pinned to map %q (index %d)", want, idx)
 		}
 	}
-	return &offlineSession{w: w, me: w.AddPlayer([3]float64{}, vehicle, name)}
+	return &offlineSession{w: w, me: w.AddPlayerCustom(color, vehicle, name, customVeh(vehicle, custom), body)}
 }
 
 func (s *offlineSession) step(dt float64, in gm.Input) viewState {
@@ -121,10 +121,19 @@ func (s *offlineSession) close() {}
 
 // newOfflineOnMap builds an offline session pinned to a specific map index (used
 // by the editor's playtest, which temporarily appends the working map to gm.Maps).
-func newOfflineOnMap(mapIdx, numBots int, mode gm.Mode, vehicle int, diff gm.Difficulty, aimAssist bool, name string) *offlineSession {
+// customVeh resolves a custom build to a per-tank Vehicle override (nil = builtin).
+func customVeh(chassis int, cs *gm.CustomStats) *gm.Vehicle {
+	if cs == nil {
+		return nil
+	}
+	v := gm.MakeCustom(chassis, *cs)
+	return &v
+}
+
+func newOfflineOnMap(mapIdx, numBots int, mode gm.Mode, vehicle int, diff gm.Difficulty, aimAssist bool, name string, color [3]float64, custom *gm.CustomStats, body int) *offlineSession {
 	w := gm.NewWorld(numBots, mode)
 	w.PinMap(mapIdx)
 	w.SetDifficulty(diff)
 	w.SetAimAssist(aimAssist)
-	return &offlineSession{w: w, me: w.AddPlayer([3]float64{}, vehicle, name)}
+	return &offlineSession{w: w, me: w.AddPlayerCustom(color, vehicle, name, customVeh(vehicle, custom), body)}
 }

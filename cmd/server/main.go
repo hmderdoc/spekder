@@ -48,7 +48,7 @@ func (s *server) handle(conn net.Conn) {
 	if err != nil {
 		return
 	}
-	token, bbsid, handle, vehicle, ok := proto.DecodeHello(hello)
+	token, bbsid, handle, vehicle, color, custom, body, ok := proto.DecodeHello(hello)
 	if !ok || token != s.token {
 		log.Printf("rejected %v (bad hello/token)", conn.RemoteAddr())
 		return
@@ -59,8 +59,13 @@ func (s *server) handle(conn net.Conn) {
 	}
 	conn.SetReadDeadline(time.Time{})
 
+	var customVeh *gm.Vehicle // custom build: chassis renders, these stats sim
+	if custom != nil {
+		v := gm.MakeCustom(vehicle, *custom)
+		customVeh = &v
+	}
 	s.mu.Lock()
-	tank := s.world.AddPlayer([3]float64{}, vehicle, handle)
+	tank := s.world.AddPlayerCustom(color, vehicle, handle, customVeh, body) // dedups to a free color
 	id := s.nextID
 	s.nextID++
 	c := &client{id: id, tank: tank, conn: conn}

@@ -42,7 +42,7 @@ func box(dst []Tri, center, half V3, col [3]float64, xf func(V3) V3) []Tri {
 	return dst
 }
 
-func appendTank(dst []Tri, t *gm.TankSnap) []Tri {
+func appendTank(dst []Tri, t *gm.TankSnap, clock float64) []Tri {
 	sh, ch := math.Sin(t.HullYaw), math.Cos(t.HullYaw)
 	sa, ca := math.Sin(t.HullYaw+t.TurretYaw), math.Cos(t.HullYaw+t.TurretYaw)
 	xfHull := func(l V3) V3 { return rotY(l, sh, ch).Add(t.Pos) }
@@ -58,23 +58,66 @@ func appendTank(dst []Tri, t *gm.TankSnap) []Tri {
 		col = [3]float64{1, 1, 1}
 	}
 	bright := [3]float64{math.Min(col[0]*1.25, 1), math.Min(col[1]*1.25, 1), math.Min(col[2]*1.25, 1)}
+	v := gm.Veh(t.Vehicle)
+	s := v.Scale // vehicle class sizes the model
+	if t.Body != gm.BodyTank {
+		return appendCreature(dst, t, xfHull, col, bright, s, clock)
+	}
 	gun := [3]float64{0.22, 0.22, 0.26}
-	s := gm.Veh(t.Vehicle).Scale // vehicle class sizes the model
-	pivotY := 1.05 * s
+	b := bodyFor(v.Name)
+	pivotY := b.turretY * s
 	xfBarrel := func(l V3) V3 {
 		ly := l.Y - pivotY
 		pp := V3{l.X, ly*cp + l.Z*sp + pivotY, -ly*sp + l.Z*cp}
 		return rotY(pp, sa, ca).Add(t.Pos)
 	}
-	dst = box(dst, V3{0, 0.45 * s, 0}, V3{0.9 * s, 0.45 * s, 1.3 * s}, col, xfHull)            // hull
-	dst = box(dst, V3{0, 1.05 * s, 0}, V3{0.55 * s, 0.32 * s, 0.55 * s}, bright, xfTur)        // turret
-	dst = box(dst, V3{0, 1.05 * s, 1.05 * s}, V3{0.12 * s, 0.12 * s, 0.85 * s}, gun, xfBarrel) // barrel (pitches)
+	dst = box(dst, V3{0, b.hull.Y * s, 0}, V3{b.hull.X * s, b.hull.Y * s, b.hull.Z * s}, col, xfHull) // hull
+	dst = box(dst, V3{0, b.turretY * s, 0}, V3{b.turret.X * s, b.turret.Y * s, b.turret.Z * s}, bright, xfTur)
+	barZ := (b.turret.Z + b.barLen) * s
+	dst = box(dst, V3{0, b.turretY * s, barZ}, V3{b.barR * s, b.barR * s, b.barLen * s}, gun, xfBarrel) // barrel (pitches)
 	return dst
 }
 
-func appendShot(dst []Tri, pos V3) []Tri {
-	xf := func(l V3) V3 { return l.Add(pos) }
-	return box(dst, V3{}, V3{0.16, 0.16, 0.16}, [3]float64{1.0, 0.85, 0.30}, xf)
+// bodyShape is a vehicle's render proportions (half-extents, pre-Scale), so each
+// class has a distinct silhouette - not just a resized copy.
+type bodyShape struct {
+	hull    V3      // hull half-extents
+	turret  V3      // turret half-extents
+	turretY float64 // turret center height (also the barrel pitch pivot)
+	barLen  float64 // barrel half-length
+	barR    float64 // barrel half-radius
+}
+
+func bodyFor(name string) bodyShape {
+	switch name {
+	case "SCOUT": // small, low, stubby gun
+		return bodyShape{hull: V3{0.7, 0.30, 1.05}, turret: V3{0.40, 0.22, 0.40}, turretY: 0.78, barLen: 0.65, barR: 0.09}
+	case "HEAVY": // wide bulky fortress, thick gun
+		return bodyShape{hull: V3{1.18, 0.55, 1.42}, turret: V3{0.74, 0.42, 0.74}, turretY: 1.20, barLen: 0.9, barR: 0.18}
+	case "RANGER": // long sleek hull, slim gun
+		return bodyShape{hull: V3{0.74, 0.34, 1.5}, turret: V3{0.46, 0.27, 0.46}, turretY: 0.92, barLen: 1.0, barR: 0.10}
+	case "ARTILLERY": // long body, small turret, very long barrel
+		return bodyShape{hull: V3{0.85, 0.40, 1.45}, turret: V3{0.42, 0.30, 0.42}, turretY: 1.0, barLen: 1.7, barR: 0.13}
+	default: // HUNTER (the original proportions)
+		return bodyShape{hull: V3{0.9, 0.45, 1.3}, turret: V3{0.55, 0.32, 0.55}, turretY: 1.05, barLen: 0.85, barR: 0.12}
+	}
+}
+
+func appendShot(dst []Tri, s gm.ShotSnap) []Tri {
+	// size + color by visual kind so each projectile reads distinctly.
+	size, col := 0.16, [3]float64{1.0, 0.85, 0.30} // VisBolt: amber
+	switch s.Vis {
+	case gm.VisGrenade:
+		size, col = 0.28, [3]float64{0.45, 0.9, 0.4} // green lob
+	case gm.VisMine:
+		size, col = 0.22, [3]float64{0.95, 0.3, 0.2} // red ground mine
+	case gm.VisBeam:
+		size, col = 0.13, [3]float64{0.5, 0.9, 1.0} // cyan beam segment
+	case gm.VisSpark:
+		size, col = 0.15, [3]float64{1.0, 0.55, 0.15} // orange debris
+	}
+	xf := func(l V3) V3 { return l.Add(s.Pos) }
+	return box(dst, V3{}, V3{X: size, Y: size, Z: size}, col, xf)
 }
 
 // appendRamp builds a drive-up wedge: a sloped top surface plus vertical skirts
@@ -165,6 +208,10 @@ func pickupColor(kind int) [3]float64 {
 		return [3]float64{0.95, 0.70, 0.20} // amber = rapid fire
 	case gm.PickCloak:
 		return [3]float64{0.75, 0.45, 0.90} // violet = cloak
+	case gm.PickAmmo:
+		return [3]float64{0.85, 0.75, 0.25} // gold = ammo refill
+	case gm.PickWeapon:
+		return [3]float64{0.90, 0.95, 1.0} // bright white = weapon swap
 	}
 	return [3]float64{0.85, 0.85, 0.85}
 }
@@ -328,9 +375,16 @@ func (r *Renderer) drawReticle(col [3]byte, turret float64) {
 	}
 }
 
+// renderPreview draws a single vehicle on a black backdrop with no HUD - used by
+// the vehicle-selection screen's rotating preview panel.
+func (r *Renderer) renderModel(cam Cam, tris []Tri) {
+	r.clearBlack()
+	r.drawTris(cam, tris, 0)
+}
+
 // renderWorld draws the arena, every tank except our own (me) and the dead, all
 // projectiles, then the damage flash and aiming reticle.
-func (r *Renderer) renderWorld(cam Cam, t float64, tanks []gm.TankSnap, shots []gm.V3, flags []gm.FlagSnap, pickups []gm.PickupSnap, entT []gm.Entity, entS []gm.EntitySnap, zones []gm.ZoneSnap, me int, flash float64, topdown bool, reticle [3]byte, selfTurret float64) {
+func (r *Renderer) renderWorld(cam Cam, t float64, tanks []gm.TankSnap, shots []gm.ShotSnap, flags []gm.FlagSnap, pickups []gm.PickupSnap, entT []gm.Entity, entS []gm.EntitySnap, zones []gm.ZoneSnap, me int, flash float64, topdown bool, reticle [3]byte, selfTurret float64) {
 	r.clear()
 	r.drawTris(cam, arena, t)
 	var dyn []Tri
@@ -345,7 +399,7 @@ func (r *Renderer) renderWorld(cam Cam, t float64, tanks []gm.TankSnap, shots []
 		if tk.Cloak && tk.ID != me { // cloaked enemies are invisible (you still see your own)
 			continue
 		}
-		dyn = appendTank(dyn, tk)
+		dyn = appendTank(dyn, tk, t)
 	}
 	for _, s := range shots {
 		dyn = appendShot(dyn, s)

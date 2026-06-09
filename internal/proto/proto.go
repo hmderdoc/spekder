@@ -59,32 +59,57 @@ func ReadMsg(r io.Reader) ([]byte, error) {
 
 // ---- HELLO ----
 
-func EncodeHello(token, bbsid, handle string, vehicle int) []byte {
-	b := []byte{MsgHello}
-	b = appendStr(b, token)
-	b = appendStr(b, bbsid)
-	b = appendStr(b, handle)
-	return append(b, byte(vehicle))
+func EncodeHello(token, bbsid, handle string, vehicle int, color [3]float64, custom *gm.CustomStats, body int) []byte {
+	c := cursor{b: []byte{MsgHello}}
+	c.str(token)
+	c.str(bbsid)
+	c.str(handle)
+	c.u8(byte(vehicle))
+	c.col3(color)
+	if custom != nil { // chassis (vehicle) renders; these stats override the sim
+		c.u8(1)
+		c.u16(custom.MaxHP)
+		c.f32(custom.Speed)
+		c.f32(custom.HullTurn)
+		c.f32(custom.FireDelay)
+		c.f32(custom.AmmoMax)
+		c.f32(custom.AmmoRegen)
+	} else {
+		c.u8(0)
+	}
+	c.u8(byte(body)) // render silhouette (BodyTank or a creature)
+	return c.b
 }
 
-func DecodeHello(p []byte) (token, bbsid, handle string, vehicle int, ok bool) {
+func DecodeHello(p []byte) (token, bbsid, handle string, vehicle int, color [3]float64, custom *gm.CustomStats, body int, ok bool) {
 	if len(p) == 0 || p[0] != MsgHello {
-		return "", "", "", 0, false
+		return "", "", "", 0, [3]float64{}, nil, 0, false
 	}
-	i := 1
-	if token, i, ok = readStr(p, i); !ok {
-		return
+	c := cursor{b: p, i: 1}
+	token = c.rstr()
+	bbsid = c.rstr()
+	handle = c.rstr()
+	if c.err {
+		return "", "", "", 0, [3]float64{}, nil, 0, false
 	}
-	if bbsid, i, ok = readStr(p, i); !ok {
-		return
+	// vehicle/color/custom/body are an optional tail (an older client may omit
+	// them); guard with explicit length checks so a short HELLO still decodes.
+	if len(p)-c.i >= 1 {
+		vehicle = int(c.ru8())
 	}
-	handle, i, ok = readStr(p, i)
-	if !ok {
-		return
+	if len(p)-c.i >= 3 {
+		color = c.rcol3()
 	}
-	if i < len(p) {
-		vehicle = int(p[i])
+	if len(p)-c.i >= 1 && c.ru8() == 1 {
+		cs := gm.CustomStats{MaxHP: c.ru16(), Speed: c.rf32(), HullTurn: c.rf32(), FireDelay: c.rf32(), AmmoMax: c.rf32(), AmmoRegen: c.rf32()}
+		if !c.err {
+			custom = &cs
+		}
 	}
+	if len(p)-c.i >= 1 {
+		body = int(c.ru8())
+	}
+	ok = true
 	return
 }
 
@@ -120,6 +145,9 @@ func EncodeInput(in gm.Input) []byte {
 	if in.Recenter {
 		b2 |= 1
 	}
+	if in.Fire2 {
+		b2 |= 2
+	}
 	return []byte{MsgInput, b, vote, b2}
 }
 
@@ -139,8 +167,8 @@ func DecodeInput(p []byte) (gm.Input, bool) {
 	return gm.Input{
 		Throttle: b&1 != 0, Reverse: b&2 != 0, HullL: b&4 != 0, HullR: b&8 != 0,
 		TurretL: b&16 != 0, TurretR: b&32 != 0, Fire: b&64 != 0, Jump: b&128 != 0,
-		Recenter: b2&1 != 0,
-		Vote:     vote,
+		Recenter: b2&1 != 0, Fire2: b2&2 != 0,
+		Vote: vote,
 	}, true
 }
 
@@ -219,6 +247,7 @@ func (w *cursor) entity(e gm.Entity) {
 		solid = 1
 	}
 	w.u8(solid)
+	w.u8(byte(e.Weapon)) // turret weapon index
 	var mask byte
 	if e.Turret != nil {
 		mask |= traitTurret
@@ -283,6 +312,7 @@ func (r *cursor) rentity() gm.Entity {
 	e.Color = r.rcol3()
 	e.Yaw = r.rf32()
 	e.Solid = r.ru8() != 0
+	e.Weapon = int(r.ru8())
 	mask := r.ru8()
 	if mask&traitTurret != 0 {
 		e.Turret = &gm.TurretTrait{Range: r.rf32(), FireDelay: r.rf32(), Dmg: r.ru16(), TurnRate: r.rf32()}
@@ -422,7 +452,7 @@ func DecodePubAck(p []byte) (ok bool, msg string, good bool) {
 
 // ---- STATE ----
 
-func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.V3, flags []gm.FlagSnap, pickups []gm.PickupSnap, ents []gm.EntitySnap, zones []gm.ZoneSnap) []byte {
+func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.ShotSnap, flags []gm.FlagSnap, pickups []gm.PickupSnap, ents []gm.EntitySnap, zones []gm.ZoneSnap) []byte {
 	w := &cursor{}
 	w.u8(MsgState)
 	w.u32(tick)
@@ -487,15 +517,19 @@ func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.V3
 		w.u16(t.Deaths)
 		w.f32(t.RespawnIn)
 		w.u8(byte(t.Vehicle))
+		w.u8(byte(t.Body))
 		w.i16(t.Lives)
 		w.i16(t.Team)
 		w.u16(t.HoldScore)
+		w.u8(byte(t.Ammo * 255))
 		w.str(t.Name)
 	}
 	w.u16(len(shots))
 	for _, s := range shots {
-		w.f32(s.X)
-		w.f32(s.Z)
+		w.f32(s.Pos.X)
+		w.f32(s.Pos.Y) // Y matters now (grenade arcs, beams)
+		w.f32(s.Pos.Z)
+		w.u8(s.Vis)
 	}
 	w.u16(len(flags))
 	for _, f := range flags {
@@ -512,6 +546,7 @@ func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.V3
 	for _, p := range pickups {
 		w.v3(p.Pos)
 		w.u8(byte(p.Kind))
+		w.u8(byte(p.Weapon))
 	}
 	w.u16(len(ents))
 	for _, e := range ents {
@@ -534,7 +569,7 @@ func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.V3
 	return w.b
 }
 
-func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.V3, flags []gm.FlagSnap, pickups []gm.PickupSnap, ents []gm.EntitySnap, zones []gm.ZoneSnap, ok bool) {
+func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.ShotSnap, flags []gm.FlagSnap, pickups []gm.PickupSnap, ents []gm.EntitySnap, zones []gm.ZoneSnap, ok bool) {
 	if len(p) == 0 || p[0] != MsgState {
 		return 0, gm.MatchSnap{}, nil, nil, nil, nil, nil, nil, false
 	}
@@ -584,17 +619,18 @@ func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, sh
 		t.Deaths = r.ru16()
 		t.RespawnIn = r.rf32()
 		t.Vehicle = int(r.ru8())
+		t.Body = int(r.ru8())
 		t.Lives = r.ri16()
 		t.Team = r.ri16()
 		t.HoldScore = r.ru16()
+		t.Ammo = float64(r.ru8()) / 255
 		t.Name = r.rstr()
 		tanks = append(tanks, t)
 	}
 	ns := r.ru16()
 	for k := 0; k < ns; k++ {
-		x := r.rf32()
-		z := r.rf32()
-		shots = append(shots, gm.V3{X: x, Y: gm.EyeHeight, Z: z})
+		x, y, z := r.rf32(), r.rf32(), r.rf32()
+		shots = append(shots, gm.ShotSnap{Pos: gm.V3{X: x, Y: y, Z: z}, Vis: r.ru8()})
 	}
 	nf := r.ru16()
 	for k := 0; k < nf; k++ {
@@ -611,6 +647,7 @@ func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, sh
 		var pk gm.PickupSnap
 		pk.Pos = r.rv3()
 		pk.Kind = int(r.ru8())
+		pk.Weapon = int(r.ru8())
 		pickups = append(pickups, pk)
 	}
 	ne := r.ru16()

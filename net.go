@@ -28,7 +28,7 @@ func arenaConfigured() bool { return loadINI(defaultINIPath())["server"] != "" }
 
 // connectArena dials the configured arena server and joins as a client with the
 // chosen vehicle.
-func connectArena(vehicle int) (*netSession, error) {
+func connectArena(vehicle, body int, color [3]float64, custom *gm.CustomStats) (*netSession, error) {
 	ini := loadINI(defaultINIPath())
 	host := ini["server"]
 	if host == "" {
@@ -39,7 +39,7 @@ func connectArena(vehicle int) (*netSession, error) {
 		port = "7700"
 	}
 	bbsid, handle := door32Identity("DOOR32.SYS")
-	ns, err := dialServer(host, port, ini["token"], bbsid, handle, vehicle)
+	ns, err := dialServer(host, port, ini["token"], bbsid, handle, vehicle, color, custom, body)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +66,7 @@ func publishMap(m gm.Map) (string, error) {
 		return "", err
 	}
 	defer conn.Close()
-	if err := proto.WriteMsg(conn, proto.EncodeHello(ini["token"], bbsid, handle, proto.PublishVehicle)); err != nil {
+	if err := proto.WriteMsg(conn, proto.EncodeHello(ini["token"], bbsid, handle, proto.PublishVehicle, [3]float64{}, nil, gm.BodyTank)); err != nil {
 		return "", err
 	}
 	if err := proto.WriteMsg(conn, proto.EncodePublish(m)); err != nil {
@@ -90,7 +90,7 @@ func publishMap(m gm.Map) (string, error) {
 type stamped struct {
 	t       time.Time
 	tanks   []gm.TankSnap
-	shots   []gm.V3
+	shots   []gm.ShotSnap
 	flags   []gm.FlagSnap
 	pickups []gm.PickupSnap
 	ents    []gm.EntitySnap
@@ -121,14 +121,16 @@ type netSession struct {
 	predPitch float64
 	predVy    float64
 	predInit  bool
+
+	predVeh *gm.Vehicle // our effective stats for client prediction (custom build, if any)
 }
 
-func dialServer(host, port, token, bbsid, handle string, vehicle int) (*netSession, error) {
+func dialServer(host, port, token, bbsid, handle string, vehicle int, color [3]float64, custom *gm.CustomStats, body int) (*netSession, error) {
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 3*time.Second)
 	if err != nil {
 		return nil, err
 	}
-	if err := proto.WriteMsg(conn, proto.EncodeHello(token, bbsid, handle, vehicle)); err != nil {
+	if err := proto.WriteMsg(conn, proto.EncodeHello(token, bbsid, handle, vehicle, color, custom, body)); err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -145,6 +147,10 @@ func dialServer(host, port, token, bbsid, handle string, vehicle int) (*netSessi
 	}
 	conn.SetReadDeadline(time.Time{})
 	ns := &netSession{conn: conn, me: me}
+	if custom != nil { // predict our own movement with the custom build's stats
+		v := gm.MakeCustom(vehicle, *custom)
+		ns.predVeh = &v
+	}
 	go ns.readLoop()
 	return ns, nil
 }
@@ -241,7 +247,11 @@ func (s *netSession) step(dt float64, in gm.Input) viewState {
 		s.predPos, s.predHull, s.predTur, s.predPitch, s.predVy = self.Pos, self.HullYaw, self.TurretYaw, self.TurretPitch, 0
 	} else {
 		solids := gm.SolidBoxes(cmap, latestEnts) // block on alive solid entities, matching the server
-		s.predPos, s.predHull, s.predTur, s.predPitch, s.predVy = gm.Predict(s.predPos, s.predHull, s.predTur, s.predPitch, s.predVy, in, dt, gm.Veh(self.Vehicle), cmap, solids)
+		pveh := gm.Veh(self.Vehicle)
+		if s.predVeh != nil { // custom build: predict with our tuned stats, not the chassis
+			pveh = *s.predVeh
+		}
+		s.predPos, s.predHull, s.predTur, s.predPitch, s.predVy = gm.Predict(s.predPos, s.predHull, s.predTur, s.predPitch, s.predVy, in, dt, pveh, cmap, solids)
 		dx, dz := self.Pos.X-s.predPos.X, self.Pos.Z-s.predPos.Z
 		if dx*dx+dz*dz > snapDist*snapDist {
 			s.predPos, s.predHull, s.predTur, s.predPitch, s.predVy = self.Pos, self.HullYaw, self.TurretYaw, self.TurretPitch, 0 // respawn/teleport
@@ -280,7 +290,7 @@ func (s *netSession) close() { s.conn.Close() }
 // interpolate renders remote tanks at (now - interpDelay) by lerping the two
 // snapshots straddling that time. Projectiles use the newest snapshot (their
 // list has no stable identity to interpolate across).
-func interpolate(buf []stamped) ([]gm.TankSnap, []gm.V3) {
+func interpolate(buf []stamped) ([]gm.TankSnap, []gm.ShotSnap) {
 	n := len(buf)
 	if n == 0 {
 		return nil, nil

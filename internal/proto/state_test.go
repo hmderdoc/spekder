@@ -23,9 +23,9 @@ func TestStateRoundTripCTF(t *testing.T) {
 	}
 	tanks := []gm.TankSnap{
 		{ID: 0, Pos: gm.V3{X: 1, Y: 0, Z: -3}, HP: 80, Name: "DERDOK", Team: 0, Carrying: true, Lives: 0, Vehicle: 1, Shield: true, TurretPitch: 0.35, HoldScore: 7},
-		{ID: 1, Pos: gm.V3{X: -2, Y: 0, Z: 4}, HP: 100, Name: "RAZOR", Team: 1, Carrying: false, Bot: true, Vehicle: 2, Cloak: true, Rapid: true},
+		{ID: 1, Pos: gm.V3{X: -2, Y: 0, Z: 4}, HP: 100, Name: "RAZOR", Team: 1, Carrying: false, Bot: true, Vehicle: 2, Body: gm.BodySpider, Cloak: true, Rapid: true},
 	}
-	shots := []gm.V3{{X: 0, Y: gm.EyeHeight, Z: 0}}
+	shots := []gm.ShotSnap{{Pos: gm.V3{X: 0, Y: gm.EyeHeight, Z: 0}, Vis: gm.VisGrenade}}
 	flags := []gm.FlagSnap{
 		{Pos: gm.V3{X: 1, Y: 0, Z: -3}, Home: gm.V3{X: 0, Y: 0, Z: -10}, Team: 1, Carried: true},
 		{Pos: gm.V3{X: 0, Y: 0, Z: 10}, Home: gm.V3{X: 0, Y: 0, Z: 10}, Team: 0, Carried: false},
@@ -34,6 +34,7 @@ func TestStateRoundTripCTF(t *testing.T) {
 	pickups := []gm.PickupSnap{
 		{Pos: gm.V3{X: 3, Y: 0, Z: 3}, Kind: gm.PickShield},
 		{Pos: gm.V3{X: -3, Y: 0, Z: -3}, Kind: gm.PickCloak},
+		{Pos: gm.V3{X: 5, Y: 0, Z: 5}, Kind: gm.PickWeapon, Weapon: 6},
 	}
 	ents := []gm.EntitySnap{
 		{HP: 45, Dead: false, Yaw: 1.25, Pitch: -0.4},
@@ -59,11 +60,17 @@ func TestStateRoundTripCTF(t *testing.T) {
 	if dt[0].Name != "DERDOK" || dt[1].Name != "RAZOR" {
 		t.Fatalf("tank names lost over wire: %q %q", dt[0].Name, dt[1].Name)
 	}
+	if dt[0].Body != gm.BodyTank || dt[1].Body != gm.BodySpider {
+		t.Fatalf("tank body style lost over wire: %d %d", dt[0].Body, dt[1].Body)
+	}
 	if len(dm.Kills) != 2 || dm.Kills[0].Killer != 1 || dm.Kills[0].Victim != 0 || dm.Kills[0].Cause != gm.CauseCannon ||
 		dm.Kills[1].Killer != -1 || dm.Kills[1].Cause != gm.CauseHazard {
 		t.Fatalf("kill feed lost over wire: %+v", dm.Kills)
 	}
-	if len(dp) != 2 || dp[0].Kind != gm.PickShield || dp[1].Kind != gm.PickCloak {
+	if len(dp) != 3 || dp[2].Kind != gm.PickWeapon || dp[2].Weapon != 6 {
+		t.Fatalf("weapon pickup lost over wire: %+v", dp)
+	}
+	if dp[0].Kind != gm.PickShield || dp[1].Kind != gm.PickCloak {
 		t.Fatalf("pickups lost over wire: %+v", dp)
 	}
 	if dp[0].Pos.X != 3 || dp[1].Pos.Z != -3 {
@@ -105,8 +112,8 @@ func TestStateRoundTripCTF(t *testing.T) {
 	if !dt[1].Cloak || !dt[1].Rapid {
 		t.Fatalf("tank1 cloak/rapid bits lost: %+v", dt[1])
 	}
-	if len(ds) != 1 {
-		t.Fatalf("want 1 shot, got %d", len(ds))
+	if len(ds) != 1 || ds[0].Vis != gm.VisGrenade {
+		t.Fatalf("shot lost over wire (incl. vis): %+v", ds)
 	}
 	if len(df) != 2 {
 		t.Fatalf("want 2 flags, got %d", len(df))
@@ -129,7 +136,7 @@ func TestMapRoundTripEntities(t *testing.T) {
 		Entities: []gm.Entity{
 			{
 				Kind: "turret", Pos: gm.V3{X: 0, Y: 1, Z: 0}, Half: gm.V3{X: 0.8, Y: 1, Z: 0.8},
-				Color: [3]float64{0.6, 0.6, 0.65}, Yaw: 0.5, Solid: true,
+				Color: [3]float64{0.6, 0.6, 0.65}, Yaw: 0.5, Solid: true, Weapon: 2,
 				Turret:   &gm.TurretTrait{Range: 24, FireDelay: 1.4, Dmg: 18, TurnRate: 1.6},
 				Destruct: &gm.DestructTrait{MaxHP: 60},
 				Respawn:  &gm.RespawnTrait{Delay: 12},
@@ -179,6 +186,9 @@ func TestMapRoundTripEntities(t *testing.T) {
 	}
 	if e.Turret.Dmg != 18 || e.Destruct.MaxHP != 60 {
 		t.Fatalf("turret/destruct params lost: %+v", e.Turret)
+	}
+	if e.Weapon != 2 {
+		t.Fatalf("turret weapon lost over wire: %d want 2", e.Weapon)
 	}
 	if e.Hazard != nil || e.Teleport != nil {
 		t.Fatalf("absent traits should stay nil: %+v", e)

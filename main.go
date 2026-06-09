@@ -161,6 +161,16 @@ func clampB(f float64) byte {
 	return byte(f)
 }
 
+// clearBlack fills the framebuffer with black (vehicle-preview backdrop).
+func (r *Renderer) clearBlack() {
+	for i := range r.fb {
+		r.fb[i] = 0
+	}
+	for i := range r.zb {
+		r.zb[i] = 0
+	}
+}
+
 func (r *Renderer) clear() {
 	for y := 0; y < r.H; y++ {
 		// vertical sky gradient: dark navy at top easing toward the horizon
@@ -420,6 +430,11 @@ const (
 	mkEnter
 	mkTab
 	mkBack // Backspace: exit a screen back to the previous menu (no program quit)
+	// Cruise-control keys (uppercase W/A/S/D): double-tap to latch auto-movement.
+	mkCruiseF
+	mkCruiseB
+	mkCruiseL
+	mkCruiseR
 )
 
 type input struct {
@@ -472,6 +487,7 @@ const (
 	aTurretL         // aim turret left (relative to hull)
 	aTurretR         // aim turret right
 	aFire            // fire main gun (gated by cooldown)
+	aFire2           // fire secondary weapon (B)
 	aJump            // jump (ENTER)
 	aRecenter        // snap turret to hull-forward + level (C)
 	aAimUp           // elevate the gun (up arrow)
@@ -502,6 +518,7 @@ func (in *input) snapshot() gm.Input {
 		TurretL:  in.held(aTurretL),
 		TurretR:  in.held(aTurretR),
 		Fire:     in.held(aFire),
+		Fire2:    in.held(aFire2),
 		Jump:     in.held(aJump),
 		Recenter: in.held(aRecenter),
 		AimUp:    in.held(aAimUp),
@@ -510,9 +527,46 @@ func (in *input) snapshot() gm.Input {
 	}
 }
 
+// escTimeout: how long to wait for a byte after a lone Esc before deciding it's
+// a quit (rather than the start of an arrow sequence whose bytes were split).
+const escTimeout = 60 * time.Millisecond
+
+// escNext returns the byte following an Esc / CSI intro: the next in-buffer byte
+// if present (advancing i), else a brief timed read so a true lone Esc resolves
+// to quit without waiting for the next keystroke.
+func (in *input) escNext(t Term, buf []byte, n int, i *int) (byte, bool) {
+	if *i+1 < n {
+		*i++
+		return buf[*i], true
+	}
+	var pb [1]byte
+	if m, _ := t.ReadTimeout(pb[:], escTimeout); m > 0 {
+		return pb[0], true
+	}
+	return 0, false
+}
+
+// csiFinal maps an arrow sequence's final byte to its aim action + menu event.
+func (in *input) csiFinal(c byte) {
+	switch c {
+	case 'A': // up arrow -> elevate gun (aim up)
+		in.hit(aAimUp)
+		in.pushKey(mkUp)
+	case 'B': // down arrow -> depress gun (aim down)
+		in.hit(aAimDown)
+		in.pushKey(mkDown)
+	case 'C': // right arrow -> aim turret right
+		in.hit(aTurretR)
+		in.pushKey(mkRight)
+	case 'D': // left arrow -> aim turret left
+		in.hit(aTurretL)
+		in.pushKey(mkLeft)
+	}
+}
+
 func (in *input) reader(t Term) {
 	buf := make([]byte, 16)
-	esc, csi, iac := false, false, 0
+	iac := 0
 	for {
 		n, err := t.Read(buf)
 		if err != nil || n == 0 {
@@ -532,58 +586,51 @@ func (in *input) reader(t Term) {
 				iac = 2
 				continue
 			}
-			if csi {
-				csi = false
-				switch c {
-				case 'A': // up arrow -> elevate gun (aim up)
-					in.hit(aAimUp)
-					in.pushKey(mkUp)
-				case 'B': // down arrow -> depress gun (aim down)
-					in.hit(aAimDown)
-					in.pushKey(mkDown)
-				case 'C': // right arrow -> aim turret right
-					in.hit(aTurretR)
-					in.pushKey(mkRight)
-				case 'D': // left arrow -> aim turret left
-					in.hit(aTurretL)
-					in.pushKey(mkLeft)
-				}
-				continue
-			}
-			if esc {
-				esc = false
-				if c == '[' {
-					csi = true // CSI sequence (arrows); next byte is the final
+			if c == 27 { // Esc: an arrow/SS3 sequence (ESC [ x / ESC O x), or a lone Esc = quit
+				nb, have := in.escNext(t, buf, n, &i)
+				if have && (nb == '[' || nb == 'O') {
+					if fin, ok := in.escNext(t, buf, n, &i); ok {
+						in.csiFinal(fin)
+					}
 					continue
 				}
-				// Lone ESC or an unsupported intro (e.g. SS3 'ESC O'): fall through
-				// and treat c as a normal key so Q / Ctrl-C still register.
-			}
-			if c == 27 {
-				esc = true
-				continue
+				logf("reader exit: Esc")
+				close(in.quitCh)
+				return
 			}
 			// Normal key. Expose printable chars for editor text entry (map naming).
 			if c >= 0x20 && c < 0x7f {
 				in.pushRune(rune(c))
 			}
 			switch {
-			case c == 'q' || c == 'Q' || c == 3:
-				logf("reader exit: quit key %d", c)
+			case c == 3: // Ctrl-C: hard abort (Esc is the normal quit; q is inert now)
+				logf("reader exit: Ctrl-C")
 				close(in.quitCh)
 				return
-			case c == 'w' || c == 'W':
+			case c == 'w':
 				in.hit(aThrottle)
 				in.pushKey(mkUp)
-			case c == 's' || c == 'S':
+			case c == 'W': // uppercase = cruise key (latches auto-movement)
+				in.hit(aThrottle)
+				in.pushKey(mkCruiseF)
+			case c == 's':
 				in.hit(aReverse)
 				in.pushKey(mkDown)
-			case c == 'a' || c == 'A':
+			case c == 'S':
+				in.hit(aReverse)
+				in.pushKey(mkCruiseB)
+			case c == 'a':
 				in.hit(aHullL)
 				in.pushKey(mkLeft)
-			case c == 'd' || c == 'D':
+			case c == 'A':
+				in.hit(aHullL)
+				in.pushKey(mkCruiseL)
+			case c == 'd':
 				in.hit(aHullR)
 				in.pushKey(mkRight)
+			case c == 'D':
+				in.hit(aHullR)
+				in.pushKey(mkCruiseR)
 			case c == 'c' || c == 'C': // recenter turret to hull-forward
 				in.hit(aRecenter)
 			case c == ',' || c == '<': // aim turret left
@@ -592,6 +639,8 @@ func (in *input) reader(t Term) {
 				in.hit(aTurretR)
 			case c == ' ': // fire
 				in.hit(aFire)
+			case c == 'b' || c == 'B': // fire secondary weapon
+				in.hit(aFire2)
 			case c == '\r' || c == '\n': // ENTER: jump / menu confirm
 				in.hit(aJump)
 				in.pushKey(mkEnter)
@@ -647,14 +696,14 @@ func drawLeaderboard(w *bufio.Writer, cols, rows int, v viewState, recentKill ma
 		if name == "" {
 			name = "BOT"
 		}
-		if len(name) > 8 {
-			name = name[:8]
+		if len(name) > 12 {
+			name = name[:12]
 		}
 		plus := "   "
 		if recentKill[t.ID] > 0 { // just scored: a brief light-green +1
 			plus = "\x1b[1;92m+1\x1b[0m "
 		}
-		fmt.Fprintf(w, "\x1b[%d;1H%s\x1b[38;2;%d;%d;%dm\xdb\xdb\x1b[0;37m %2d-%d \x1b[0;36m%-8s\x1b[0m %s",
+		fmt.Fprintf(w, "\x1b[%d;1H%s\x1b[38;2;%d;%d;%dm\xdb\xdb\x1b[0;37m %2d-%d \x1b[0;36m%-12s\x1b[0m %s",
 			3+i, mark,
 			int(clampB(t.Color[0]*255)), int(clampB(t.Color[1]*255)), int(clampB(t.Color[2]*255)),
 			t.Kills, t.Deaths, name, plus)
@@ -706,6 +755,21 @@ func drawHPBar(w *bufio.Writer, p *gm.TankSnap) {
 	}
 	if p.Rapid {
 		b.WriteString("\x1b[38;2;230;170;40m RAPID")
+	}
+	// Ammo gauge on the same row, after the HP bar: drains as you fire, refills via
+	// the vehicle's recharge.
+	const ammoLen = 8
+	af := int(p.Ammo*ammoLen + 0.5)
+	if af > ammoLen {
+		af = ammoLen
+	}
+	b.WriteString("\x1b[38;2;220;180;60m \xb3") // separator
+	for i := 0; i < af; i++ {
+		b.WriteByte(0xDB)
+	}
+	b.WriteString("\x1b[38;2;70;70;70m")
+	for i := af; i < ammoLen; i++ {
+		b.WriteByte(0xB1)
 	}
 	b.WriteString("\x1b[0m")
 	w.WriteString(b.String())
@@ -897,7 +961,7 @@ func runMenu(w *bufio.Writer, cols, rows int, ip *input, note string) menuChoice
 		if note != "" {
 			fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;1;31m%s\x1b[0m", listTop+len(items)+3, (cols-len(note))/2+1, note)
 		}
-		foot := "up/down  select       ENTER  start       Q  quit"
+		foot := "up/down  select       ENTER  start       ESC  quit"
 		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;90m%s\x1b[0m", rows-1, (cols-len(foot))/2+1, foot)
 		w.Flush()
 	}
@@ -1071,27 +1135,349 @@ func runDifficulty(w *bufio.Writer, cols, rows int, ip *input, cur gm.Difficulty
 
 // runVehicleMenu lets the player pick a vehicle class (with stats), returning
 // the index, or quit=true if they bailed.
-func runVehicleMenu(w *bufio.Writer, cols, rows int, ip *input) (int, bool) {
+// vehEntry is one selectable row: a builtin chassis, a creature (a body style on a
+// thematic chassis for stats/scale), or the CUSTOM point-buy editor.
+type vehEntry struct {
+	name    string
+	vehicle int    // chassis index (stats + preview scale)
+	body    int    // gm.BodyTank for builtins; a creature body otherwise
+	desc    string // blurb (creatures); builtins use the vehicle's own Desc
+	custom  bool   // the CUSTOM editor entry
+}
+
+// playerBodies are the creatures a player can pilot, each on a fitting chassis.
+var playerBodies = []vehEntry{
+	{name: "HUMANOID", body: gm.BodyHumanoid, vehicle: 1, desc: "Upright fighter on a balanced frame. Walks tall."},
+	{name: "SPIDER", body: gm.BodySpider, vehicle: 0, desc: "Fast, low, eight-legged skitterer on a light frame."},
+	{name: "QUADRUPED", body: gm.BodyQuad, vehicle: 3, desc: "Four-legged runner: quick, sure-footed, steady gun."},
+	{name: "INSECT", body: gm.BodyInsect, vehicle: 4, desc: "Six-legged, segmented; a deep magazine on the move."},
+	{name: "SCORPION", body: gm.BodyScorpion, vehicle: 1, desc: "Armored arachnid: claws up front, stinger arched overhead."},
+	{name: "SERPENT", body: gm.BodySerpent, vehicle: 0, desc: "Slithering segmented body; fast and low to the ground."},
+	{name: "TRIPOD", body: gm.BodyTripod, vehicle: 2, desc: "Towering three-legged walker. Slow but commanding."},
+	{name: "DRONE", body: gm.BodyDrone, vehicle: 3, desc: "Hovering orb sentry; quick, evasive, all-seeing eye."},
+	{name: "CRAB", body: gm.BodyCrab, vehicle: 2, desc: "Wide armored shell, big pincers, scuttles sideways."},
+	{name: "OCTOPOD", body: gm.BodyOctopod, vehicle: 4, desc: "Bulbous body, eight writhing tentacles. Unsettling."},
+}
+
+// vehicleEntries is the full selector list: builtins, then creatures, then CUSTOM.
+func vehicleEntries() []vehEntry {
+	e := make([]vehEntry, 0, len(gm.Vehicles)+len(playerBodies)+1)
+	for i := range gm.Vehicles {
+		e = append(e, vehEntry{name: gm.Vehicles[i].Name, vehicle: i, body: gm.BodyTank, desc: gm.Vehicles[i].Desc})
+	}
+	e = append(e, playerBodies...)
+	e = append(e, vehEntry{name: "CUSTOM", custom: true})
+	return e
+}
+
+// runVehicleMenu: pick a vehicle. Wide terminals get a two-pane screen (lightbar
+// list on the left, a rotating 3D preview on the right); narrow ones fall back to
+// a simple centered list. Returns the chosen (chassis, body, color, custom).
+func runVehicleMenu(w *bufio.Writer, cols, rows int, ip *input, s *userSettings, dropfile string) (int, int, [3]float64, *gm.CustomStats, bool) {
+	entries := vehicleEntries()
+	N := len(entries)
 	sel := 1 // HUNTER default
+	colorIdx := 0
+	// Sidebar is sized to the list/blurb, not the color strip (which lives at the
+	// bottom-left in its own row band); keep it tight so the preview gets the width.
+	leftW := cols / 4
+	if leftW < 22 {
+		leftW = 22
+	} else if leftW > 28 {
+		leftW = 28
+	}
+	panelCol0 := leftW + 2
+	panelW := cols - panelCol0
+	if cols < 70 || rows < 16 || panelW < 10 {
+		return runVehicleMenuSimple(w, cols, rows, ip, s, dropfile)
+	}
+	// Preview claims the whole right column from near the top down to the 2-line
+	// stat block; the footer (rows-1) and color strip (rows-4..) sit on the left.
+	panelRow0 := 2
+	statRows := 2
+	previewRows := rows - panelRow0 - statRows - 2
+	pr := newRenderer(panelW, 2*previewRows)
+	pr.fogCol = [3]float64{0, 0, 0} // distance fades to black, not navy
+
+	header := func() {
+		w.WriteString("\x1b[2J\x1b[H")
+		fmt.Fprintf(w, "\x1b[2;2H\x1b[1;96mSELECT  VEHICLE\x1b[0m")
+		fmt.Fprintf(w, "\x1b[%d;2H\x1b[0;90mup/dn vehicle  </> color  ENTER go  ESC quit\x1b[0m", rows-1)
+	}
+	header()
+	colorStripRow := 3 // color strip above the list (label/swatches/caret = 3 rows)
+	listRow := 7       // list starts below the color strip
+	descW := 28        // narrow top-right description column
+	if descW > panelW-2 {
+		descW = panelW - 2
+	}
+	listDirty := true
+	var panelPrev []byte
+	descLines := wrapText(entryBlurb(entries[sel], s), descW)
+	angle := 0.0
+	start := time.Now()
+	last := start
+	budget := time.Second / 12
+	for {
+		select {
+		case <-ip.quitCh:
+			return 0, 0, [3]float64{}, nil, true
+		default:
+		}
+		nc := len(gm.SelectColors)
+	drain:
+		for {
+			select {
+			case k := <-ip.events:
+				switch k {
+				case mkUp:
+					sel, listDirty = (sel-1+N)%N, true
+				case mkDown:
+					sel, listDirty = (sel+1)%N, true
+				case mkLeft:
+					colorIdx, listDirty = (colorIdx-1+nc)%nc, true
+				case mkRight:
+					colorIdx, listDirty = (colorIdx+1)%nc, true
+				case mkEnter:
+					e := entries[sel]
+					if !e.custom {
+						return e.vehicle, e.body, gm.SelectColors[colorIdx], nil, false
+					}
+					// CUSTOM: route through the point-buy editor (pre-filled).
+					cs, chassis, cbody, saved := runCustomEditor(w, cols, rows, ip, s, dropfile, gm.SelectColors[colorIdx])
+					if saved {
+						return chassis, cbody, gm.SelectColors[colorIdx], &cs, false
+					}
+					header() // editor cleared the screen
+					panelPrev, listDirty = nil, true
+				}
+			default:
+				break drain
+			}
+		}
+		now := time.Now()
+		dt := now.Sub(last).Seconds()
+		last = now
+		angle += 0.7 * dt
+		e := entries[sel]
+		chassis, body := e.vehicle, e.body
+		if e.custom {
+			chassis, body = s.customChassis, gm.BodyTank
+		}
+		tank := gm.TankSnap{Vehicle: chassis, Body: body, Color: gm.SelectColors[colorIdx]}
+		tris := appendTank(nil, &tank, now.Sub(start).Seconds())
+		pr.renderModel(fitCam(tris, pr.W, pr.H, angle), tris)
+		panelPrev = blitPanel(w, pr, panelPrev, panelCol0, panelRow0)
+		drawPreviewDesc(w, cols, panelRow0, descLines) // yellow overlay, model behind it
+		if listDirty {
+			drawColorStrip(w, 2, colorStripRow, colorIdx)
+			drawVehicleList(w, leftW, listRow, entries, sel)
+			drawPreviewStats(w, panelCol0, panelRow0+previewRows, entries, sel, s)
+			descLines = wrapText(entryBlurb(entries[sel], s), descW)
+			panelPrev = nil // force a full preview repaint so a stale overlay is cleared
+			listDirty = false
+		}
+		w.Flush()
+		if d := budget - time.Since(now); d > 0 {
+			time.Sleep(d)
+		}
+	}
+}
+
+// drawVehicleList renders the left-pane lightbar (all entries) from startRow down.
+func drawVehicleList(w *bufio.Writer, leftW, startRow int, entries []vehEntry, sel int) {
+	pad := func(str string) string {
+		if len(str) < leftW {
+			return str + strings.Repeat(" ", leftW-len(str))
+		}
+		return str[:leftW]
+	}
+	row := startRow
+	for i, e := range entries {
+		style, mark := "\x1b[0;36m", "  "
+		if e.body != gm.BodyTank {
+			style = "\x1b[0;35m" // creatures in magenta so they read apart from chassis
+		}
+		if i == sel {
+			style, mark = "\x1b[1;30;46m", "> "
+		}
+		fmt.Fprintf(w, "\x1b[%d;2H%s%s\x1b[0m", row, style, pad(mark+e.name))
+		row++
+	}
+}
+
+// entryBlurb is the selected entry's one-line summary.
+func entryBlurb(e vehEntry, s *userSettings) string {
+	if e.custom {
+		if s.hasCustom {
+			return "Your saved build on a " + gm.Veh(s.customChassis).Name + " chassis. ENTER to tune."
+		}
+		return "Your point-buy build. ENTER to configure stats and chassis."
+	}
+	if e.body != gm.BodyTank {
+		return e.desc + " (" + gm.Veh(e.vehicle).Name + " frame)"
+	}
+	return e.desc
+}
+
+// drawPreviewDesc overlays the selected entry's blurb at the top-right of the
+// preview in CGA yellow (drawn after the model each frame, so the animation runs
+// behind it). Lines are right-aligned to the screen edge.
+func drawPreviewDesc(w *bufio.Writer, cols, row0 int, lines []string) {
+	for i, l := range lines {
+		col := cols - len(l)
+		if col < 1 {
+			col = 1
+		}
+		// 1;33;40 = bold yellow on black: pin the background so a stale bg left by the
+		// preview blit (e.g. a teal cell) can't bleed in as a cyan flash.
+		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;33;40m%s\x1b[0m", row0+i, col, l)
+	}
+}
+
+// drawColorStrip renders the pickable color swatches with a caret under the pick.
+func drawColorStrip(w *bufio.Writer, col, row, sel int) {
+	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;90mCOLOR </>\x1b[0m", row, col)
+	x := col
+	for _, c := range gm.SelectColors {
+		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[38;2;%d;%d;%dm\xdb\xdb\x1b[0m", row+1, x, clampB(c[0]*255), clampB(c[1]*255), clampB(c[2]*255))
+		x += 2
+	}
+	fmt.Fprintf(w, "\x1b[%d;%dH%s", row+2, col, strings.Repeat(" ", len(gm.SelectColors)*2)) // clear stale caret
+	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;37m^^\x1b[0m", row+2, col+sel*2)
+}
+
+// drawPreviewStats writes the selected entry's stat block in the preview pane's
+// black space, under the rotating model.
+func drawPreviewStats(w *bufio.Writer, col0, row0 int, entries []vehEntry, sel int, s *userSettings) {
+	e := entries[sel]
+	name := e.name
+	var v gm.Vehicle
+	if e.custom {
+		lv := s.customLevels
+		if !s.hasCustom {
+			lv = defaultCustomLevels()
+		}
+		v = gm.MakeCustom(s.customChassis, customFromLevels(lv))
+	} else {
+		v = gm.Veh(e.vehicle)
+	}
+	// Two inline lines of color-coded bars (at-a-glance), three stats each. The
+	// fractions reuse the point-buy stat ranges, so they read consistently.
+	vals := []float64{float64(v.MaxHP), v.Speed, v.HullTurn, v.FireDelay, v.AmmoMax, v.AmmoRegen}
+	lbl := []string{"HP", "SPD", "TRN", "FIR", "AMO", "REG"}
+	bar := func(i int) string { return statBar(lbl[i], statFrac(i, vals[i])) }
+	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;37m%-9s\x1b[0m %s  %s", row0, col0, name, bar(0), bar(1))
+	fmt.Fprintf(w, "\x1b[%d;%dH%s  %s  %s  %s", row0+1, col0, bar(2), bar(3), bar(4), bar(5))
+}
+
+// statFrac normalizes a stat value to 0..1 over its point-buy range (FireDelay's
+// range is inverted, so a lower delay reads as a fuller bar).
+func statFrac(i int, val float64) float64 {
+	f := (val - pbStats[i].base) / (pbStats[i].step * pbMaxLevel)
+	if f < 0 {
+		f = 0
+	} else if f > 1 {
+		f = 1
+	}
+	return f
+}
+
+// statBar renders a short labeled bar, colored by fill (red/yellow/green).
+func statBar(label string, frac float64) string {
+	const n = 5
+	fill := int(frac*n + 0.5)
+	col := "\x1b[38;2;90;200;90m" // green (high)
+	if frac < 0.34 {
+		col = "\x1b[38;2;210;80;80m" // red (low)
+	} else if frac < 0.67 {
+		col = "\x1b[38;2;220;200;70m" // yellow (mid)
+	}
+	return fmt.Sprintf("\x1b[0;37m%-3s%s%s\x1b[38;2;70;70;70m%s\x1b[0m",
+		label, col, strings.Repeat("\xdb", fill), strings.Repeat("\xb0", n-fill))
+}
+
+// wrapText word-wraps s to width w.
+func wrapText(s string, w int) []string {
+	var out []string
+	line := ""
+	for _, word := range strings.Fields(s) {
+		if line == "" {
+			line = word
+		} else if len(line)+1+len(word) <= w {
+			line += " " + word
+		} else {
+			out = append(out, line)
+			line = word
+		}
+	}
+	if line != "" {
+		out = append(out, line)
+	}
+	return out
+}
+
+// blitPanel paints a renderer's half-block frame at a screen offset, diffing
+// against prev so only changed cells emit (keeps the rotating preview cheap).
+func blitPanel(w *bufio.Writer, r *Renderer, prev []byte, col0, row0 int) []byte {
+	prows := r.H / 2
+	cur := make([]byte, prows*r.W*6)
+	var b strings.Builder
+	lastSGR := ""
+	curX, curY := -1, -1
+	for y := 0; y < prows; y++ {
+		for x := 0; x < r.W; x++ {
+			tp := ((2*y)*r.W + x) * 3
+			bp := ((2*y+1)*r.W + x) * 3
+			ci := (y*r.W + x) * 6
+			copy(cur[ci:ci+3], r.fb[tp:tp+3])
+			copy(cur[ci+3:ci+6], r.fb[bp:bp+3])
+			if prev != nil && string(prev[ci:ci+6]) == string(cur[ci:ci+6]) {
+				continue
+			}
+			ry, rx := row0+y, col0+x
+			if curY != ry || curX != rx {
+				fmt.Fprintf(&b, "\x1b[%d;%dH", ry, rx)
+			}
+			sgr := fmt.Sprintf("38;2;%d;%d;%d;48;2;%d;%d;%d", cur[ci], cur[ci+1], cur[ci+2], cur[ci+3], cur[ci+4], cur[ci+5])
+			if sgr != lastSGR {
+				b.WriteString("\x1b[")
+				b.WriteString(sgr)
+				b.WriteByte('m')
+				lastSGR = sgr
+			}
+			b.WriteByte(0xDF)
+			curY, curX = ry, rx+1
+		}
+	}
+	w.WriteString(b.String())
+	return cur
+}
+
+// runVehicleMenuSimple is the static centered list for narrow terminals (builtins,
+// creatures, and a CUSTOM entry that opens the point-buy editor).
+func runVehicleMenuSimple(w *bufio.Writer, cols, rows int, ip *input, s *userSettings, dropfile string) (int, int, [3]float64, *gm.CustomStats, bool) {
+	entries := vehicleEntries()
+	N := len(entries)
+	sel, colorIdx := 1, 0
+	nc := len(gm.SelectColors)
 	draw := func() {
 		w.WriteString("\x1b[2J\x1b[H")
 		hdr := "SELECT  VEHICLE"
 		fmt.Fprintf(w, "\x1b[2;%dH\x1b[1;96m%s\x1b[0m", (cols-len(hdr))/2+1, hdr)
-		listTop := 5
-		for i, v := range gm.Vehicles {
-			row := listTop + i*3
-			style := "\x1b[0;36m"
-			mark := "  "
-			if i == sel {
-				style = "\x1b[1;30;46m"
-				mark = "> "
+		for i, e := range entries {
+			row := 5 + i
+			style, mark := "\x1b[0;36m", "  "
+			if e.body != gm.BodyTank {
+				style = "\x1b[0;35m"
 			}
-			name := fmt.Sprintf("%s%-7s", mark, v.Name)
-			fmt.Fprintf(w, "\x1b[%d;%dH%s %s \x1b[0m", row, (cols-12)/2+1, style, name)
-			stat := fmt.Sprintf("HP %3d   SPEED %.1f   TURN %.1f   FIRE %.2fs", v.MaxHP, v.Speed, v.HullTurn, v.FireDelay)
-			fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;37m%s\x1b[0m", row+1, (cols-len(stat))/2+1, stat)
+			if i == sel {
+				style, mark = "\x1b[1;30;46m", "> "
+			}
+			fmt.Fprintf(w, "\x1b[%d;%dH%s %s%-9s \x1b[0m", row, (cols-12)/2+1, style, mark, e.name)
 		}
-		foot := "up/down  select       ENTER  go       Q  quit"
+		drawColorStrip(w, (cols-nc*2)/2+1, rows-4, colorIdx)
+		foot := "up/dn vehicle  </> color  ENTER go  ESC quit"
 		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;90m%s\x1b[0m", rows-1, (cols-len(foot))/2+1, foot)
 		w.Flush()
 	}
@@ -1099,17 +1485,31 @@ func runVehicleMenu(w *bufio.Writer, cols, rows int, ip *input) (int, bool) {
 	for {
 		select {
 		case <-ip.quitCh:
-			return 0, true
+			return 0, 0, [3]float64{}, nil, true
 		case k := <-ip.events:
 			switch k {
 			case mkUp:
-				sel = (sel - 1 + len(gm.Vehicles)) % len(gm.Vehicles)
+				sel = (sel - 1 + N) % N
 				draw()
 			case mkDown:
-				sel = (sel + 1) % len(gm.Vehicles)
+				sel = (sel + 1) % N
+				draw()
+			case mkLeft:
+				colorIdx = (colorIdx - 1 + nc) % nc
+				draw()
+			case mkRight:
+				colorIdx = (colorIdx + 1) % nc
 				draw()
 			case mkEnter:
-				return sel, false
+				e := entries[sel]
+				if !e.custom {
+					return e.vehicle, e.body, gm.SelectColors[colorIdx], nil, false
+				}
+				cs, chassis, cbody, saved := runCustomEditor(w, cols, rows, ip, s, dropfile, gm.SelectColors[colorIdx])
+				if saved {
+					return chassis, cbody, gm.SelectColors[colorIdx], &cs, false
+				}
+				draw()
 			}
 		}
 	}
@@ -1384,9 +1784,9 @@ func splash(w *bufio.Writer, cols, rows int, ip *input) {
 	}
 	sub := "T A N K   A R E N A"
 	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;1;36m%s\x1b[0m", bannerRows+1, (cols-len(sub))/2+1, sub)
-	ctl := "W/S drive  A/D turn  ,/. aim  up/down elevate  C recenter  SPACE fire  ENTER jump  TAB map  Q quit"
+	ctl := "W/S drive  A/D turn  ,/. aim  up/down elevate  C recenter  SPACE fire  B 2nd  ENTER jump  TAB map  ESC quit"
 	if len(ctl) > cols {
-		ctl = "WASD move  arrows aim/elevate  C recenter  SPACE fire  Q quit"
+		ctl = "WASD move  arrows aim/elevate  C recenter  SPACE fire  B 2nd  ESC quit"
 	}
 	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;90m%s\x1b[0m", bannerRows+3, (cols-len(ctl))/2+1, ctl)
 	hint := "press any key"
@@ -1521,14 +1921,14 @@ func main() {
 			note = ""
 			continue
 		}
-		vehicle, vquit := runVehicleMenu(w, cols, rows, ip)
+		vehicle, vbody, vcolor, vcustom, vquit := runVehicleMenu(w, cols, rows, ip, &settings, dropfile)
 		if vquit {
 			cleanup()
 			return
 		}
 		var sess session
 		if choice.online {
-			ns, err := connectArena(vehicle)
+			ns, err := connectArena(vehicle, vbody, vcolor, vcustom)
 			if err != nil {
 				note = "Could not reach the arena: " + err.Error()
 				continue
@@ -1549,9 +1949,9 @@ func main() {
 				if r := gm.Maps[mapIdx].Rules; r != nil && r.Mode >= 0 {
 					mode = gm.Mode(r.Mode)
 				}
-				sess = newOfflineOnMap(mapIdx, offlineBots, mode, vehicle, settings.difficulty, settings.aimAssist, playerName)
+				sess = newOfflineOnMap(mapIdx, offlineBots, mode, vehicle, settings.difficulty, settings.aimAssist, playerName, vcolor, vcustom, vbody)
 			} else {
-				sess = newOfflineSession(offlineBots, choice.mode, vehicle, settings.difficulty, settings.aimAssist, playerName)
+				sess = newOfflineSession(offlineBots, choice.mode, vehicle, settings.difficulty, settings.aimAssist, playerName, vcolor, vcustom, vbody)
 			}
 		}
 		note = ""
@@ -1587,6 +1987,7 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 	killBannerT := 0.0
 	deathBy := ""                   // "X killed you with Y" (shown on the death banner)
 	recentKill := map[int]float64{} // tank id -> seconds left to show a leaderboard +1
+	cruiseDir := 0                  // latched auto-move: 0 none, 1 fwd, 2 back, 3 left, 4 right
 	curMapSig := "?"                // signature of the currently-built map; rebuild on change
 	topdown := false
 	lastPhase := gm.PhaseActive
@@ -1623,6 +2024,14 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 					voteMode = cycleVote(voteMode, -1, lobbyN)
 				case lastPhase == gm.PhaseLobby && k == mkRight:
 					voteMode = cycleVote(voteMode, +1, lobbyN)
+				case k == mkCruiseF: // Shift+W/A/S/D latches auto-movement in that direction
+					cruiseDir = 1
+				case k == mkCruiseB:
+					cruiseDir = 2
+				case k == mkCruiseL:
+					cruiseDir = 3
+				case k == mkCruiseR:
+					cruiseDir = 4
 				}
 			default:
 				break drainEvents
@@ -1630,6 +2039,35 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 		}
 		gin := ip.snapshot()
 		gin.Vote = voteMode
+
+		// Cruise control: disengage on an opposing-axis manual press, else latch the
+		// movement so you can aim/fire while driving. Same-axis steering is allowed.
+		switch cruiseDir {
+		case 1:
+			if gin.Reverse {
+				cruiseDir = 0
+			} else {
+				gin.Throttle = true
+			}
+		case 2:
+			if gin.Throttle {
+				cruiseDir = 0
+			} else {
+				gin.Reverse = true
+			}
+		case 3:
+			if gin.HullR {
+				cruiseDir = 0
+			} else {
+				gin.HullL = true
+			}
+		case 4:
+			if gin.HullL {
+				cruiseDir = 0
+			} else {
+				gin.HullR = true
+			}
+		}
 
 		v := sess.step(dt, gin)
 		lastPhase = v.phase
@@ -1669,6 +2107,8 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 		}
 		if !p.Dead {
 			deathBy = ""
+		} else {
+			cruiseDir = 0 // don't auto-drive out of a respawn
 		}
 
 		// Rebuild the static geometry when the active map changes (and full repaint).
@@ -1757,6 +2197,10 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 				drawHPBar(w, &p)
 				if killBannerT > 0 {
 					drawKillBanner(w, cols, killBanner)
+				}
+				if cruiseDir != 0 {
+					tag := "CRUISE " + string("^v<>"[cruiseDir-1])
+					fmt.Fprintf(w, "\x1b[4;%dH\x1b[1;96m%s\x1b[0m", cols-len(tag), tag)
 				}
 			}
 		}
