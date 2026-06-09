@@ -17,6 +17,7 @@ package main
 
 import (
 	"bufio"
+	_ "embed"
 	"fmt"
 	"log"
 	"math"
@@ -906,6 +907,51 @@ type menuChoice struct {
 // runMenu shows the TDF-titled menu: single-player modes plus ONLINE ARENA
 // (enabled only when the sysop configured a server). note (if any) is shown,
 // e.g. a failed-connect message from a previous attempt.
+// splashBin is the 80x25 CP437 title screen (Synchronet .bin: char/attr pairs,
+// trailed by a SAUCE record we ignore) used as the main-menu backdrop.
+//
+//go:embed spekder.bin
+var splashBin []byte
+
+// cgaRGB is the 16-color CGA/EGA palette the .bin's attribute bytes index into.
+var cgaRGB = [16][3]byte{
+	{0, 0, 0}, {0, 0, 170}, {0, 170, 0}, {0, 170, 170},
+	{170, 0, 0}, {170, 0, 170}, {170, 85, 0}, {170, 170, 170},
+	{85, 85, 85}, {85, 85, 255}, {85, 255, 85}, {85, 255, 255},
+	{255, 85, 85}, {255, 85, 255}, {255, 255, 85}, {255, 255, 255},
+}
+
+// drawBin paints an 80x25 CP437 screen (char/attr pairs) at (col0,row0), 1-based.
+// Auto-wrap is disabled around it so writing the last column can't scroll.
+func drawBin(w *bufio.Writer, data []byte, col0, row0 int) {
+	const cw, chh = 80, 25
+	w.WriteString("\x1b[?7l") // autowrap off
+	lastSGR := ""
+	for r := 0; r < chh; r++ {
+		fmt.Fprintf(w, "\x1b[%d;%dH", row0+r+1, col0+1)
+		for c := 0; c < cw; c++ {
+			o := (r*cw + c) * 2
+			if o+1 >= len(data) {
+				break
+			}
+			glyph, attr := data[o], data[o+1]
+			fg, bg := cgaRGB[attr&0x0F], cgaRGB[(attr>>4)&0x07]
+			sgr := fmt.Sprintf("38;2;%d;%d;%d;48;2;%d;%d;%d", fg[0], fg[1], fg[2], bg[0], bg[1], bg[2])
+			if sgr != lastSGR {
+				w.WriteString("\x1b[")
+				w.WriteString(sgr)
+				w.WriteByte('m')
+				lastSGR = sgr
+			}
+			if glyph == 0 {
+				glyph = 0x20 // NUL renders as a space
+			}
+			w.WriteByte(glyph)
+		}
+	}
+	w.WriteString("\x1b[0m\x1b[?7h") // reset + autowrap on
+}
+
 func runMenu(w *bufio.Writer, cols, rows int, ip *input, note string) menuChoice {
 	type entry struct {
 		name, blurb string
@@ -929,41 +975,63 @@ func runMenu(w *bufio.Writer, cols, rows int, ip *input, note string) menuChoice
 	items = append(items, entry{name: "ONLINE ARENA", blurb: onlineBlurb, online: true, ready: haveArena})
 	items = append(items, entry{name: "OPTIONS", blurb: "Difficulty, map editor, and controls.", options: true, ready: true})
 	sel := 0
-	titleF, _ := tdf.Fit("SPEKDER", cols-2, "block", "union", "untx")
-	draw := func() {
-		w.WriteString("\x1b[2J\x1b[H")
-		top := 1
-		if titleF != nil {
-			w.WriteString(titleF.RenderCentered("SPEKDER", cols, top, tdf.RenderOpts{Recolor: true, FG: 11}))
-			top += titleF.Height + 1
-		}
-		listTop := top + 1
+	// The 80x25 .bin art is the backdrop; the menu rides on the right over it. If
+	// the terminal is wider, center the art (top-aligned); taller, push the blurb
+	// and footer into the space below the art.
+	artCol0 := 0
+	if cols > 80 {
+		artCol0 = (cols - 80) / 2
+	}
+	const menuW, descW = 16, 34
+	menuCol := artCol0 + 80 - menuW - 1 // right edge of the art, slim margin
+	menuTop := 5
+	descCol := artCol0 + 80 - descW
+	blurbRow := menuTop + len(items) + 1
+	footRow := rows
+	if rows > 26 {
+		footRow = rows - 1
+	}
+	drawOptions := func() {
 		for i, it := range items {
 			label := it.name
 			if !it.ready {
-				label += "  (soon)"
+				label += " *"
 			}
 			var style string
 			switch {
 			case i == sel:
 				style = "\x1b[1;30;46m" // selected: black on cyan
 			case !it.ready:
-				style = "\x1b[0;90m" // unavailable: dim
+				style = "\x1b[0;90;40m" // unavailable: dim on black
 			case it.online:
-				style = "\x1b[0;32m" // online available: green
+				style = "\x1b[1;32;40m" // online available: green on black
 			default:
-				style = "\x1b[0;36m" // single-player: cyan
+				style = "\x1b[0;37;40m" // single-player: white on black
 			}
-			fmt.Fprintf(w, "\x1b[%d;%dH%s  %s  \x1b[0m", listTop+i, (cols-len(label)-4)/2+1, style, label)
+			fmt.Fprintf(w, "\x1b[%d;%dH%s %-*s\x1b[0m", menuTop+i, menuCol, style, menuW-1, label)
 		}
-		blurb := items[sel].blurb
-		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;37m%s\x1b[0m", listTop+len(items)+1, (cols-len(blurb))/2+1, blurb)
+		// Blurb (2 lines) + note, right-aligned on a black strip so they read over art.
+		bl := wrapText(items[sel].blurb, descW)
+		for j := 0; j < 2; j++ {
+			line := ""
+			if j < len(bl) {
+				line = bl[j]
+			}
+			fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;37;40m%-*s\x1b[0m", blurbRow+j, descCol, descW, line)
+		}
+		noteTxt := ""
 		if note != "" {
-			fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;1;31m%s\x1b[0m", listTop+len(items)+3, (cols-len(note))/2+1, note)
+			noteTxt = note
 		}
-		foot := "up/down  select       ENTER  start       ESC  quit"
-		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;90m%s\x1b[0m", rows-1, (cols-len(foot))/2+1, foot)
+		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;31;40m%-*s\x1b[0m", blurbRow+3, descCol, descW, noteTxt)
+		foot := "up/dn select   ENTER start   ESC quit"
+		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;90;40m %s \x1b[0m", footRow, (cols-len(foot)-2)/2+1, foot)
 		w.Flush()
+	}
+	draw := func() { // full repaint: backdrop + menu (used on entry / after submenus)
+		w.WriteString("\x1b[2J\x1b[H")
+		drawBin(w, splashBin, artCol0, 0)
+		drawOptions()
 	}
 	draw()
 	for {
@@ -975,11 +1043,11 @@ func runMenu(w *bufio.Writer, cols, rows int, ip *input, note string) menuChoice
 			case mkUp:
 				sel = (sel - 1 + len(items)) % len(items)
 				note = ""
-				draw()
+				drawOptions() // overlay only; backdrop stays
 			case mkDown:
 				sel = (sel + 1) % len(items)
 				note = ""
-				draw()
+				drawOptions()
 			case mkEnter:
 				it := items[sel]
 				if !it.ready {
@@ -988,7 +1056,7 @@ func runMenu(w *bufio.Writer, cols, rows int, ip *input, note string) menuChoice
 					} else {
 						note = it.name + " is coming soon."
 					}
-					draw()
+					drawOptions()
 					continue
 				}
 				return menuChoice{online: it.online, options: it.options, mode: it.mode}
@@ -1763,50 +1831,6 @@ func drawRadarCorners(w *bufio.Writer, cols int) {
 	w.WriteString("\x1b[0m")
 }
 
-// splash shows the TheDraw title banner until ~1.6s pass or any key is pressed.
-// The font is auto-selected to fit the caller's screen width (the library has
-// fonts of every size; we embed a few spanning 47..114 cols and pick the
-// largest that fits), falling back to plain text on a very narrow terminal.
-func splash(w *bufio.Writer, cols, rows int, ip *input) {
-	w.WriteString("\x1b[2J\x1b[H")
-	bannerRows := 1
-	if f, ok := tdf.Fit("SPEKDER", cols-2, "block", "union", "untx"); ok {
-		top := rows/2 - f.Height/2 - 1
-		if top < 1 {
-			top = 1
-		}
-		w.WriteString(f.RenderCentered("SPEKDER", cols, top, tdf.RenderOpts{Recolor: true, FG: 11})) // bright cyan
-		bannerRows = top + f.Height
-	} else { // too narrow for any big font: plain bold title
-		title := "S P E C T R E"
-		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;96m%s\x1b[0m", rows/2-1, (cols-len(title))/2+1, title)
-		bannerRows = rows/2 - 1
-	}
-	sub := "T A N K   A R E N A"
-	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;1;36m%s\x1b[0m", bannerRows+1, (cols-len(sub))/2+1, sub)
-	ctl := "W/S drive  A/D turn  ,/. aim  up/down elevate  C recenter  SPACE fire  B 2nd  ENTER jump  TAB map  ESC quit"
-	if len(ctl) > cols {
-		ctl = "WASD move  arrows aim/elevate  C recenter  SPACE fire  B 2nd  ESC quit"
-	}
-	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;90m%s\x1b[0m", bannerRows+3, (cols-len(ctl))/2+1, ctl)
-	hint := "press any key"
-	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;37m%s\x1b[0m", bannerRows+5, (cols-len(hint))/2+1, hint)
-	w.Flush()
-
-	start := time.Now()
-	for time.Since(start) < 1600*time.Millisecond {
-		select {
-		case <-ip.quitCh:
-			return
-		default:
-		}
-		if ip.anySince(start) {
-			break
-		}
-		time.Sleep(30 * time.Millisecond)
-	}
-}
-
 func main() {
 	if exe, err := os.Executable(); err == nil {
 		if lf, e := os.OpenFile(filepath.Join(filepath.Dir(exe), "spekder.log"),
@@ -1897,7 +1921,6 @@ func main() {
 	signal.Notify(sigCh, shutdownSignals...)
 
 	w := bufio.NewWriterSize(term, 1<<16)
-	splash(w, cols, rows, ip)
 
 	// Load author maps (editor output) so they're playable/pinnable offline. The
 	// arena server loads its own set; this is the offline/door pool.

@@ -9,7 +9,6 @@
 # Legacy binary names (kept on disk for an in-place install, never committed).
 /door
 /server
-/spekder.bin
 
 # Runtime / per-install (spekder.ini.example is committed; the live config is not)
 /spekder.log
