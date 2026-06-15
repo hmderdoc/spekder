@@ -27,7 +27,8 @@ func enableKeepAlive(fd int) {
 		return
 	}
 	// Probe after 60s of silence, again every 15s, drop after 4 misses (~2 min).
-	unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_KEEPIDLE, 60)
+	// (tcpKeepIdleOpt is TCP_KEEPIDLE on Linux/BSD, TCP_KEEPALIVE on macOS.)
+	unix.SetsockoptInt(fd, unix.IPPROTO_TCP, tcpKeepIdleOpt, 60)
 	unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_KEEPINTVL, 15)
 	unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_KEEPCNT, 4)
 	logf("keepalive enabled on door socket fd=%d (idle 60s, intvl 15s, cnt 4)", fd)
