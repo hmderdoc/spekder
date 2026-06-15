@@ -77,6 +77,16 @@ var catItems = []catItem{
 		m.Entities = append(m.Entities, gm.Entity{Kind: "zone", Pos: gm.V3{X: p.X, Y: p.Y, Z: p.Z}, Half: gm.V3{X: 4, Y: 1, Z: 4},
 			Color: colZone, Zone: &gm.ZoneTrait{Capture: 4}})
 	}},
+	{name: "TRIGGER", kind: "trigger", half: gm.V3{X: 2, Y: 1, Z: 2}, place: func(m *gm.Map, p gm.V3) {
+		m.Entities = append(m.Entities, gm.Entity{Kind: "trigger", Pos: gm.V3{X: p.X, Y: p.Y + 0.05, Z: p.Z}, Half: gm.V3{X: 2, Y: 1, Z: 2},
+			Color: colZone, Trigger: &gm.TriggerTrait{}}) // select it + ENTER to add entered/exited behaviors
+	}},
+	{name: "PATH POINT", kind: "wall", half: gm.V3{X: 0.4, Y: 0.4, Z: 0.4}, place: func(m *gm.Map, p gm.V3) {
+		if len(m.Paths) == 0 {
+			m.Paths = append(m.Paths, gm.Path{Name: "main"}) // single default path for the move action
+		}
+		m.Paths[0].Points = append(m.Paths[0].Points, gm.V3{X: p.X, Z: p.Z})
+	}},
 	{name: "SPAWN POINT", kind: "wall", half: gm.V3{X: 0.6, Y: 0.6, Z: 0.6}, place: func(m *gm.Map, p gm.V3) {
 		m.Spawns = append(m.Spawns, gm.V3{X: p.X, Z: p.Z})
 	}},
@@ -119,9 +129,9 @@ const (
 	edRules  // editing the map's victory conditions
 )
 
-var fileMenu = []string{"SAVE", "LOAD", "PLAYTEST", "PUBLISH", "RULES", "NEW", "BACK"}
+var fileMenu = []string{"SAVE", "LOAD", "PLAYTEST", "PUBLISH", "RULES", "LOGIC", "ACTORS", "NEW", "BACK"}
 
-var ruleFields = []string{"mode", "time", "target", "lives"}
+var ruleFields = []string{"mode", "time", "target", "lives", "bots"}
 
 // ---------------------------------------------------------------------------
 // selection + field editing
@@ -133,6 +143,7 @@ const (
 	selEntity
 	selSpawn
 	selPickup
+	selPath // a waypoint in the default path (m.Paths[0])
 )
 
 // selRef points at one placed object across the map's heterogeneous slices.
@@ -158,6 +169,11 @@ func listSelectables(m gm.Map) []selRef {
 	for i := range m.Pickups {
 		out = append(out, selRef{selPickup, i})
 	}
+	if len(m.Paths) > 0 {
+		for i := range m.Paths[0].Points {
+			out = append(out, selRef{selPath, i})
+		}
+	}
 	return out
 }
 
@@ -174,6 +190,8 @@ func selPos(m *gm.Map, r selRef) gm.V3 {
 		return m.Spawns[r.idx]
 	case selPickup:
 		return m.Pickups[r.idx].Pos
+	case selPath:
+		return m.Paths[0].Points[r.idx]
 	}
 	return gm.V3{}
 }
@@ -191,6 +209,8 @@ func selLabel(m *gm.Map, r selRef) string {
 		return "SPAWN"
 	case selPickup:
 		return "PICKUP"
+	case selPath:
+		return fmt.Sprintf("PATH PT %d", r.idx)
 	}
 	return "?"
 }
@@ -208,6 +228,9 @@ func deleteSel(m *gm.Map, r selRef) {
 		m.Spawns = append(m.Spawns[:r.idx], m.Spawns[r.idx+1:]...)
 	case selPickup:
 		m.Pickups = append(m.Pickups[:r.idx], m.Pickups[r.idx+1:]...)
+	case selPath:
+		p := m.Paths[0].Points
+		m.Paths[0].Points = append(p[:r.idx], p[r.idx+1:]...)
 	}
 }
 
@@ -249,6 +272,8 @@ func fieldsFor(m *gm.Map, r selRef) []editField {
 		return f
 	case selSpawn:
 		return vecFields("pos", &m.Spawns[r.idx], false)
+	case selPath:
+		return vecFields("pos", &m.Paths[0].Points[r.idx], false)
 	case selPickup:
 		pk := &m.Pickups[r.idx]
 		f := vecFields("pos", &pk.Pos, false)
@@ -316,7 +341,7 @@ func clampI(v, lo, hi int) int {
 // views, a catalog palette, ghost preview, and placement (3D gun-sight raycast or
 // top-down cursor). Backspace backs out of each mode (and exits to the menu from
 // nav); Q quits the program.
-func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, s *userSettings, playerName string) {
+func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, s *userSettings, playerName, dropfile string) {
 	m := gm.Map{Name: "UNTITLED", Size: 20, Spawns: []gm.V3{{X: -14, Z: -14}, {X: 14, Z: 14}}}
 	buildArena(m)
 
@@ -349,6 +374,7 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 	frameBudget := time.Second / 30
 	start := time.Now()
 	last := start
+	lastPresence := time.Time{}
 	for {
 		select {
 		case <-ip.quitCh:
@@ -356,6 +382,10 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 		default:
 		}
 		now := time.Now()
+		if now.Sub(lastPresence) >= 10*time.Second {
+			updatePresence(dropfile, "map editor", "")
+			lastPresence = now
+		}
 		dt := now.Sub(last).Seconds()
 		if dt > 0.1 {
 			dt = 0.1
@@ -430,7 +460,7 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 								idx := len(gm.Maps)
 								gm.Maps = append(gm.Maps, m)
 								sess := newOfflineOnMap(idx, offlineBots, gm.EffectiveMode(m), 1, s.difficulty, s.aimAssist, playerName, gm.SelectColors[0], nil, gm.BodyTank)
-								quit := playMatch(w, cols, rows, rows3d, rnd, ip, sess)
+								quit := playMatch(w, cols, rows, rows3d, rnd, ip, sess, dropfile, "playtest", m.Name, false, nil)
 								sess.close()
 								gm.Maps = gm.Maps[:idx]
 								if quit {
@@ -456,9 +486,19 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 							mode, prev = edNav, nil
 						case "RULES":
 							if m.Rules == nil { // start from "all default"
-								m.Rules = &gm.MapRules{Mode: -1, TimeLimit: -1, Target: -1, Lives: -1}
+								m.Rules = &gm.MapRules{Mode: -1, TimeLimit: -1, Target: -1, Lives: -1, Bots: -1}
 							}
 							ruleIdx, mode, prev = 0, edRules, nil
+						case "LOGIC": // director (map-level) event rules
+							runBehaviorEditor(w, cols, rows, ip, nil, &m.Logic, "DIRECTOR LOGIC")
+							w.WriteString("\x1b[2J\x1b[H")
+							rebuild()
+							mode = edNav
+						case "ACTORS": // mobile-boss templates (spawn @name)
+							runActorEditor(w, cols, rows, ip, &m)
+							w.WriteString("\x1b[2J\x1b[H")
+							rebuild()
+							mode = edNav
 						case "NEW":
 							m = gm.Map{Name: "UNTITLED", Size: 20, Spawns: []gm.V3{{X: -14, Z: -14}, {X: 14, Z: 14}}}
 							rebuild()
@@ -481,6 +521,12 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 							}
 						}
 						mode, prev = edNav, nil
+					case edSelect: // ENTER on a selected entity opens its behavior editor
+						if len(selList) > 0 && selList[selIdx].kind == selEntity {
+							runBehaviorEditor(w, cols, rows, ip, &m.Entities[selList[selIdx].idx], nil, "BEHAVIORS")
+							w.WriteString("\x1b[2J\x1b[H")
+							rebuild()
+						}
 					}
 				case mkUp:
 					switch mode {
@@ -534,7 +580,7 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 
 		in := ip.snapshot()
 
-		// M opens the file menu from nav; E enters select/edit (both edge-triggered).
+		// M opens the file menu from nav; V enters select/edit (both edge-triggered).
 		if menuNow := ip.held(aEdMenu); menuNow && !prevMenu && mode == edNav {
 			mode, fileIdx, prev = edFile, 0, nil
 		}
@@ -714,7 +760,7 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 		}
 		reticle := [3]byte{120, 220, 140}
 		rnd.renderWorld(rc, now.Sub(start).Seconds(), nil, nil, nil, nil,
-			entT, entS, editorZoneSnaps(m), -1, 0, topdown, reticle, 0)
+			entT, entS, editorZoneSnaps(m), -1, 0, topdown, false, reticle, 0)
 		frame, cur := encode(rnd, cols, rows3d, prev)
 		prev = cur
 		w.Write(frame)
@@ -891,7 +937,7 @@ func drawEditorBar(w *bufio.Writer, cols, rows int, m gm.Map, topdown bool, mode
 	case edRules:
 		help = "up/dn field   ,/. adjust   BKSP done"
 	default:
-		help = "WASD fly  arrows look  R/F up/down  ENTER catalog  E edit  G grid  M file  TAB view  BKSP exit"
+		help = "WASD fly  arrows look  R/F up/down  ENTER catalog  V edit  G grid  M file  TAB view  BKSP exit"
 	}
 	fmt.Fprintf(w, "\x1b[%d;1H\x1b[0;90m%s\x1b[0m", rows, clip(centered(help, width), width))
 }
@@ -1008,6 +1054,8 @@ func adjustRule(r *gm.MapRules, idx, dir int) {
 		}
 	case 3: // lives: -1 default, 0 infinite, then >=1
 		r.Lives = clampI(r.Lives+dir, -1, 99)
+	case 4: // bots: -1 default, 0 none, then >=1 fill bots
+		r.Bots = clampI(r.Bots+dir, -1, 16)
 	}
 }
 
@@ -1038,7 +1086,13 @@ func drawRulesPanel(w *bufio.Writer, rows int, m gm.Map, sel int) {
 	} else if r.Lives > 0 {
 		livesS = fmt.Sprintf("%d", r.Lives)
 	}
-	vals := []string{modeS, timeS, targetS, livesS}
+	botsS := "default"
+	if r.Bots == 0 {
+		botsS = "none"
+	} else if r.Bots > 0 {
+		botsS = fmt.Sprintf("%d", r.Bots)
+	}
+	vals := []string{modeS, timeS, targetS, livesS, botsS}
 
 	row := 3
 	fmt.Fprintf(w, "\x1b[%d;2H\x1b[1;97mMAP RULES (victory)\x1b[0m", row)

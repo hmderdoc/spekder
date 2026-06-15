@@ -1,0 +1,40 @@
+{
+  "version": 4,
+  "name": "FLAG-8 STRONGHOLD",
+  "size": 26,
+  "obstacles": [
+    {"pos": [-6, 1.5, 16],  "half": [3, 1.5, 1],   "color": [0.4, 0.3, 0.34]},
+    {"pos": [6, 1.5, 16],   "half": [3, 1.5, 1],   "color": [0.4, 0.3, 0.34]},
+    {"pos": [-9, 1.5, 21],  "half": [1, 1.5, 4],   "color": [0.4, 0.3, 0.34]},
+    {"pos": [9, 1.5, 21],   "half": [1, 1.5, 4],   "color": [0.4, 0.3, 0.34]},
+    {"pos": [-14, 0.7, -2], "half": [2.4, 0.7, 1.2], "color": [0.44, 0.4, 0.42]},
+    {"pos": [14, 0.7, -2],  "half": [2.4, 0.7, 1.2], "color": [0.44, 0.4, 0.42]},
+    {"pos": [0, 0.7, -12],  "half": [1.4, 0.7, 1.4], "color": [0.44, 0.4, 0.42]},
+    {"pos": [-18, 0.7, -18], "half": [1.4, 0.7, 1.4], "color": [0.44, 0.4, 0.42]},
+    {"pos": [18, 0.7, -18],  "half": [1.4, 0.7, 1.4], "color": [0.44, 0.4, 0.42]}
+  ],
+  "ramps": null,
+  "scenery": null,
+  "spawns": [[0, -23], [-22, -22], [22, -22], [-23, 0], [23, 0]],
+  "pickupSpots": [
+    {"pos": [0, -6], "kind": 0},
+    {"pos": [-22, 10], "kind": 0},
+    {"pos": [22, 10], "kind": 0},
+    {"pos": [0, 11], "kind": 0}
+  ],
+  "entities": [
+    {"kind": "gate", "pos": [0, 1.4, 16], "half": [2.6, 1.4, 0.9], "color": [0.7, 0.55, 0.25], "solid": true, "destruct": {"maxHp": 130}},
+    {"kind": "turret", "pos": [-7, 3.4, 16], "half": [0.7, 0.4, 0.7], "color": [0.6, 0.4, 0.3], "solid": true, "turret": {"range": 18, "fireDelay": 1.4, "dmg": 14, "turnRate": 1.6}, "destruct": {"maxHp": 60}},
+    {"kind": "turret", "pos": [7, 3.4, 16],  "half": [0.7, 0.4, 0.7], "color": [0.6, 0.4, 0.3], "solid": true, "turret": {"range": 18, "fireDelay": 1.4, "dmg": 14, "turnRate": 1.6}, "destruct": {"maxHp": 60}},
+    {"kind": "turret", "pos": [0, 1.0, -20], "half": [0.7, 0.7, 0.7], "color": [0.6, 0.45, 0.3], "solid": true, "turret": {"range": 16, "fireDelay": 1.6, "dmg": 12, "turnRate": 1.5}, "destruct": {"maxHp": 50}},
+    {"kind": "flag", "pos": [0, 0, 21],    "half": [0.5, 0.5, 0.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [-21, 0, 21],  "half": [0.5, 0.5, 0.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [21, 0, 21],   "half": [0.5, 0.5, 0.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [-22, 0, -8],  "half": [0.5, 0.5, 0.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [22, 0, -8],   "half": [0.5, 0.5, 0.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, -17],   "half": [0.5, 0.5, 0.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [-9, 0, 6],    "half": [0.5, 0.5, 0.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [9, 0, 6],     "half": [0.5, 0.5, 0.5], "flag": {"team": -1}}
+  ],
+  "rules": {"mode": -1, "timeLimit": 260, "target": -1, "lives": 1, "bots": 5}
+}

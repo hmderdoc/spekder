@@ -42,6 +42,24 @@ func box(dst []Tri, center, half V3, col [3]float64, xf func(V3) V3) []Tri {
 	return dst
 }
 
+// appendHealHalo draws a few bright-green "+" motes drifting up above a tank
+// that's being healed. It floats above the body (not a body tint), so it reads
+// the same on a green or blue character; green = heal regardless of who it is.
+func appendHealHalo(dst []Tri, t *gm.TankSnap, clock float64) []Tri {
+	base := func(l V3) V3 { return V3{l.X + t.Pos.X, l.Y + t.Pos.Y, l.Z + t.Pos.Z} }
+	for k := 0; k < 3; k++ {
+		rise := math.Mod(clock*1.6+float64(k)*0.37, 1) // staggered rising cycle
+		y := 3.0 + rise*1.1
+		ang := float64(k) * 2.1
+		x, z := 0.4*math.Sin(ang), 0.4*math.Cos(ang)
+		f := 1 - rise*0.7 // fade as it rises
+		c := [3]float64{0.35 * f, 1.0 * f, 0.45 * f}
+		dst = box(dst, V3{x, y, z}, V3{0.2, 0.05, 0.05}, c, base) // horizontal bar of the +
+		dst = box(dst, V3{x, y, z}, V3{0.05, 0.2, 0.05}, c, base) // vertical bar
+	}
+	return dst
+}
+
 func appendTank(dst []Tri, t *gm.TankSnap, clock float64) []Tri {
 	sh, ch := math.Sin(t.HullYaw), math.Cos(t.HullYaw)
 	sa, ca := math.Sin(t.HullYaw+t.TurretYaw), math.Cos(t.HullYaw+t.TurretYaw)
@@ -54,10 +72,26 @@ func appendTank(dst []Tri, t *gm.TankSnap, clock float64) []Tri {
 	if t.Shield { // spawn-protected: washed-out so it reads as invulnerable
 		col = [3]float64{(col[0] + 0.6) / 2, (col[1] + 0.6) / 2, (col[2] + 0.6) / 2}
 	}
+	// DoT: pulse the hull toward an ember / sickly-green / blood-red tint so the
+	// affliction reads at a glance (the white per-hit flash still wins on top).
+	if t.Burning || t.Poisoned || t.Bleeding {
+		tcol := [3]float64{1.0, 0.45, 0.1} // ember (burn)
+		if t.Poisoned {
+			tcol = [3]float64{0.45, 0.95, 0.2} // venom green
+		} else if t.Bleeding {
+			tcol = [3]float64{0.9, 0.1, 0.1} // blood red
+		}
+		k := 0.45 + 0.2*math.Sin(clock*9) // throb so it doesn't look like a paint job
+		col = [3]float64{col[0]*(1-k) + tcol[0]*k, col[1]*(1-k) + tcol[1]*k, col[2]*(1-k) + tcol[2]*k}
+	}
 	if t.Hit { // just took damage: flash white
 		col = [3]float64{1, 1, 1}
 	}
 	bright := [3]float64{math.Min(col[0]*1.25, 1), math.Min(col[1]*1.25, 1), math.Min(col[2]*1.25, 1)}
+	curAccent = accentColor(t.Color) // the model's secondary color (eyes/accents); from the true color, not the hit-flash
+	if t.Healing {                   // mend halo: floating green +'s above the tank, color-independent
+		dst = appendHealHalo(dst, t, clock)
+	}
 	v := gm.Veh(t.Vehicle)
 	s := v.Scale // vehicle class sizes the model
 	if t.Body != gm.BodyTank {
@@ -75,11 +109,12 @@ func appendTank(dst []Tri, t *gm.TankSnap, clock float64) []Tri {
 	dst = box(dst, V3{0, b.turretY * s, 0}, V3{b.turret.X * s, b.turret.Y * s, b.turret.Z * s}, bright, xfTur)
 	barZ := (b.turret.Z + b.barLen) * s
 	dst = box(dst, V3{0, b.turretY * s, barZ}, V3{b.barR * s, b.barR * s, b.barLen * s}, gun, xfBarrel) // barrel (pitches)
+	tipZ := (b.turret.Z + b.barLen*2) * s
+	dst = box(dst, V3{0, b.turretY * s, tipZ}, V3{b.barR * 1.2 * s, b.barR * 1.2 * s, b.barR * 1.1 * s}, curAccent, xfBarrel) // muzzle accent
 	return dst
 }
 
-// bodyShape is a vehicle's render proportions (half-extents, pre-Scale), so each
-// class has a distinct silhouette - not just a resized copy.
+// bodyShape is a tank's render proportions (half-extents, pre-Scale).
 type bodyShape struct {
 	hull    V3      // hull half-extents
 	turret  V3      // turret half-extents
@@ -88,23 +123,18 @@ type bodyShape struct {
 	barR    float64 // barrel half-radius
 }
 
-func bodyFor(name string) bodyShape {
-	switch name {
-	case "SCOUT": // small, low, stubby gun
-		return bodyShape{hull: V3{0.7, 0.30, 1.05}, turret: V3{0.40, 0.22, 0.40}, turretY: 0.78, barLen: 0.65, barR: 0.09}
-	case "HEAVY": // wide bulky fortress, thick gun
-		return bodyShape{hull: V3{1.18, 0.55, 1.42}, turret: V3{0.74, 0.42, 0.74}, turretY: 1.20, barLen: 0.9, barR: 0.18}
-	case "RANGER": // long sleek hull, slim gun
-		return bodyShape{hull: V3{0.74, 0.34, 1.5}, turret: V3{0.46, 0.27, 0.46}, turretY: 0.92, barLen: 1.0, barR: 0.10}
-	case "ARTILLERY": // long body, small turret, very long barrel
-		return bodyShape{hull: V3{0.85, 0.40, 1.45}, turret: V3{0.42, 0.30, 0.42}, turretY: 1.0, barLen: 1.7, barR: 0.13}
-	default: // HUNTER (the original proportions)
-		return bodyShape{hull: V3{0.9, 0.45, 1.3}, turret: V3{0.55, 0.32, 0.55}, turretY: 1.05, barLen: 0.85, barR: 0.12}
-	}
+// bodyFor returns the tank silhouette. There is one tank now (HUNTER): bots and
+// legacy builds on retired chassis keep those chassis' STATS and Scale, but all
+// of them render these proportions - the per-class silhouettes (the artillery's
+// comedy barrel chief among them) are retired with the roster trim.
+func bodyFor(string) bodyShape {
+	return bodyShape{hull: V3{0.9, 0.45, 1.3}, turret: V3{0.55, 0.32, 0.55}, turretY: 1.05, barLen: 0.85, barR: 0.12}
 }
 
-func appendShot(dst []Tri, s gm.ShotSnap) []Tri {
-	// size + color by visual kind so each projectile reads distinctly.
+func appendShot(dst []Tri, s gm.ShotSnap, accent [3]float64, blend bool) []Tri {
+	// size + color by visual kind so each projectile reads distinctly (shape carries
+	// the weapon type); the color is then blended toward the firer's accent so you
+	// can also read WHO fired it.
 	size, col := 0.16, [3]float64{1.0, 0.85, 0.30} // VisBolt: amber
 	switch s.Vis {
 	case gm.VisGrenade:
@@ -115,6 +145,19 @@ func appendShot(dst []Tri, s gm.ShotSnap) []Tri {
 		size, col = 0.13, [3]float64{0.5, 0.9, 1.0} // cyan beam segment
 	case gm.VisSpark:
 		size, col = 0.15, [3]float64{1.0, 0.55, 0.15} // orange debris
+	case gm.VisFlame:
+		size, col = 0.32, [3]float64{1.0, 0.4, 0.1} // big red-orange fire puff
+	}
+	if blend { // mix the weapon color with the firer's secondary color
+		wa := 0.5 // accent weight
+		if s.Vis == gm.VisBeam {
+			wa = 0.8 // a beam's shape already reads as a laser, so let the firer's color dominate
+		}
+		col = [3]float64{
+			col[0]*(1-wa) + accent[0]*wa,
+			col[1]*(1-wa) + accent[1]*wa,
+			col[2]*(1-wa) + accent[2]*wa,
+		}
 	}
 	xf := func(l V3) V3 { return l.Add(s.Pos) }
 	return box(dst, V3{}, V3{X: size, Y: size, Z: size}, col, xf)
@@ -236,6 +279,13 @@ func appendEntity(dst []Tri, e gm.Entity, st gm.EntitySnap) []Tri {
 	if e.Flag != nil || e.Zone != nil {
 		return dst // inert objective marker; the runtime flag/zone snap renders it
 	}
+	if st.Pos != (gm.V3{}) { // dynamic position (payload/moved entities) overrides the template
+		e.Pos = st.Pos
+	}
+	if e.Kind == "trigger" { // sensor volume: a faint footprint pad
+		xf := func(l V3) V3 { return l.Add(e.Pos) }
+		return box(dst, V3{}, V3{e.Half.X, 0.05, e.Half.Z}, [3]float64{0.20, 0.30, 0.22}, xf)
+	}
 	col := e.Color
 	if col == ([3]float64{}) {
 		col = [3]float64{0.55, 0.57, 0.62}
@@ -281,16 +331,35 @@ func appendEntity(dst []Tri, e gm.Entity, st gm.EntitySnap) []Tri {
 // appendZone builds a King-of-the-Hill control zone: a low pad tinted by the
 // controller's color (grey when neutral), brightening with capture progress so
 // you can read who's taking it.
-func appendZone(dst []Tri, z gm.ZoneSnap) []Tri {
+// appendZone draws a control zone so its state reads at a glance: four tall
+// corner pylons frame the capture area (visible across the map), a floor pad
+// marks its extent, and a center beacon carries the state - pulsing while the
+// zone is neutral or being captured, steady in the owner's color once held.
+func appendZone(dst []Tri, z gm.ZoneSnap, clock float64) []Tri {
 	col := z.Color
 	if z.Prog > 0 { // brighten toward white as it's captured
 		f := z.Prog
 		col = [3]float64{col[0] + (1-col[0])*f, col[1] + (1-col[1])*f, col[2] + (1-col[2])*f}
 	}
-	xf := func(l V3) V3 { return l.Add(V3{z.Pos.X, 0, z.Pos.Z}) }
+	grey := math.Abs(z.Color[0]-z.Color[1]) < 0.05 && math.Abs(z.Color[1]-z.Color[2]) < 0.05
+	pulse := 1.0
+	if grey || z.Prog > 0 { // unowned or in flux: breathe, so it reads as "up for grabs"
+		pulse = 0.7 + 0.3*math.Sin(clock*4)
+	}
+	pc := [3]float64{col[0] * pulse, col[1] * pulse, col[2] * pulse}
+	// Anchor the markers at the zone's elevation so an elevated hill's pad/pylons
+	// sit up on the platform (where capture happens), not at the base. Ground
+	// zones have a low Pos.Y, so this is a no-op for them.
+	xf := func(l V3) V3 { return l.Add(V3{z.Pos.X, z.Pos.Y, z.Pos.Z}) }
 	dim := [3]float64{col[0] * 0.55, col[1] * 0.55, col[2] * 0.55}
-	dst = box(dst, V3{0, 0.05, 0}, V3{z.Half.X, 0.05, z.Half.Z}, dim, xf)               // floor pad
-	dst = box(dst, V3{0, 0.55, 0}, V3{z.Half.X * 0.18, 0.55, z.Half.Z * 0.18}, col, xf) // center post (visible from afar)
+	dst = box(dst, V3{0, 0.05, 0}, V3{z.Half.X, 0.05, z.Half.Z}, dim, xf) // floor pad
+	const pylonH = 2.6
+	for _, sx := range []float64{-1, 1} { // corner pylons frame the zone
+		for _, sz := range []float64{-1, 1} {
+			dst = box(dst, V3{sx * z.Half.X, pylonH / 2, sz * z.Half.Z}, V3{0.22, pylonH / 2, 0.22}, pc, xf)
+		}
+	}
+	dst = box(dst, V3{0, 0.9, 0}, V3{z.Half.X * 0.14, 0.9, z.Half.Z * 0.14}, pc, xf) // center beacon
 	return dst
 }
 
@@ -384,12 +453,19 @@ func (r *Renderer) renderModel(cam Cam, tris []Tri) {
 
 // renderWorld draws the arena, every tank except our own (me) and the dead, all
 // projectiles, then the damage flash and aiming reticle.
-func (r *Renderer) renderWorld(cam Cam, t float64, tanks []gm.TankSnap, shots []gm.ShotSnap, flags []gm.FlagSnap, pickups []gm.PickupSnap, entT []gm.Entity, entS []gm.EntitySnap, zones []gm.ZoneSnap, me int, flash float64, topdown bool, reticle [3]byte, selfTurret float64) {
+func (r *Renderer) renderWorld(cam Cam, t float64, tanks []gm.TankSnap, shots []gm.ShotSnap, flags []gm.FlagSnap, pickups []gm.PickupSnap, entT []gm.Entity, entS []gm.EntitySnap, zones []gm.ZoneSnap, me int, flash float64, topdown, noFog bool, reticle [3]byte, selfTurret float64) {
+	// Top-down tactical map: the overhead camera sits a full arena-height (or
+	// more, on wide frames) above the floor, so the whole playfield lands deep
+	// in the distance-fog band and the view goes dim - worse on bigger maps.
+	// A straight-down view has no depth to fade anyway, so drop the fog in
+	// top-down for every color mode (this used to be palette-modes only, which
+	// left truecolor dim).
+	r.noFog = topdown || noFog // count-in establishing orbit also drops fog (else the pulled-back map dims)
 	r.clear()
 	r.drawTris(cam, arena, t)
 	var dyn []Tri
 	for i := range zones {
-		dyn = appendZone(dyn, zones[i])
+		dyn = appendZone(dyn, zones[i], t)
 	}
 	for i := range tanks {
 		tk := &tanks[i]
@@ -402,7 +478,16 @@ func (r *Renderer) renderWorld(cam Cam, t float64, tanks []gm.TankSnap, shots []
 		dyn = appendTank(dyn, tk, t)
 	}
 	for _, s := range shots {
-		dyn = appendShot(dyn, s)
+		accent, blend := [3]float64{}, false
+		if s.Owner >= 0 { // tint toward the firer's accent (FX/environment shots stay as-is)
+			for i := range tanks {
+				if tanks[i].ID == s.Owner {
+					accent, blend = accentColor(tanks[i].Color), true
+					break
+				}
+			}
+		}
+		dyn = appendShot(dyn, s, accent, blend)
 	}
 	for _, f := range flags {
 		dyn = appendFlag(dyn, f)
@@ -424,8 +509,10 @@ func (r *Renderer) renderWorld(cam Cam, t float64, tanks []gm.TankSnap, shots []
 	if topdown {
 		return // overhead view is its own map; no radar/reticle
 	}
-	r.drawRadar(cam, tanks, flags, pickups, entT, entS, me)
-	r.drawReticle(reticle, selfTurret)
+	r.drawRadar(cam, tanks, flags, pickups, entT, entS, zones, me)
+	if reticle != ([3]byte{}) { // a zero reticle suppresses the crosshair (demo/spectator)
+		r.drawReticle(reticle, selfTurret)
+	}
 }
 
 // radarRect returns the radar's cell bounds (c0..c1 columns, r0..r1 rows) in the
@@ -447,7 +534,7 @@ var radarRange = 42.0 // world units shown from center to edge (set per-map in b
 // drawRadar paints the radar contents into the framebuffer's top-right: just the
 // player at center (facing up) and a blip per other live tank, floating over the
 // empty sky (no disc/box). The corner brackets are drawn separately as text.
-func (r *Renderer) drawRadar(cam Cam, tanks []gm.TankSnap, flags []gm.FlagSnap, pickups []gm.PickupSnap, entT []gm.Entity, entS []gm.EntitySnap, me int) {
+func (r *Renderer) drawRadar(cam Cam, tanks []gm.TankSnap, flags []gm.FlagSnap, pickups []gm.PickupSnap, entT []gm.Entity, entS []gm.EntitySnap, zones []gm.ZoneSnap, me int) {
 	c0, c1, r0, r1 := radarRect(r.W)
 	pcx := (c0 + c1) / 2
 	pcy := ((r0-1)*2 + r1*2 - 1) / 2
@@ -464,6 +551,14 @@ func (r *Renderer) drawRadar(cam Cam, tanks []gm.TankSnap, flags []gm.FlagSnap, 
 		r.putPx(bx, by, col)
 	}
 
+	// control zones: a 2x2 patch in the controller's color (grey = up for grabs)
+	for _, z := range zones {
+		zc := [3]byte{clampB(z.Color[0] * 255), clampB(z.Color[1] * 255), clampB(z.Color[2] * 255)}
+		blip(z.Pos.X, z.Pos.Z, zc)
+		blip(z.Pos.X+radarRange/scale, z.Pos.Z, zc)
+		blip(z.Pos.X, z.Pos.Z+radarRange/scale, zc)
+		blip(z.Pos.X+radarRange/scale, z.Pos.Z+radarRange/scale, zc)
+	}
 	// flags first (so tank blips draw over them)
 	for _, f := range flags {
 		col := [3]byte{240, 220, 60} // neutral yellow

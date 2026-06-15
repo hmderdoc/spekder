@@ -13,7 +13,25 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
+
+// enableKeepAlive turns on TCP keepalive on the inherited telnet socket so the
+// kernel detects a client that vanished without a clean close (a half-open
+// connection) within ~2 minutes. Without this, a blocking Read on a dead peer
+// never returns EOF, the door never exits, and Synchronet never frees the node.
+func enableKeepAlive(fd int) {
+	if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_KEEPALIVE, 1); err != nil {
+		logf("keepalive: SO_KEEPALIVE failed on fd=%d: %v", fd, err)
+		return
+	}
+	// Probe after 60s of silence, again every 15s, drop after 4 misses (~2 min).
+	unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_KEEPIDLE, 60)
+	unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_KEEPINTVL, 15)
+	unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_KEEPCNT, 4)
+	logf("keepalive enabled on door socket fd=%d (idle 60s, intvl 15s, cnt 4)", fd)
+}
 
 // shutdownSignals are the signals that should trigger a clean exit.
 var shutdownSignals = []os.Signal{syscall.SIGINT, syscall.SIGTERM}
@@ -90,6 +108,7 @@ func openTerm(dropfile string) (Term, func(), error) {
 		if sf := os.NewFile(uintptr(h), "door-socket"); sf != nil {
 			in, out = sf, sf
 			socket = true
+			enableKeepAlive(int(h)) // detect half-open client drops so the node frees up
 			logf("dropfile %q: telnet socket fd=%d", dropfile, h)
 		}
 	} else {

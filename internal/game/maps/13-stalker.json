@@ -1,0 +1,204 @@
+{
+  "version": 4,
+  "name": "STALKER",
+  "size": 18,
+  "obstacles": [
+    {
+      "pos": [
+        -7,
+        0.9,
+        -3
+      ],
+      "half": [
+        0.8,
+        0.9,
+        2.4
+      ],
+      "color": [
+        0.4,
+        0.42,
+        0.5
+      ]
+    },
+    {
+      "pos": [
+        7,
+        0.9,
+        3
+      ],
+      "half": [
+        0.8,
+        0.9,
+        2.4
+      ],
+      "color": [
+        0.4,
+        0.42,
+        0.5
+      ]
+    },
+    {
+      "pos": [
+        6,
+        0.9,
+        -7
+      ],
+      "half": [
+        2.4,
+        0.9,
+        0.8
+      ],
+      "color": [
+        0.4,
+        0.42,
+        0.5
+      ]
+    },
+    {
+      "pos": [
+        -6,
+        0.9,
+        7
+      ],
+      "half": [
+        2.4,
+        0.9,
+        0.8
+      ],
+      "color": [
+        0.4,
+        0.42,
+        0.5
+      ]
+    }
+  ],
+  "ramps": [],
+  "scenery": [],
+  "spawns": [
+    [
+      -15,
+      -15
+    ],
+    [
+      15,
+      15
+    ],
+    [
+      -15,
+      15
+    ],
+    [
+      15,
+      -15
+    ]
+  ],
+  "pickupSpots": [
+    {
+      "pos": [
+        -12,
+        12
+      ],
+      "kind": 0
+    },
+    {
+      "pos": [
+        12,
+        -12
+      ],
+      "kind": 4
+    }
+  ],
+  "rules": {
+    "mode": 0,
+    "timeLimit": 0,
+    "target": 999,
+    "lives": 0,
+    "bots": 0,
+    "maxPlayers": 4
+  },
+  "logic": [
+    {
+      "on": "start",
+      "do": [
+        {
+          "act": "message",
+          "text": "A Stalker hunts you. Bring it down."
+        },
+        {
+          "act": "spawn",
+          "what": "@stalker"
+        }
+      ]
+    }
+  ],
+  "actors": [
+    {
+      "name": "stalker",
+      "vehicle": 2,
+      "body": 7,
+      "maxHp": 420,
+      "watch": [
+        50
+      ],
+      "behaviors": [
+        {
+          "on": "hp_below",
+          "when": [
+            {
+              "kind": "hp",
+              "sel": "self",
+              "op": "<=",
+              "n": 50
+            }
+          ],
+          "once": true,
+          "do": [
+            {
+              "act": "message",
+              "text": "THE STALKER RAGES"
+            },
+            {
+              "act": "setstat",
+              "target": "self",
+              "stat": "speed",
+              "n": 9
+            },
+            {
+              "act": "setstat",
+              "target": "self",
+              "stat": "weapon",
+              "n": 7
+            },
+            {
+              "act": "spawn",
+              "what": "spider",
+              "at": "self",
+              "count": 3
+            }
+          ]
+        },
+        {
+          "on": "killed",
+          "when": [
+            {
+              "kind": "hp",
+              "sel": "self",
+              "op": "<=",
+              "n": 0
+            }
+          ],
+          "once": true,
+          "do": [
+            {
+              "act": "message",
+              "text": "THE STALKER IS SLAIN"
+            },
+            {
+              "act": "win"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -14,8 +14,10 @@ import (
 // binary under data/. See DIFFICULTY.md.
 
 type userSettings struct {
-	difficulty gm.Difficulty
-	aimAssist  bool
+	difficulty   gm.Difficulty
+	aimAssist    bool
+	colorMode    int // colorTrue/color256/color16 (see color.go)
+	campaignBest int // highest campaign level cleared (0 = never)
 
 	// Custom point-buy vehicle (see VEHICLES.md). hasCustom gates the CUSTOM entry
 	// in the selector; chassis is the builtin body it renders as; levels are the
@@ -24,10 +26,14 @@ type userSettings struct {
 	customChassis int
 	customBody    int // render silhouette for the custom build (BodyTank or a creature)
 	customLevels  [pbStatCount]int
+
+	// Custom controls (see controls.go). keyBinds maps a game action -> its key
+	// (0 = explicitly unbound); absent = the default key.
+	keyBinds map[int]byte
 }
 
 func defaultSettings() userSettings {
-	return userSettings{difficulty: gm.DiffNormal, aimAssist: true, customChassis: 1, customBody: gm.BodyTank, customLevels: defaultCustomLevels()}
+	return userSettings{difficulty: gm.DiffNormal, aimAssist: true, colorMode: colorTrue, customChassis: 1, customBody: gm.BodyTank, customLevels: defaultCustomLevels(), keyBinds: map[int]byte{}}
 }
 
 // sanitizeKey reduces a handle to a safe, stable filename fragment.
@@ -72,9 +78,20 @@ func userSettingsPath(dropfile string) string {
 // loadUserSettings reads the caller's saved preferences (defaults if absent).
 func loadUserSettings(dropfile string) userSettings {
 	s := defaultSettings()
+	// The door ini may set a system-wide default color mode (e.g. a board whose
+	// callers are mostly on classic terminals); the user's own pick overrides it.
+	if m, ok := parseColorMode(loadINI(defaultINIPath())["color_mode"]); ok {
+		s.colorMode = m
+	}
 	ini := loadINI(userSettingsPath(dropfile))
 	if d, ok := gm.ParseDifficulty(ini["difficulty"]); ok {
 		s.difficulty = d
+	}
+	if m, ok := parseColorMode(ini["colormode"]); ok {
+		s.colorMode = m
+	}
+	if n, ok := atoiOK(ini["campaignbest"]); ok {
+		s.campaignBest = n
 	}
 	switch strings.ToLower(ini["aimassist"]) {
 	case "off", "false", "0", "no":
@@ -91,6 +108,23 @@ func loadUserSettings(dropfile string) userSettings {
 	if lv, ok := parseLevels(ini["customlevels"]); ok {
 		s.customLevels = lv
 		s.hasCustom = true
+	}
+	if bs := ini["binds"]; bs != "" {
+		s.keyBinds = map[int]byte{}
+		for _, entry := range strings.Split(bs, ",") {
+			entry = strings.TrimSpace(entry)
+			i := strings.IndexByte(entry, ':')
+			if i <= 0 {
+				continue
+			}
+			act, ok := slugToAct(entry[:i])
+			if !ok {
+				continue
+			}
+			if k, ok := tokenKey(entry[i+1:]); ok {
+				s.keyBinds[act] = k
+			}
+		}
 	}
 	return s
 }
@@ -134,13 +168,27 @@ func saveUserSettings(dropfile string, s userSettings) {
 	if s.aimAssist {
 		aa = "on"
 	}
-	body := fmt.Sprintf("difficulty = %s\naimassist = %s\n", s.difficulty.String(), aa)
+	body := fmt.Sprintf("difficulty = %s\naimassist = %s\ncolormode = %s\n", s.difficulty.String(), aa, colorModeSlug(s.colorMode))
+	if s.campaignBest > 0 {
+		body += fmt.Sprintf("campaignbest = %d\n", s.campaignBest)
+	}
 	if s.hasCustom {
 		parts := make([]string, pbStatCount)
 		for i, v := range s.customLevels {
 			parts[i] = fmt.Sprintf("%d", v)
 		}
 		body += fmt.Sprintf("customchassis = %d\ncustombody = %d\ncustomlevels = %s\n", s.customChassis, s.customBody, strings.Join(parts, ","))
+	}
+	if len(s.keyBinds) > 0 {
+		var parts []string
+		for _, r := range bindable { // stable order
+			if k, ok := s.keyBinds[r.act]; ok {
+				parts = append(parts, r.slug+":"+keyToken(k))
+			}
+		}
+		if len(parts) > 0 {
+			body += "binds = " + strings.Join(parts, ",") + "\n"
+		}
 	}
 	_ = os.WriteFile(p, []byte(body), 0o644)
 }

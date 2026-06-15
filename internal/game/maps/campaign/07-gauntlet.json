@@ -1,0 +1,35 @@
+{
+  "version": 4,
+  "name": "FLAG-7 GAUNTLET",
+  "size": 26,
+  "obstacles": [
+    {"pos": [-5, 1.5, -10], "half": [1, 1.5, 12],  "color": [0.45, 0.4, 0.36]},
+    {"pos": [5, 1.5, 10],   "half": [1, 1.5, 12],  "color": [0.45, 0.4, 0.36]},
+    {"pos": [-15, 0.7, 6],  "half": [2.4, 0.7, 1.2], "color": [0.48, 0.44, 0.4]},
+    {"pos": [15, 0.7, -6],  "half": [2.4, 0.7, 1.2], "color": [0.48, 0.44, 0.4]},
+    {"pos": [-15, 0.7, 18], "half": [1.2, 0.7, 2.4], "color": [0.48, 0.44, 0.4]},
+    {"pos": [15, 0.7, -18], "half": [1.2, 0.7, 2.4], "color": [0.48, 0.44, 0.4]}
+  ],
+  "ramps": null,
+  "scenery": null,
+  "spawns": [[0, -23], [-22, -22], [22, -22], [-23, 0], [23, 0]],
+  "pickupSpots": [
+    {"pos": [0, 5], "kind": 0},
+    {"pos": [-22, 22], "kind": 0},
+    {"pos": [22, -22], "kind": 0}
+  ],
+  "entities": [
+    {"kind": "hazard", "pos": [0, 0.05, -16], "half": [3.5, 0.1, 2], "color": [0.95, 0.35, 0.1], "solid": false, "hazard": {"dps": 25}},
+    {"kind": "hazard", "pos": [0, 0.05, 16],  "half": [3.5, 0.1, 2], "color": [0.95, 0.35, 0.1], "solid": false, "hazard": {"dps": 25}},
+    {"kind": "turret", "pos": [0, 1.0, 0],   "half": [0.7, 0.7, 0.7], "color": [0.6, 0.45, 0.3], "solid": true, "turret": {"range": 18, "fireDelay": 1.4, "dmg": 14, "turnRate": 1.6}, "destruct": {"maxHp": 65}},
+    {"kind": "turret", "pos": [-22, 1.0, 11], "half": [0.7, 0.7, 0.7], "color": [0.6, 0.45, 0.3], "solid": true, "turret": {"range": 16, "fireDelay": 1.7, "dmg": 12, "turnRate": 1.4}, "destruct": {"maxHp": 50}},
+    {"kind": "flag", "pos": [-11, 0, -16], "half": [0.5, 0.5, 0.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [11, 0, 16],   "half": [0.5, 0.5, 0.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [-22, 0, 0],   "half": [0.5, 0.5, 0.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [22, 0, 0],    "half": [0.5, 0.5, 0.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, 22],    "half": [0.5, 0.5, 0.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, -22],   "half": [0.5, 0.5, 0.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, 8],     "half": [0.5, 0.5, 0.5], "flag": {"team": -1}}
+  ],
+  "rules": {"mode": -1, "timeLimit": 240, "target": -1, "lives": 1, "bots": 5}
+}

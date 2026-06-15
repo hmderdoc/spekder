@@ -1,0 +1,35 @@
+{
+  "version": 4,
+  "name": "FLAG-5 BASTION",
+  "size": 24,
+  "obstacles": [
+    {"pos": [0, 1.5, 10],  "half": [8, 1.5, 1],   "color": [0.5, 0.3, 0.28]},
+    {"pos": [-8, 1.5, 16], "half": [1, 1.5, 5],   "color": [0.5, 0.3, 0.28]},
+    {"pos": [8, 1.5, 16],  "half": [1, 1.5, 5],   "color": [0.5, 0.3, 0.28]},
+    {"pos": [0, 1, 17],    "half": [3, 1, 1.5],   "color": [0.42, 0.3, 0.3]},
+    {"pos": [-12, 0.7, -8], "half": [2.4, 0.7, 1.2], "color": [0.46, 0.44, 0.4]},
+    {"pos": [12, 0.7, -8],  "half": [2.4, 0.7, 1.2], "color": [0.46, 0.44, 0.4]},
+    {"pos": [0, 0.7, -2],   "half": [1.4, 0.7, 1.4], "color": [0.46, 0.44, 0.4]}
+  ],
+  "ramps": [
+    {"pos": [-13, 0, 17], "half": [2.5, 0, 2], "h": 2.0, "dir": "+x", "color": [0.4, 0.26, 0.26]}
+  ],
+  "scenery": null,
+  "spawns": [[0, -21], [-19, -19], [19, -19], [-21, 0], [21, 0]],
+  "pickupSpots": [
+    {"pos": [0, -12], "kind": 0},
+    {"pos": [-20, 12], "kind": 0},
+    {"pos": [20, 12], "kind": 0}
+  ],
+  "entities": [
+    {"kind": "turret", "pos": [-6, 3.4, 10], "half": [0.7, 0.4, 0.7], "color": [0.6, 0.4, 0.3], "solid": true, "turret": {"range": 17, "fireDelay": 1.5, "dmg": 13, "turnRate": 1.5}, "destruct": {"maxHp": 55}},
+    {"kind": "turret", "pos": [6, 3.4, 10],  "half": [0.7, 0.4, 0.7], "color": [0.6, 0.4, 0.3], "solid": true, "turret": {"range": 17, "fireDelay": 1.5, "dmg": 13, "turnRate": 1.5}, "destruct": {"maxHp": 55}},
+    {"kind": "flag", "pos": [0, 0, 14],   "half": [0.5, 0.5, 0.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [-19, 0, 20], "half": [0.5, 0.5, 0.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [19, 0, 20],  "half": [0.5, 0.5, 0.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [-19, 0, -14], "half": [0.5, 0.5, 0.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [19, 0, -14],  "half": [0.5, 0.5, 0.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, -18],   "half": [0.5, 0.5, 0.5], "flag": {"team": -1}}
+  ],
+  "rules": {"mode": -1, "timeLimit": 220, "target": -1, "lives": 1, "bots": 4}
+}

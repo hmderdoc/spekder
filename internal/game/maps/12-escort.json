@@ -1,0 +1,199 @@
+{
+  "version": 4,
+  "name": "ESCORT",
+  "size": 20,
+  "obstacles": [
+    {
+      "pos": [
+        -2,
+        0.9,
+        -6
+      ],
+      "half": [
+        0.8,
+        0.9,
+        2.2
+      ],
+      "color": [
+        0.4,
+        0.42,
+        0.5
+      ]
+    },
+    {
+      "pos": [
+        4,
+        0.9,
+        2
+      ],
+      "half": [
+        0.8,
+        0.9,
+        2.2
+      ],
+      "color": [
+        0.4,
+        0.42,
+        0.5
+      ]
+    }
+  ],
+  "ramps": [],
+  "scenery": [],
+  "spawns": [
+    [
+      -17,
+      -17
+    ],
+    [
+      -15,
+      -17
+    ],
+    [
+      -17,
+      -15
+    ]
+  ],
+  "rules": {
+    "mode": 0,
+    "timeLimit": 0,
+    "target": 999,
+    "lives": 0,
+    "bots": 4,
+    "maxPlayers": 6
+  },
+  "paths": [
+    {
+      "name": "main",
+      "points": [
+        [
+          -14,
+          -14
+        ],
+        [
+          -6,
+          -3
+        ],
+        [
+          6,
+          6
+        ],
+        [
+          15,
+          15
+        ]
+      ]
+    }
+  ],
+  "logic": [
+    {
+      "on": "start",
+      "do": [
+        {
+          "act": "message",
+          "text": "Escort the payload to the gate. Stay close; keep enemies off it."
+        }
+      ]
+    }
+  ],
+  "entities": [
+    {
+      "kind": "wall",
+      "tag": "cart",
+      "pos": [
+        -14,
+        0.8,
+        -14
+      ],
+      "half": [
+        1.0,
+        0.8,
+        1.0
+      ],
+      "color": [
+        0.92,
+        0.55,
+        0.2
+      ],
+      "solid": true,
+      "behaviors": [
+        {
+          "on": "tick",
+          "when": [
+            {
+              "kind": "near",
+              "sel": "players",
+              "r": 5,
+              "op": ">=",
+              "n": 1
+            },
+            {
+              "kind": "near",
+              "sel": "bots",
+              "r": 5,
+              "op": "==",
+              "n": 0
+            }
+          ],
+          "do": [
+            {
+              "act": "move",
+              "target": "self",
+              "what": "main",
+              "n": 2.5
+            }
+          ]
+        },
+        {
+          "on": "tick",
+          "when": [
+            {
+              "kind": "near",
+              "sel": "bots",
+              "r": 5,
+              "op": ">=",
+              "n": 1
+            }
+          ],
+          "do": [
+            {
+              "act": "stop",
+              "target": "self"
+            }
+          ]
+        },
+        {
+          "on": "tick",
+          "when": [
+            {
+              "kind": "near",
+              "sel": "players",
+              "r": 5,
+              "op": "==",
+              "n": 0
+            }
+          ],
+          "do": [
+            {
+              "act": "stop",
+              "target": "self"
+            }
+          ]
+        },
+        {
+          "on": "arrived",
+          "once": true,
+          "do": [
+            {
+              "act": "message",
+              "text": "PAYLOAD DELIVERED"
+            },
+            {
+              "act": "win"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -178,7 +178,7 @@ func runCustomEditor(w *bufio.Writer, cols, rows int, ip *input, s *userSettings
 			angle += 0.7 * dt
 			tank := gm.TankSnap{Vehicle: aps[apIdx].vehicle, Body: aps[apIdx].body, Color: color}
 			tris := appendTank(nil, &tank, now.Sub(start).Seconds())
-			pr.renderModel(fitCam(tris, pr.W, pr.H, angle), tris)
+			pr.renderModel(fitCam(tris, pr.W, pr.H, angle, previewPad(aps[apIdx].body)), tris)
 			panelPrev = blitPanel(w, pr, panelPrev, panelCol0, panelRow0)
 		}
 		if dirty {

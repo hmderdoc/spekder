@@ -7,11 +7,13 @@ import (
 	gm "spekder/internal/game"
 )
 
-// TestHelloRoundTrip: HELLO carries token/bbsid/handle/vehicle/color intact, no
-// custom block by default, and a legacy HELLO (no trailing bytes) still decodes.
+// TestHelloRoundTrip: HELLO carries token/bbsid/handle/vehicle/color/body and the
+// version tail intact; a legacy HELLO (missing trailing bytes) still decodes with
+// zero-value defaults (clientProto 0, which the server's join guard rejects).
 func TestHelloRoundTrip(t *testing.T) {
 	c := [3]float64{0.30, 0.65, 0.90}
-	tok, bid, h, v, col, custom, body, ok := DecodeHello(EncodeHello("tok", "bbs", "Derdok", 2, c, nil, gm.BodySpider))
+	full := EncodeHello("tok", "bbs", "Derdok", 2, c, nil, gm.BodySpider, ProtocolVersion, "1.2.3", "WOLVES")
+	tok, bid, h, v, col, custom, body, cproto, cver, party, ok := DecodeHello(full)
 	if !ok || tok != "tok" || bid != "bbs" || h != "Derdok" || v != 2 {
 		t.Fatalf("hello fields lost: %q %q %q %d", tok, bid, h, v)
 	}
@@ -21,15 +23,24 @@ func TestHelloRoundTrip(t *testing.T) {
 	if body != gm.BodySpider {
 		t.Fatalf("body style lost: %d", body)
 	}
+	if cproto != ProtocolVersion || cver != "1.2.3" || party != "WOLVES" {
+		t.Fatalf("version/party tail lost: proto=%d ver=%q party=%q", cproto, cver, party)
+	}
 	for i := range c {
 		if math.Abs(col[i]-c[i]) > 1.0/255 {
 			t.Fatalf("color channel %d lost: %v vs %v", i, col, c)
 		}
 	}
-	// Legacy HELLO (no trailing color/custom/body bytes) must still parse, color = zero.
-	legacy := EncodeHello("tok", "bbs", "h", 1, [3]float64{}, nil, gm.BodyTank)
-	legacy = legacy[:len(legacy)-5] // drop color (3) + custom flag (1) + body (1)
-	if _, _, _, gv, gc, _, _, gok := DecodeHello(legacy); !gok || gv != 1 || gc != ([3]float64{}) {
+	// Missing version+party tail (all empty): drop the u16 proto + two empty
+	// strings = 4 bytes. clientProto defaults to 0; everything before survives.
+	noVer := EncodeHello("tok", "bbs", "h", 1, [3]float64{}, nil, gm.BodyTank, ProtocolVersion, "", "")
+	noVer = noVer[:len(noVer)-4]
+	if _, _, _, gv, _, _, gb, gp, _, _, gok := DecodeHello(noVer); !gok || gv != 1 || gb != gm.BodyTank || gp != 0 {
+		t.Fatalf("hello w/o version tail: ok=%v v=%d body=%d proto=%d", gok, gv, gb, gp)
+	}
+	// Oldest client (also missing body + custom flag + color): still decodes.
+	older := noVer[:len(noVer)-5]
+	if _, _, _, gv, gc, _, _, _, _, _, gok := DecodeHello(older); !gok || gv != 1 || gc != ([3]float64{}) {
 		t.Fatalf("legacy hello: ok=%v v=%d c=%v", gok, gv, gc)
 	}
 }
@@ -37,7 +48,7 @@ func TestHelloRoundTrip(t *testing.T) {
 // TestHelloCustomRoundTrip: a custom build's sim stats survive the wire.
 func TestHelloCustomRoundTrip(t *testing.T) {
 	cs := gm.CustomStats{MaxHP: 130, Speed: 7.2, HullTurn: 2.1, FireDelay: 0.46, AmmoMax: 11, AmmoRegen: 1.9}
-	_, _, _, v, _, got, _, ok := DecodeHello(EncodeHello("t", "b", "h", 3, [3]float64{0.5, 0.5, 0.5}, &cs, gm.BodyTank))
+	_, _, _, v, _, got, _, _, _, _, ok := DecodeHello(EncodeHello("t", "b", "h", 3, [3]float64{0.5, 0.5, 0.5}, &cs, gm.BodyTank, ProtocolVersion, "dev", ""))
 	if !ok || got == nil {
 		t.Fatal("custom block lost")
 	}
@@ -46,5 +57,27 @@ func TestHelloCustomRoundTrip(t *testing.T) {
 		math.Abs(got.FireDelay-cs.FireDelay) > 1e-4 || math.Abs(got.AmmoMax-cs.AmmoMax) > 1e-4 ||
 		math.Abs(got.AmmoRegen-cs.AmmoRegen) > 1e-4 {
 		t.Fatalf("custom stats mismatch: %+v vs %+v (chassis %d)", *got, cs, v)
+	}
+}
+
+// TestRejectRoundTrip: a server reject carries its reason back to the client.
+func TestRejectRoundTrip(t *testing.T) {
+	reason, ok := DecodeReject(EncodeReject("Version mismatch: update your client."))
+	if !ok || reason != "Version mismatch: update your client." {
+		t.Fatalf("reject reason lost: ok=%v %q", ok, reason)
+	}
+	if _, ok := DecodeReject(EncodeWelcome(3)); ok {
+		t.Fatal("DecodeReject accepted a non-reject message")
+	}
+}
+
+// TestPartyKickRoundTrip: a party-kick carries owner/party/target back intact.
+func TestPartyKickRoundTrip(t *testing.T) {
+	tok, owner, party, target, ok := DecodePartyKick(EncodePartyKick("tk", "DERDOK", "DERDOK", "RAZOR"))
+	if !ok || tok != "tk" || owner != "DERDOK" || party != "DERDOK" || target != "RAZOR" {
+		t.Fatalf("party-kick fields lost: %q %q %q %q ok=%v", tok, owner, party, target, ok)
+	}
+	if _, _, _, _, ok := DecodePartyKick(EncodeWelcome(1)); ok {
+		t.Fatal("DecodePartyKick accepted a non-kick message")
 	}
 }

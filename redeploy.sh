@@ -11,11 +11,20 @@ cd "$(dirname "$0")"
 echo "==> go test"
 go test ./...
 
+# Stamp the human-facing version from git (the same var the release workflow
+# sets via -X main.version) so the arena advertises a real version and the
+# in-app update check / reject messages name it. Falls back to "dev".
+VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+LDFLAGS="-X main.version=${VERSION}"
+echo "==> version ${VERSION}"
+
 echo "==> build door"
-go build -buildvcs=false -o spekder .
+go build -buildvcs=false -ldflags "$LDFLAGS" -o spekder .
+go build -buildvcs=false -ldflags "$LDFLAGS" -o door .
 
 echo "==> build server"
-go build -buildvcs=false -o spekder-server ./cmd/server
+go build -buildvcs=false -ldflags "$LDFLAGS" -o spekder-server ./cmd/server
+go build -buildvcs=false -ldflags "$LDFLAGS" -o server ./cmd/server
 
 echo "==> restart arena service"
 restarted=false

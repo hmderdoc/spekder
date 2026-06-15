@@ -22,8 +22,8 @@ func TestStateRoundTripCTF(t *testing.T) {
 		Kills:      []gm.KillEvent{{Killer: 1, Victim: 0, Cause: gm.CauseCannon}, {Killer: -1, Victim: 1, Cause: gm.CauseHazard}},
 	}
 	tanks := []gm.TankSnap{
-		{ID: 0, Pos: gm.V3{X: 1, Y: 0, Z: -3}, HP: 80, Name: "DERDOK", Team: 0, Carrying: true, Lives: 0, Vehicle: 1, Shield: true, TurretPitch: 0.35, HoldScore: 7},
-		{ID: 1, Pos: gm.V3{X: -2, Y: 0, Z: 4}, HP: 100, Name: "RAZOR", Team: 1, Carrying: false, Bot: true, Vehicle: 2, Body: gm.BodySpider, Cloak: true, Rapid: true},
+		{ID: 0, Pos: gm.V3{X: 1, Y: 0, Z: -3}, HP: 80, Name: "DERDOK", Team: 0, Carrying: true, Lives: 0, Vehicle: 1, Shield: true, TurretPitch: 0.35, HoldScore: 7, Shell: true, Poisoned: true, Bleeding: true, Healing: true},
+		{ID: 1, Pos: gm.V3{X: -2, Y: 0, Z: 4}, HP: 100, Name: "RAZOR", Team: 1, Carrying: false, Bot: true, Vehicle: 2, Body: gm.BodySpider, Cloak: true, Rapid: true, Burning: true, ShieldUp: true, ShieldFrac: 0.5},
 	}
 	shots := []gm.ShotSnap{{Pos: gm.V3{X: 0, Y: gm.EyeHeight, Z: 0}, Vis: gm.VisGrenade}}
 	flags := []gm.FlagSnap{
@@ -111,6 +111,21 @@ func TestStateRoundTripCTF(t *testing.T) {
 	}
 	if !dt[1].Cloak || !dt[1].Rapid {
 		t.Fatalf("tank1 cloak/rapid bits lost: %+v", dt[1])
+	}
+	if !dt[0].Shell || !dt[0].Poisoned || dt[0].Burning {
+		t.Fatalf("tank0 shell/poison bits wrong: %+v", dt[0])
+	}
+	if !dt[1].Burning || dt[1].Poisoned || dt[1].Shell {
+		t.Fatalf("tank1 burn bit wrong: %+v", dt[1])
+	}
+	if !dt[1].ShieldUp || dt[1].ShieldFrac < 0.49 || dt[1].ShieldFrac > 0.51 {
+		t.Fatalf("tank1 barrier lost: up=%v frac=%v", dt[1].ShieldUp, dt[1].ShieldFrac)
+	}
+	if !dt[0].Bleeding || dt[1].Bleeding {
+		t.Fatalf("bleeding bit wrong: t0=%v t1=%v", dt[0].Bleeding, dt[1].Bleeding)
+	}
+	if !dt[0].Healing || dt[1].Healing {
+		t.Fatalf("healing bit wrong: t0=%v t1=%v", dt[0].Healing, dt[1].Healing)
 	}
 	if len(ds) != 1 || ds[0].Vis != gm.VisGrenade {
 		t.Fatalf("shot lost over wire (incl. vis): %+v", ds)

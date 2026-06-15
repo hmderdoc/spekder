@@ -22,6 +22,20 @@ func TestInputRoundTripRecenter(t *testing.T) {
 	}
 }
 
+func TestInputRoundTripStrafe(t *testing.T) {
+	in := gm.Input{StrafeL: true, StrafeR: true, Fire2: true, Drop: true, Vote: -1}
+	got, ok := DecodeInput(EncodeInput(in))
+	if !ok {
+		t.Fatal("DecodeInput failed")
+	}
+	if !got.StrafeL || !got.StrafeR {
+		t.Fatalf("strafe bits lost over wire: %+v", got)
+	}
+	if !got.Fire2 || !got.Drop {
+		t.Fatalf("neighboring flags corrupted: %+v", got)
+	}
+}
+
 // A legacy 3-byte INPUT (no flags byte) must still decode, with Recenter false.
 func TestInputBackwardCompat(t *testing.T) {
 	got, ok := DecodeInput([]byte{MsgInput, 0x01, 0xFF})

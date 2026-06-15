@@ -6,22 +6,294 @@ package proto
 import (
 	"encoding/binary"
 	"errors"
+	"hash/fnv"
 	"io"
 	"math"
+	"strconv"
 
 	gm "spekder/internal/game"
 )
 
+// MapHash is a content fingerprint of a map (FNV-1a over its wire encoding),
+// used to version the client-side preview cache: same bytes -> same hash -> the
+// cached copy is reused; an edited map changes the hash and is refetched.
+func MapHash(m gm.Map) uint32 {
+	h := fnv.New32a()
+	h.Write(EncodeMap(m))
+	return h.Sum32()
+}
+
+// ProtocolVersion is the wire-compatibility number. Bump it ONLY on a
+// wire-breaking change (a message's layout changes incompatibly). It is sent in
+// MsgHello and the server hard-rejects a join whose number doesn't match, so a
+// client and server from mismatched releases never half-talk and corrupt state.
+// It is independent of the human-facing release version (which can move without
+// a wire break). Start: 1.
+//
+//	2: TankSnap gained the minotaur barrier (fl2 bit + a barrier-charge byte).
+//	3: added MsgMapReq/MsgMapPreview for lazy lobby map previews.
+//	4: MsgLobby entries carry a content hash (cache versioning).
+//	5: Input gained the lobby Ready bit; MatchSnap gained the locked-vote count.
+const ProtocolVersion = 5
+
 const (
-	MsgHello   = 0x01 // client->server: token, bbsid, handle
-	MsgWelcome = 0x02 // server->client: your tank id
-	MsgInput   = 0x10 // client->server: held-button bitfield
-	MsgState   = 0x20 // server->client: full snapshot
-	MsgMap     = 0x21 // server->client: full map definition (on join / map change)
-	MsgLobby   = 0x22 // server->client: votable (map name + implied mode) candidates
-	MsgPublish = 0x30 // client->server: publish an author map to the arena repo
-	MsgPubAck  = 0x31 // server->client: publish result (ok flag + message)
+	MsgHello      = 0x01 // client->server: token, bbsid, handle, client version
+	MsgWelcome    = 0x02 // server->client: your tank id
+	MsgReject     = 0x03 // server->client: connection refused + human-readable reason
+	MsgInput      = 0x10 // client->server: held-button bitfield
+	MsgState      = 0x20 // server->client: full snapshot
+	MsgMap        = 0x21 // server->client: full map definition (on join / map change)
+	MsgLobby      = 0x22 // server->client: votable (map name + implied mode) candidates
+	MsgStatusQ    = 0x23 // client->server: arena status request for the main menu
+	MsgStatus     = 0x24 // server->client: arena status for the main menu
+	MsgPresence   = 0x25 // client->server: Spekder-wide presence heartbeat
+	MsgChat       = 0x26 // client->server: Spekder-wide chat message
+	MsgPartyKick  = 0x27 // client->server: party owner boots a member by handle
+	MsgMapReq     = 0x28 // client->server: lazy lobby preview - send map[i]'s geometry
+	MsgMapPreview = 0x29 // server->client: a map's geometry for preview (does NOT swap arena)
+	MsgPublish    = 0x30 // client->server: publish an author map to the arena repo
+	MsgPubAck     = 0x31 // server->client: publish result (ok flag + message)
+	MsgScore      = 0x40 // client->server: submit a finished match's score (one-shot)
+	MsgScoreQ     = 0x41 // client->server: request the global high-score board
+	MsgScores     = 0x42 // server->client: global high-score rows
+	MsgPlayersQ   = 0x43 // client->server: request the aggregated career-stats board
+	MsgPlayers    = 0x44 // server->client: aggregated per-player career rows
+	MsgChangeChar = 0x45 // client->server: swap the caller's character (applied on next respawn)
 )
+
+// ScoreSubmit is one finished-match score sent to the arena for the global board.
+// BBS is the source board (set via door.ini bbsname) so players are distinguishable.
+// The Won/Kills/.../Wave tail feeds the server's per-player career aggregation; it
+// is an optional appended block so an older door (which omits it) still decodes.
+type ScoreSubmit struct {
+	Token, Mode, Name, BBS, Map string
+	Score                       int
+	When                        uint32
+	Won                         bool
+	Kills, Deaths               int
+	ShotsFired, ShotsHit        int
+	Wave                        int
+}
+
+// ScoreRow is one global high-score entry returned to the door.
+type ScoreRow struct {
+	Mode, Name, BBS, Map string
+	Score                int
+	When                 uint32
+}
+
+// PlayerRow is one player's aggregated career stats on the arena, keyed by
+// Name@BBS. Drives the cumulative (winningest), skill-rate (K/D, accuracy) and
+// survival-wave global boards.
+type PlayerRow struct {
+	Name, BBS                                                                         string
+	Games, Wins, Kills, Deaths, ShotsFired, ShotsHit, BestWave, BestScore, TotalScore int
+}
+
+func EncodeScore(s ScoreSubmit) []byte {
+	c := cursor{b: []byte{MsgScore}}
+	c.str(s.Token)
+	c.str(s.Mode)
+	c.str(s.Name)
+	c.str(s.BBS)
+	c.str(s.Map)
+	c.u32(uint32(s.Score))
+	c.u32(s.When)
+	// Aggregation tail (older doors stop here; the decoder treats it as optional).
+	var won byte
+	if s.Won {
+		won = 1
+	}
+	c.u8(won)
+	c.u16(s.Kills)
+	c.u16(s.Deaths)
+	c.u16(s.ShotsFired)
+	c.u16(s.ShotsHit)
+	c.u16(s.Wave)
+	return c.b
+}
+
+func DecodeScore(p []byte) (ScoreSubmit, bool) {
+	if len(p) == 0 || p[0] != MsgScore {
+		return ScoreSubmit{}, false
+	}
+	c := cursor{b: p, i: 1}
+	s := ScoreSubmit{Token: c.rstr(), Mode: c.rstr(), Name: c.rstr(), BBS: c.rstr(), Map: c.rstr()}
+	s.Score = int(c.ru32())
+	s.When = c.ru32()
+	// Optional aggregation tail (absent from an older door): read only if present
+	// so a legacy submit still validates.
+	if len(c.b)-c.i >= 1 {
+		s.Won = c.ru8() != 0
+	}
+	if len(c.b)-c.i >= 2 {
+		s.Kills = c.ru16()
+	}
+	if len(c.b)-c.i >= 2 {
+		s.Deaths = c.ru16()
+	}
+	if len(c.b)-c.i >= 2 {
+		s.ShotsFired = c.ru16()
+	}
+	if len(c.b)-c.i >= 2 {
+		s.ShotsHit = c.ru16()
+	}
+	if len(c.b)-c.i >= 2 {
+		s.Wave = c.ru16()
+	}
+	return s, !c.err
+}
+
+func EncodePlayersQuery(token string) []byte {
+	c := cursor{b: []byte{MsgPlayersQ}}
+	c.str(token)
+	return c.b
+}
+
+func DecodePlayersQuery(p []byte) (string, bool) {
+	if len(p) == 0 || p[0] != MsgPlayersQ {
+		return "", false
+	}
+	c := cursor{b: p, i: 1}
+	t := c.rstr()
+	return t, !c.err
+}
+
+func EncodePlayers(rows []PlayerRow) []byte {
+	c := cursor{b: []byte{MsgPlayers}}
+	c.u16(len(rows))
+	for _, r := range rows {
+		c.str(r.Name)
+		c.str(r.BBS)
+		c.u32(uint32(r.Games))
+		c.u32(uint32(r.Wins))
+		c.u32(uint32(r.Kills))
+		c.u32(uint32(r.Deaths))
+		c.u32(uint32(r.ShotsFired))
+		c.u32(uint32(r.ShotsHit))
+		c.u32(uint32(r.BestWave))
+		c.u32(uint32(r.BestScore))
+		c.u32(uint32(r.TotalScore))
+	}
+	return c.b
+}
+
+func DecodePlayers(p []byte) ([]PlayerRow, bool) {
+	if len(p) == 0 || p[0] != MsgPlayers {
+		return nil, false
+	}
+	c := cursor{b: p, i: 1}
+	n := c.ru16()
+	out := make([]PlayerRow, 0, n)
+	for i := 0; i < n; i++ {
+		var r PlayerRow
+		r.Name = c.rstr()
+		r.BBS = c.rstr()
+		r.Games = int(c.ru32())
+		r.Wins = int(c.ru32())
+		r.Kills = int(c.ru32())
+		r.Deaths = int(c.ru32())
+		r.ShotsFired = int(c.ru32())
+		r.ShotsHit = int(c.ru32())
+		r.BestWave = int(c.ru32())
+		r.BestScore = int(c.ru32())
+		r.TotalScore = int(c.ru32())
+		out = append(out, r)
+	}
+	if c.err {
+		return nil, false
+	}
+	return out, true
+}
+
+func EncodeScoreQuery(token string) []byte {
+	c := cursor{b: []byte{MsgScoreQ}}
+	c.str(token)
+	return c.b
+}
+
+func DecodeScoreQuery(p []byte) (string, bool) {
+	if len(p) == 0 || p[0] != MsgScoreQ {
+		return "", false
+	}
+	c := cursor{b: p, i: 1}
+	t := c.rstr()
+	return t, !c.err
+}
+
+func EncodeScores(rows []ScoreRow) []byte {
+	c := cursor{b: []byte{MsgScores}}
+	c.u16(len(rows))
+	for _, r := range rows {
+		c.str(r.Mode)
+		c.str(r.Name)
+		c.str(r.BBS)
+		c.str(r.Map)
+		c.u32(uint32(r.Score))
+		c.u32(r.When)
+	}
+	return c.b
+}
+
+func DecodeScores(p []byte) ([]ScoreRow, bool) {
+	if len(p) == 0 || p[0] != MsgScores {
+		return nil, false
+	}
+	c := cursor{b: p, i: 1}
+	n := c.ru16()
+	out := make([]ScoreRow, 0, n)
+	for i := 0; i < n; i++ {
+		r := ScoreRow{Mode: c.rstr(), Name: c.rstr(), BBS: c.rstr(), Map: c.rstr()}
+		r.Score = int(c.ru32())
+		r.When = c.ru32()
+		out = append(out, r)
+	}
+	return out, !c.err
+}
+
+// EncodeChangeChar carries a mid-session character swap on the live game
+// connection: the new loadout (same wire shape as the HELLO loadout tail). The
+// server applies it to the caller's tank so the next respawn comes up as it.
+func EncodeChangeChar(token string, vehicle int, color [3]float64, custom *gm.CustomStats, body int) []byte {
+	c := cursor{b: []byte{MsgChangeChar}}
+	c.str(token)
+	c.u8(byte(vehicle))
+	c.col3(color)
+	if custom != nil {
+		c.u8(1)
+		c.u16(custom.MaxHP)
+		c.f32(custom.Speed)
+		c.f32(custom.HullTurn)
+		c.f32(custom.FireDelay)
+		c.f32(custom.AmmoMax)
+		c.f32(custom.AmmoRegen)
+	} else {
+		c.u8(0)
+	}
+	c.u8(byte(body))
+	return c.b
+}
+
+func DecodeChangeChar(p []byte) (token string, vehicle int, color [3]float64, custom *gm.CustomStats, body int, ok bool) {
+	if len(p) == 0 || p[0] != MsgChangeChar {
+		return "", 0, [3]float64{}, nil, 0, false
+	}
+	c := cursor{b: p, i: 1}
+	token = c.rstr()
+	vehicle = int(c.ru8())
+	color = c.rcol3()
+	if c.ru8() == 1 {
+		cs := gm.CustomStats{MaxHP: c.ru16(), Speed: c.rf32(), HullTurn: c.rf32(), FireDelay: c.rf32(), AmmoMax: c.rf32(), AmmoRegen: c.rf32()}
+		if !c.err {
+			custom = &cs
+		}
+	}
+	body = int(c.ru8())
+	if c.err {
+		return "", 0, [3]float64{}, nil, 0, false
+	}
+	return token, vehicle, color, custom, body, true
+}
 
 // PublishVehicle is the HELLO vehicle sentinel marking a publish-only connection
 // (no tank is spawned; the server reads one MsgPublish and replies MsgPubAck).
@@ -59,7 +331,7 @@ func ReadMsg(r io.Reader) ([]byte, error) {
 
 // ---- HELLO ----
 
-func EncodeHello(token, bbsid, handle string, vehicle int, color [3]float64, custom *gm.CustomStats, body int) []byte {
+func EncodeHello(token, bbsid, handle string, vehicle int, color [3]float64, custom *gm.CustomStats, body int, clientProto int, clientVer, party string) []byte {
 	c := cursor{b: []byte{MsgHello}}
 	c.str(token)
 	c.str(bbsid)
@@ -78,22 +350,29 @@ func EncodeHello(token, bbsid, handle string, vehicle int, color [3]float64, cus
 		c.u8(0)
 	}
 	c.u8(byte(body)) // render silhouette (BodyTank or a creature)
+	// Version tail: the wire-compat number (for the join guard) + the human
+	// release string (so the server can name a target version in a reject) + the
+	// party name to team up with ("" = solo).
+	c.u16(clientProto)
+	c.str(clientVer)
+	c.str(party)
 	return c.b
 }
 
-func DecodeHello(p []byte) (token, bbsid, handle string, vehicle int, color [3]float64, custom *gm.CustomStats, body int, ok bool) {
+func DecodeHello(p []byte) (token, bbsid, handle string, vehicle int, color [3]float64, custom *gm.CustomStats, body int, clientProto int, clientVer, party string, ok bool) {
 	if len(p) == 0 || p[0] != MsgHello {
-		return "", "", "", 0, [3]float64{}, nil, 0, false
+		return "", "", "", 0, [3]float64{}, nil, 0, 0, "", "", false
 	}
 	c := cursor{b: p, i: 1}
 	token = c.rstr()
 	bbsid = c.rstr()
 	handle = c.rstr()
 	if c.err {
-		return "", "", "", 0, [3]float64{}, nil, 0, false
+		return "", "", "", 0, [3]float64{}, nil, 0, 0, "", "", false
 	}
-	// vehicle/color/custom/body are an optional tail (an older client may omit
-	// them); guard with explicit length checks so a short HELLO still decodes.
+	// vehicle/color/custom/body/version are an optional tail (an older client may
+	// omit them); guard with explicit length checks so a short HELLO still decodes
+	// (clientProto stays 0 for a pre-versioning client, which the guard rejects).
 	if len(p)-c.i >= 1 {
 		vehicle = int(c.ru8())
 	}
@@ -109,8 +388,37 @@ func DecodeHello(p []byte) (token, bbsid, handle string, vehicle int, color [3]f
 	if len(p)-c.i >= 1 {
 		body = int(c.ru8())
 	}
+	if len(p)-c.i >= 2 {
+		clientProto = c.ru16()
+	}
+	if len(p)-c.i >= 1 {
+		clientVer = c.rstr()
+	}
+	if len(p)-c.i >= 1 {
+		party = c.rstr()
+	}
 	ok = true
 	return
+}
+
+// ---- REJECT ----
+
+func EncodeReject(reason string) []byte {
+	c := cursor{b: []byte{MsgReject}}
+	c.str(reason)
+	return c.b
+}
+
+func DecodeReject(p []byte) (reason string, ok bool) {
+	if len(p) == 0 || p[0] != MsgReject {
+		return "", false
+	}
+	c := cursor{b: p, i: 1}
+	reason = c.rstr()
+	if c.err {
+		return "", false
+	}
+	return reason, true
 }
 
 // ---- WELCOME ----
@@ -148,6 +456,18 @@ func EncodeInput(in gm.Input) []byte {
 	if in.Fire2 {
 		b2 |= 2
 	}
+	if in.Drop {
+		b2 |= 4
+	}
+	if in.StrafeL {
+		b2 |= 8
+	}
+	if in.StrafeR {
+		b2 |= 16
+	}
+	if in.Ready {
+		b2 |= 32
+	}
 	return []byte{MsgInput, b, vote, b2}
 }
 
@@ -167,7 +487,8 @@ func DecodeInput(p []byte) (gm.Input, bool) {
 	return gm.Input{
 		Throttle: b&1 != 0, Reverse: b&2 != 0, HullL: b&4 != 0, HullR: b&8 != 0,
 		TurretL: b&16 != 0, TurretR: b&32 != 0, Fire: b&64 != 0, Jump: b&128 != 0,
-		Recenter: b2&1 != 0, Fire2: b2&2 != 0,
+		Recenter: b2&1 != 0, Fire2: b2&2 != 0, Drop: b2&4 != 0,
+		StrafeL: b2&8 != 0, StrafeR: b2&16 != 0, Ready: b2&32 != 0,
 		Vote: vote,
 	}, true
 }
@@ -177,6 +498,13 @@ func DecodeInput(p []byte) (gm.Input, bool) {
 func EncodeMap(m gm.Map) []byte {
 	w := &cursor{}
 	w.u8(MsgMap)
+	w.wmapBody(m)
+	return w.b
+}
+
+// wmapBody writes a map's full definition (no message tag). Shared by MsgMap and
+// the MsgMapPreview lazy-preview message so the two stay byte-compatible.
+func (w *cursor) wmapBody(m gm.Map) {
 	w.str(m.Name)
 	w.f32(m.Size)
 	w.u16(len(m.Obstacles))
@@ -218,7 +546,51 @@ func EncodeMap(m gm.Map) []byte {
 	} else {
 		w.u8(0)
 	}
+}
+
+// EncodeMapReq asks the server for map index i's geometry (lobby preview). The
+// index matches the lobby/vote list (== gm.Maps index server-side).
+func EncodeMapReq(i int) []byte {
+	w := &cursor{}
+	w.u8(MsgMapReq)
+	w.u16(i)
 	return w.b
+}
+
+func DecodeMapReq(p []byte) (int, bool) {
+	if len(p) == 0 || p[0] != MsgMapReq {
+		return 0, false
+	}
+	r := &cursor{b: p, i: 1}
+	i := r.ru16()
+	if r.err {
+		return 0, false
+	}
+	return i, true
+}
+
+// EncodeMapPreview answers a MsgMapReq: the requested index plus that map's full
+// geometry. Distinct from MsgMap so the client renders a preview without swapping
+// its active arena.
+func EncodeMapPreview(i int, m gm.Map) []byte {
+	w := &cursor{}
+	w.u8(MsgMapPreview)
+	w.u16(i)
+	w.wmapBody(m)
+	return w.b
+}
+
+func DecodeMapPreview(p []byte) (int, gm.Map, bool) {
+	if len(p) == 0 || p[0] != MsgMapPreview {
+		return 0, gm.Map{}, false
+	}
+	r := &cursor{b: p, i: 1}
+	i := r.ru16()
+	m, ok := r.rmapBody()
+	if !ok {
+		return 0, gm.Map{}, false
+	}
+	return i, m, true
 }
 
 // trait-presence bits in the entity wire byte.
@@ -346,6 +718,11 @@ func DecodeMap(p []byte) (gm.Map, bool) {
 		return gm.Map{}, false
 	}
 	r := &cursor{b: p, i: 1}
+	return r.rmapBody()
+}
+
+// rmapBody reads a map's full definition (cursor positioned past the tag).
+func (r *cursor) rmapBody() (gm.Map, bool) {
 	var m gm.Map
 	m.Name = r.rstr()
 	m.Size = r.rf32()
@@ -382,6 +759,7 @@ func DecodeMap(p []byte) (gm.Map, bool) {
 type LobbyEntry struct {
 	Name string
 	Mode gm.Mode
+	Hash uint32 // content fingerprint (MapHash) for the preview cache
 }
 
 // EncodeLobby sends the votable pairings (one per map in the pool). The caller
@@ -391,8 +769,13 @@ func EncodeLobby() []byte {
 	w.u8(MsgLobby)
 	w.u16(len(gm.Maps))
 	for i := range gm.Maps {
-		w.str(gm.Maps[i].Name)
+		name := gm.Maps[i].Name
+		if c := gm.MapCapacity(gm.Maps[i]); c > 0 {
+			name = name + " " + strconv.Itoa(c) + "P" // capacity tag rides the name
+		}
+		w.str(name)
 		w.u8(byte(gm.NaturalMode(gm.Maps[i])))
+		w.u32(MapHash(gm.Maps[i]))
 	}
 	return w.b
 }
@@ -405,7 +788,7 @@ func DecodeLobby(p []byte) ([]LobbyEntry, bool) {
 	n := r.ru16()
 	out := make([]LobbyEntry, 0, n)
 	for ; n > 0; n-- {
-		out = append(out, LobbyEntry{Name: r.rstr(), Mode: gm.Mode(r.ru8())})
+		out = append(out, LobbyEntry{Name: r.rstr(), Mode: gm.Mode(r.ru8()), Hash: r.ru32()})
 	}
 	if r.err {
 		return nil, false
@@ -413,24 +796,260 @@ func DecodeLobby(p []byte) ([]LobbyEntry, bool) {
 	return out, true
 }
 
+// ---- STATUS ----
+
+type ArenaStatus struct {
+	Humans   int
+	Phase    gm.Phase
+	Mode     gm.Mode
+	Map      string
+	Presence []Presence
+	Chat     []ChatMessage
+	// Version tail: the arena's own release string, and the client version it
+	// recommends (the released build matching this server). Empty from an older
+	// server. Lets the menu nudge "update available" without contacting GitHub.
+	ServerVersion string
+	LatestClient  string
+}
+
+type Presence struct {
+	Session string
+	BBSID   string
+	Handle  string
+	State   string
+	Detail  string
+	Updated uint32
+	Party   string // party name the session belongs to ("" = solo); drives team grouping
+}
+
+type ChatMessage struct {
+	Seq    uint32
+	Time   uint32
+	BBSID  string
+	Handle string
+	Text   string
+}
+
+func EncodeStatusQuery(token string) []byte {
+	w := &cursor{}
+	w.u8(MsgStatusQ)
+	w.str(token)
+	return w.b
+}
+
+func DecodeStatusQuery(p []byte) (string, bool) {
+	if len(p) == 0 || p[0] != MsgStatusQ {
+		return "", false
+	}
+	r := &cursor{b: p, i: 1}
+	token := r.rstr()
+	if r.err {
+		return "", false
+	}
+	return token, true
+}
+
+func EncodeStatus(st ArenaStatus) []byte {
+	w := &cursor{}
+	w.u8(MsgStatus)
+	w.u16(st.Humans)
+	w.u8(byte(st.Phase))
+	w.u8(byte(st.Mode))
+	w.str(st.Map)
+	w.u16(len(st.Presence))
+	for _, p := range st.Presence {
+		w.str(p.Session)
+		w.str(p.BBSID)
+		w.str(p.Handle)
+		w.str(p.State)
+		w.str(p.Detail)
+		w.u32(p.Updated)
+	}
+	w.u16(len(st.Chat))
+	for _, m := range st.Chat {
+		w.u32(m.Seq)
+		w.u32(m.Time)
+		w.str(m.BBSID)
+		w.str(m.Handle)
+		w.str(m.Text)
+	}
+	w.str(st.ServerVersion) // version tail (older clients ignore the extra bytes)
+	w.str(st.LatestClient)
+	// Party tail: one name per presence (same order), as a trailing block rather
+	// than a per-record field, so an older client that stops after the version
+	// tail still decodes the presence list correctly (status is not version-gated).
+	w.u16(len(st.Presence))
+	for _, p := range st.Presence {
+		w.str(p.Party)
+	}
+	return w.b
+}
+
+func DecodeStatus(p []byte) (ArenaStatus, bool) {
+	if len(p) == 0 || p[0] != MsgStatus {
+		return ArenaStatus{}, false
+	}
+	r := &cursor{b: p, i: 1}
+	st := ArenaStatus{
+		Humans: int(r.ru16()),
+		Phase:  gm.Phase(r.ru8()),
+		Mode:   gm.Mode(r.ru8()),
+		Map:    r.rstr(),
+	}
+	for n := r.ru16(); n > 0; n-- {
+		st.Presence = append(st.Presence, Presence{
+			Session: r.rstr(),
+			BBSID:   r.rstr(),
+			Handle:  r.rstr(),
+			State:   r.rstr(),
+			Detail:  r.rstr(),
+			Updated: r.ru32(),
+		})
+	}
+	for n := r.ru16(); n > 0; n-- {
+		st.Chat = append(st.Chat, ChatMessage{
+			Seq:    r.ru32(),
+			Time:   r.ru32(),
+			BBSID:  r.rstr(),
+			Handle: r.rstr(),
+			Text:   r.rstr(),
+		})
+	}
+	if r.err {
+		return ArenaStatus{}, false
+	}
+	// Optional version tail (absent from an older server): read only if present
+	// so the err check above stays the real validity gate.
+	if len(r.b)-r.i >= 1 {
+		st.ServerVersion = r.rstr()
+	}
+	if len(r.b)-r.i >= 1 {
+		st.LatestClient = r.rstr()
+	}
+	// Optional party tail (parallel to Presence, by index). Absent from an older
+	// server, in which case every session reads as solo.
+	if len(r.b)-r.i >= 2 {
+		for i := r.ru16(); i > 0; i-- {
+			name := r.rstr()
+			if idx := len(st.Presence) - int(i); idx >= 0 && idx < len(st.Presence) {
+				st.Presence[idx].Party = name
+			}
+		}
+	}
+	return st, true
+}
+
+// EncodePartyKick: a party owner boots a member. ownerHandle/party let the
+// server verify ownership (the party is named after its creator's handle);
+// target is the booted member's handle.
+func EncodePartyKick(token, ownerHandle, party, target string) []byte {
+	w := &cursor{}
+	w.u8(MsgPartyKick)
+	w.str(token)
+	w.str(ownerHandle)
+	w.str(party)
+	w.str(target)
+	return w.b
+}
+
+func DecodePartyKick(p []byte) (token, ownerHandle, party, target string, ok bool) {
+	if len(p) == 0 || p[0] != MsgPartyKick {
+		return "", "", "", "", false
+	}
+	r := &cursor{b: p, i: 1}
+	token, ownerHandle, party, target = r.rstr(), r.rstr(), r.rstr(), r.rstr()
+	if r.err {
+		return "", "", "", "", false
+	}
+	return token, ownerHandle, party, target, true
+}
+
+func EncodePresence(token string, p Presence) []byte {
+	w := &cursor{}
+	w.u8(MsgPresence)
+	w.str(token)
+	w.str(p.Session)
+	w.str(p.BBSID)
+	w.str(p.Handle)
+	w.str(p.State)
+	w.str(p.Detail)
+	w.str(p.Party) // appended: older servers ignore the extra bytes
+	return w.b
+}
+
+func DecodePresence(p []byte) (token string, pr Presence, ok bool) {
+	if len(p) == 0 || p[0] != MsgPresence {
+		return "", Presence{}, false
+	}
+	r := &cursor{b: p, i: 1}
+	token = r.rstr()
+	pr = Presence{
+		Session: r.rstr(),
+		BBSID:   r.rstr(),
+		Handle:  r.rstr(),
+		State:   r.rstr(),
+		Detail:  r.rstr(),
+	}
+	if r.err {
+		return "", Presence{}, false
+	}
+	if len(r.b)-r.i >= 1 { // optional appended party (older clients omit it)
+		pr.Party = r.rstr()
+	}
+	return token, pr, true
+}
+
+func EncodeChat(token string, m ChatMessage) []byte {
+	w := &cursor{}
+	w.u8(MsgChat)
+	w.str(token)
+	w.str(m.BBSID)
+	w.str(m.Handle)
+	w.str(m.Text)
+	return w.b
+}
+
+func DecodeChat(p []byte) (token string, m ChatMessage, ok bool) {
+	if len(p) == 0 || p[0] != MsgChat {
+		return "", ChatMessage{}, false
+	}
+	r := &cursor{b: p, i: 1}
+	token = r.rstr()
+	m = ChatMessage{
+		BBSID:  r.rstr(),
+		Handle: r.rstr(),
+		Text:   r.rstr(),
+	}
+	if r.err {
+		return "", ChatMessage{}, false
+	}
+	return token, m, true
+}
+
 // ---- PUBLISH ----
 
 // EncodePublish wraps a map as a publish request (same body as MsgMap).
+// EncodePublish sends the author map as JSON (not the lean wire codec), so the full
+// definition - event vars/logic, entity tags/watch/behaviors, rules - reaches the
+// arena repo intact. The wire EncodeMap stays lean for client rendering/collision.
 func EncodePublish(m gm.Map) []byte {
-	b := EncodeMap(m)
-	b[0] = MsgPublish
-	return b
+	data, err := gm.MapJSON(m)
+	if err != nil {
+		return []byte{MsgPublish}
+	}
+	return append([]byte{MsgPublish}, data...)
 }
 
-// DecodePublish reads a publish request back into a map.
+// DecodePublish reads a publish request (JSON body) back into a map.
 func DecodePublish(p []byte) (gm.Map, bool) {
 	if len(p) == 0 || p[0] != MsgPublish {
 		return gm.Map{}, false
 	}
-	q := make([]byte, len(p))
-	copy(q, p)
-	q[0] = MsgMap // reuse the map decoder
-	return DecodeMap(q)
+	m, err := gm.ParseMapJSON(p[1:])
+	if err != nil {
+		return gm.Map{}, false
+	}
+	return m, true
 }
 
 func EncodePubAck(ok bool, msg string) []byte {
@@ -477,6 +1096,11 @@ func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.Sh
 		w.i16(k.Victim)
 		w.u8(byte(k.Cause))
 	}
+	w.u8(byte(min255(len(m.Events)))) // author toast messages (this tick)
+	for _, ev := range m.Events {
+		w.str(ev)
+	}
+	w.u8(byte(min255(m.Ready))) // lobby: players locked in
 	w.u16(len(tanks))
 	for _, t := range tanks {
 		w.u16(t.ID)
@@ -512,7 +1136,28 @@ func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.Sh
 		if t.Rapid {
 			fl |= 64
 		}
+		if t.Shell {
+			fl |= 128
+		}
 		w.u8(fl)
+		var fl2 byte // second status byte (the first is full)
+		if t.Burning {
+			fl2 |= 1
+		}
+		if t.Poisoned {
+			fl2 |= 2
+		}
+		if t.ShieldUp {
+			fl2 |= 4
+		}
+		if t.Bleeding {
+			fl2 |= 8
+		}
+		if t.Healing {
+			fl2 |= 16
+		}
+		w.u8(fl2)
+		w.u8(c255(t.ShieldFrac)) // minotaur barrier charge 0..1 (HUD gauge + fade)
 		w.u16(t.Kills)
 		w.u16(t.Deaths)
 		w.f32(t.RespawnIn)
@@ -522,6 +1167,11 @@ func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.Sh
 		w.i16(t.Team)
 		w.u16(t.HoldScore)
 		w.u8(byte(t.Ammo * 255))
+		w.u16(t.ShotsFired) // per-match stat tallies
+		w.u16(t.ShotsHit)
+		w.u16(t.Pickups)
+		w.u16(t.DmgDealt)
+		w.u16(t.HealDone)
 		w.str(t.Name)
 	}
 	w.u16(len(shots))
@@ -530,6 +1180,7 @@ func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.Sh
 		w.f32(s.Pos.Y) // Y matters now (grenade arcs, beams)
 		w.f32(s.Pos.Z)
 		w.u8(s.Vis)
+		w.i16(s.Owner)
 	}
 	w.u16(len(flags))
 	for _, f := range flags {
@@ -558,6 +1209,7 @@ func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.Sh
 		w.u8(fl)
 		w.f32(e.Yaw)
 		w.f32(e.Pitch)
+		w.v3(e.Pos) // dynamic position (payload/moved entities)
 	}
 	w.u16(len(zones))
 	for _, z := range zones {
@@ -597,6 +1249,11 @@ func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, sh
 	for i := 0; i < nk; i++ {
 		m.Kills = append(m.Kills, gm.KillEvent{Killer: r.ri16(), Victim: r.ri16(), Cause: gm.KillCause(r.ru8())})
 	}
+	nev := int(r.ru8())
+	for i := 0; i < nev; i++ {
+		m.Events = append(m.Events, r.rstr())
+	}
+	m.Ready = int(r.ru8())
 	nt := r.ru16()
 	for k := 0; k < nt; k++ {
 		var t gm.TankSnap
@@ -615,6 +1272,14 @@ func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, sh
 		t.Carrying = fl&16 != 0
 		t.Cloak = fl&32 != 0
 		t.Rapid = fl&64 != 0
+		t.Shell = fl&128 != 0
+		fl2 := r.ru8()
+		t.Burning = fl2&1 != 0
+		t.Poisoned = fl2&2 != 0
+		t.ShieldUp = fl2&4 != 0
+		t.Bleeding = fl2&8 != 0
+		t.Healing = fl2&16 != 0
+		t.ShieldFrac = float64(r.ru8()) / 255
 		t.Kills = r.ru16()
 		t.Deaths = r.ru16()
 		t.RespawnIn = r.rf32()
@@ -624,13 +1289,20 @@ func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, sh
 		t.Team = r.ri16()
 		t.HoldScore = r.ru16()
 		t.Ammo = float64(r.ru8()) / 255
+		t.ShotsFired = r.ru16()
+		t.ShotsHit = r.ru16()
+		t.Pickups = r.ru16()
+		t.DmgDealt = r.ru16()
+		t.HealDone = r.ru16()
 		t.Name = r.rstr()
 		tanks = append(tanks, t)
 	}
 	ns := r.ru16()
 	for k := 0; k < ns; k++ {
 		x, y, z := r.rf32(), r.rf32(), r.rf32()
-		shots = append(shots, gm.ShotSnap{Pos: gm.V3{X: x, Y: y, Z: z}, Vis: r.ru8()})
+		vis := r.ru8()
+		owner := r.ri16()
+		shots = append(shots, gm.ShotSnap{Pos: gm.V3{X: x, Y: y, Z: z}, Vis: vis, Owner: owner})
 	}
 	nf := r.ru16()
 	for k := 0; k < nf; k++ {
@@ -657,6 +1329,7 @@ func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, sh
 		e.Dead = r.ru8()&1 != 0
 		e.Yaw = r.rf32()
 		e.Pitch = r.rf32()
+		e.Pos = r.rv3()
 		ents = append(ents, e)
 	}
 	nz := r.ru16()

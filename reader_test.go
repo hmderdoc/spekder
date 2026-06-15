@@ -34,6 +34,7 @@ func newReaderOnBytes(t *testing.T, b []byte) (*input, *os.File) {
 		t.Fatalf("pipe: %v", err)
 	}
 	in := &input{quitCh: make(chan struct{}), events: make(chan menuKey, 32), runes: make(chan rune, 64)}
+	in.setBinds(effectiveBinds(nil)) // default key bindings, as main() applies at startup (effectiveBinds returns one map)
 	go in.reader(pipeTerm{r: r})
 	if _, err := w.Write(b); err != nil {
 		t.Fatalf("write: %v", err)

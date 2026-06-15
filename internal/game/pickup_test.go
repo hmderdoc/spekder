@@ -5,6 +5,12 @@ import "testing"
 func startDM(t *testing.T, bots int) (*World, int) {
 	t.Helper()
 	w := NewWorld(bots, ModeDeathmatch)
+	for i := range Maps { // pin a plain map (no per-map Rules) so DM keeps its default timeout
+		if Maps[i].Rules == nil {
+			w.PinMap(i)
+			break
+		}
+	}
 	me := w.AddPlayer([3]float64{}, 1, "P")
 	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{me: {}})
 	if w.Phase != PhaseActive {

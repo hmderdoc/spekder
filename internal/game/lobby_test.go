@@ -2,49 +2,41 @@ package game
 
 import "testing"
 
-// TestNaturalMode: a map's implied mode follows its objectives.
-func TestNaturalMode(t *testing.T) {
-	cases := []struct {
-		ents []Entity
-		want Mode
-	}{
-		{nil, ModeDeathmatch},
-		{[]Entity{{Flag: &FlagTrait{Team: -1}}}, ModeFlagRun},
-		{[]Entity{{Flag: &FlagTrait{Team: 0}}}, ModeCTF},
-		{[]Entity{{Zone: &ZoneTrait{Capture: 4}}}, ModeFFAKotH},
-		{[]Entity{{Zone: &ZoneTrait{}}, {Flag: &FlagTrait{Team: 1}}}, ModeCTF}, // team flag wins
+// The vote lobby announces commits, and once every human locks in (ENTER) it
+// fast-forwards instead of waiting out the full timer.
+func TestLobbyVoteFastForwardAndLog(t *testing.T) {
+	if len(Maps) == 0 {
+		t.Skip("no maps registered")
 	}
-	for i, c := range cases {
-		if got := NaturalMode(Map{Entities: c.ents}); got != c.want {
-			t.Errorf("case %d: got %v want %v", i, got, c.want)
-		}
-	}
-}
+	w := NewWorld(0, ModeDeathmatch)
+	w.Lobby = true
+	me := w.AddPlayer([3]float64{}, 0, "DERDOK")
+	w.Tanks[me].vote = -1 // as the real lobby entry resets it
+	w.Phase, w.Timer = PhaseLobby, lobbyTime
 
-// TestPickNextPairingVote: the most-voted map wins, with its implied mode; a lone
-// human's vote therefore decides the pairing.
-func TestPickNextPairingVote(t *testing.T) {
-	saved := Maps
-	defer func() { Maps = saved }()
-	Maps = []Map{
-		{Name: "A"}, // DM
-		{Name: "B", Entities: []Entity{{Zone: &ZoneTrait{Capture: 4}}}}, // KotH
-		{Name: "C"},
+	const dt = 1.0 / 30
+	target := 0
+
+	// Commit a vote (not yet locked): one announcement, timer keeps ticking.
+	w.Update(dt, map[int]Input{me: {Vote: target}})
+	if log := w.DrainVoteLog(); len(log) != 1 || log[0].Who != "DERDOK" || log[0].MapIdx != target {
+		t.Fatalf("want one vote event (DERDOK -> map %d), got %+v", target, log)
 	}
-	w := &World{Lobby: true}
-	w.Tanks = []Tank{
-		{Bot: false, vote: 1}, // human votes map B
-		{Bot: true, vote: 0},  // bots don't count
+	// Re-sending the same vote must not re-announce.
+	w.Update(dt, map[int]Input{me: {Vote: target}})
+	if log := w.DrainVoteLog(); len(log) != 0 {
+		t.Fatalf("re-vote should not re-log: %+v", log)
 	}
-	idx, mode := w.pickNextPairing()
-	if idx != 1 || mode != ModeFFAKotH {
-		t.Fatalf("got (idx=%d mode=%v) want (1, KotH)", idx, mode)
+	if w.Timer <= lobbyFastFwd {
+		t.Fatalf("timer fast-forwarded without anyone locking in: %.2f", w.Timer)
 	}
 
-	// No human votes: rotate from the current map, don't stall.
-	w.Tanks[0].vote = -1
-	w.MapIdx = 0
-	if idx, _ := w.pickNextPairing(); idx != 1 {
-		t.Fatalf("no-vote rotation: got %d want 1", idx)
+	// Lock in with ENTER: the only human is ready, so the lobby fast-forwards.
+	w.Update(dt, map[int]Input{me: {Vote: target, Ready: true}})
+	if w.Match().Ready != 1 {
+		t.Fatalf("ready count = %d, want 1", w.Match().Ready)
+	}
+	if w.Timer > lobbyFastFwd+1e-6 {
+		t.Fatalf("timer should fast-forward to %.2f once locked, got %.2f", lobbyFastFwd, w.Timer)
 	}
 }

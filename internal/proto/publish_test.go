@@ -43,3 +43,32 @@ func TestPublishRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestPublishCarriesBehaviors: publish goes via JSON, so event vars/logic and
+// entity tag/watch/behaviors survive the round-trip to the arena repo.
+func TestPublishCarriesBehaviors(t *testing.T) {
+	m := gm.Map{
+		Name: "WB", Version: 4, Size: 16,
+		Vars:  map[string]int{"phase": 1},
+		Logic: []gm.Behavior{{On: "start", Do: []gm.Action{{Act: "message", Text: "hi"}}}},
+		Entities: []gm.Entity{{
+			Kind: "turret", Tag: "boss", Half: gm.V3{X: 1, Y: 1, Z: 1},
+			Turret: &gm.TurretTrait{Range: 10}, Destruct: &gm.DestructTrait{MaxHP: 100},
+			Watch: []float64{50},
+			Behaviors: []gm.Behavior{{On: "hp_below", Once: true,
+				When: []gm.Condition{{Kind: "hp", Sel: "self", Op: "<=", N: 50}},
+				Do:   []gm.Action{{Act: "spawn", What: "spider", Count: 2}}}},
+		}},
+	}
+	got, ok := DecodePublish(EncodePublish(m))
+	if !ok {
+		t.Fatal("DecodePublish failed")
+	}
+	if got.Vars["phase"] != 1 || len(got.Logic) != 1 {
+		t.Fatalf("director logic lost: %+v %+v", got.Vars, got.Logic)
+	}
+	e := got.Entities[0]
+	if e.Tag != "boss" || len(e.Watch) != 1 || len(e.Behaviors) != 1 || e.Behaviors[0].Do[0].What != "spider" {
+		t.Fatalf("entity behaviors lost over publish: %+v", e)
+	}
+}

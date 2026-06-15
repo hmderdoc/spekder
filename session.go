@@ -41,8 +41,10 @@ type viewState struct {
 	flagsLeft  int
 	flagsTotal int
 	votes      []int              // lobby vote tally per map index (len = len(pairings))
+	lobbyReady int                // lobby: players who have locked their vote (ENTER)
 	pairings   []proto.LobbyEntry // votable map+mode candidates (online lobby)
 	kills      []gm.KillEvent     // kills this tick (kill feed / death banner)
+	events     []string           // author toast messages this tick (event system)
 	mapIdx     int                // active map index
 	wave       int                // Survival: current wave
 	teamScore  [2]int             // CTF: captures per team
@@ -61,8 +63,9 @@ type session interface {
 
 // offlineSession is the local single-player game: bots + us, simulated here.
 type offlineSession struct {
-	w  *gm.World
-	me int
+	w    *gm.World
+	me   int
+	diff gm.Difficulty // the bot tier this match ran on (for score weighting)
 }
 
 func newOfflineSession(numBots int, mode gm.Mode, vehicle int, diff gm.Difficulty, aimAssist bool, name string, color [3]float64, custom *gm.CustomStats, body int) *offlineSession {
@@ -91,7 +94,7 @@ func newOfflineSession(numBots int, mode gm.Mode, vehicle int, diff gm.Difficult
 			logf("offline: pinned to map %q (index %d)", want, idx)
 		}
 	}
-	return &offlineSession{w: w, me: w.AddPlayerCustom(color, vehicle, name, customVeh(vehicle, custom), body)}
+	return &offlineSession{w: w, me: w.AddPlayerCustom(color, vehicle, name, customVeh(vehicle, custom), body), diff: diff}
 }
 
 func (s *offlineSession) step(dt float64, in gm.Input) viewState {
@@ -113,11 +116,17 @@ func (s *offlineSession) step(dt float64, in gm.Input) viewState {
 		mode: m.Mode, phase: m.Phase, timer: m.Timer, winnerID: m.WinnerID,
 		flags: flags, pickups: pickups, ents: ents, zones: zones, flagsLeft: m.FlagsLeft, flagsTotal: m.FlagsTotal, mapIdx: m.MapIdx,
 		wave: m.Wave, teamScore: m.TeamScore, winnerTeam: m.WinnerTeam, myTeam: self.Team,
-		kills: m.Kills, gmap: s.w.ActiveMap(),
+		kills: m.Kills, events: m.Events, gmap: s.w.ActiveMap(),
 	}
 }
 
 func (s *offlineSession) close() {}
+
+// changeChar swaps the local player's character; like the arena path it takes
+// effect on the next respawn (SetPlayerLoadout leaves live HP alone).
+func (s *offlineSession) changeChar(vehicle, body int, color [3]float64, custom *gm.CustomStats) {
+	s.w.SetPlayerLoadout(s.me, color, vehicle, customVeh(vehicle, custom), body)
+}
 
 // newOfflineOnMap builds an offline session pinned to a specific map index (used
 // by the editor's playtest, which temporarily appends the working map to gm.Maps).
@@ -131,9 +140,18 @@ func customVeh(chassis int, cs *gm.CustomStats) *gm.Vehicle {
 }
 
 func newOfflineOnMap(mapIdx, numBots int, mode gm.Mode, vehicle int, diff gm.Difficulty, aimAssist bool, name string, color [3]float64, custom *gm.CustomStats, body int) *offlineSession {
+	if mapIdx >= 0 && mapIdx < len(gm.Maps) { // a scripted map can fix its own fill-bot count
+		if r := gm.Maps[mapIdx].Rules; r != nil && r.Bots >= 0 {
+			numBots = r.Bots
+		}
+		// And a capped map trims the fill so player + bots fit its size.
+		if c := gm.MapCapacity(gm.Maps[mapIdx]); c > 0 && numBots > c-1 {
+			numBots = c - 1
+		}
+	}
 	w := gm.NewWorld(numBots, mode)
 	w.PinMap(mapIdx)
 	w.SetDifficulty(diff)
 	w.SetAimAssist(aimAssist)
-	return &offlineSession{w: w, me: w.AddPlayerCustom(color, vehicle, name, customVeh(vehicle, custom), body)}
+	return &offlineSession{w: w, me: w.AddPlayerCustom(color, vehicle, name, customVeh(vehicle, custom), body), diff: diff}
 }

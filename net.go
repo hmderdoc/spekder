@@ -26,9 +26,97 @@ const (
 // spekder.ini only says WHERE the arena is; the caller chooses to join via the menu.
 func arenaConfigured() bool { return loadINI(defaultINIPath())["server"] != "" }
 
+func arenaStatus() (proto.ArenaStatus, error) {
+	ini := loadINI(defaultINIPath())
+	host := ini["server"]
+	if host == "" {
+		return proto.ArenaStatus{}, &netErr{"no arena server configured"}
+	}
+	port := ini["port"]
+	if port == "" {
+		port = "7700"
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 750*time.Millisecond)
+	if err != nil {
+		return proto.ArenaStatus{}, err
+	}
+	defer conn.Close()
+	if err := proto.WriteMsg(conn, proto.EncodeStatusQuery(ini["token"])); err != nil {
+		return proto.ArenaStatus{}, err
+	}
+	conn.SetReadDeadline(time.Now().Add(750 * time.Millisecond))
+	msg, err := proto.ReadMsg(conn)
+	if err != nil {
+		return proto.ArenaStatus{}, err
+	}
+	st, ok := proto.DecodeStatus(msg)
+	if !ok {
+		return proto.ArenaStatus{}, &netErr{"server did not send STATUS"}
+	}
+	return st, nil
+}
+
+func sendChat(dropfile, text string) error {
+	ini := loadINI(defaultINIPath())
+	host := ini["server"]
+	if host == "" {
+		return &netErr{"no arena server configured"}
+	}
+	port := ini["port"]
+	if port == "" {
+		port = "7700"
+	}
+	bbsid, handle := door32Identity(dropfile)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 750*time.Millisecond)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	conn.SetWriteDeadline(time.Now().Add(750 * time.Millisecond))
+	return proto.WriteMsg(conn, proto.EncodeChat(ini["token"], proto.ChatMessage{
+		BBSID:  bbsid,
+		Handle: handle,
+		Text:   text,
+	}))
+}
+
+// sendPartyKick asks the arena to boot target from the caller's party (one-shot,
+// best-effort). The server validates that the caller owns the party.
+func sendPartyKick(dropfile, party, target string) error {
+	ini := loadINI(defaultINIPath())
+	host := ini["server"]
+	if host == "" {
+		return &netErr{"no arena server configured"}
+	}
+	port := ini["port"]
+	if port == "" {
+		port = "7700"
+	}
+	_, handle := door32Identity(dropfile)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 750*time.Millisecond)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	conn.SetWriteDeadline(time.Now().Add(750 * time.Millisecond))
+	return proto.WriteMsg(conn, proto.EncodePartyKick(ini["token"], handle, party, target))
+}
+
+// syncPartyFromStatus reconciles our local party with the server's view (found by
+// our own session in the presence list) - so being kicked, which the server
+// reflects by reporting our party as empty, takes effect locally.
+func syncPartyFromStatus(pres []proto.Presence, mySession string) {
+	for _, p := range pres {
+		if p.Session == mySession {
+			setParty(p.Party)
+			return
+		}
+	}
+}
+
 // connectArena dials the configured arena server and joins as a client with the
 // chosen vehicle.
-func connectArena(vehicle, body int, color [3]float64, custom *gm.CustomStats) (*netSession, error) {
+func connectArena(dropfile string, vehicle, body int, color [3]float64, custom *gm.CustomStats) (*netSession, error) {
 	ini := loadINI(defaultINIPath())
 	host := ini["server"]
 	if host == "" {
@@ -38,7 +126,7 @@ func connectArena(vehicle, body int, color [3]float64, custom *gm.CustomStats) (
 	if port == "" {
 		port = "7700"
 	}
-	bbsid, handle := door32Identity("DOOR32.SYS")
+	bbsid, handle := door32Identity(dropfile) // the real dropfile, not a cwd guess
 	ns, err := dialServer(host, port, ini["token"], bbsid, handle, vehicle, color, custom, body)
 	if err != nil {
 		return nil, err
@@ -60,13 +148,13 @@ func publishMap(m gm.Map) (string, error) {
 	if port == "" {
 		port = "7700"
 	}
-	bbsid, handle := door32Identity("DOOR32.SYS")
+	bbsid, handle := door32Identity(doorDropfile)
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 3*time.Second)
 	if err != nil {
 		return "", err
 	}
 	defer conn.Close()
-	if err := proto.WriteMsg(conn, proto.EncodeHello(ini["token"], bbsid, handle, proto.PublishVehicle, [3]float64{}, nil, gm.BodyTank)); err != nil {
+	if err := proto.WriteMsg(conn, proto.EncodeHello(ini["token"], bbsid, handle, proto.PublishVehicle, [3]float64{}, nil, gm.BodyTank, proto.ProtocolVersion, version, "")); err != nil {
 		return "", err
 	}
 	if err := proto.WriteMsg(conn, proto.EncodePublish(m)); err != nil {
@@ -85,6 +173,105 @@ func publishMap(m gm.Map) (string, error) {
 		return "", &netErr{text}
 	}
 	return text, nil
+}
+
+// bbsSource is the source-board name for the global board (door.ini bbsname,
+// else the DOOR32 bbs id).
+func bbsSource(ini map[string]string) string {
+	if n := ini["bbsname"]; n != "" {
+		return n
+	}
+	bbsid, _ := door32Identity(doorDropfile)
+	return bbsid
+}
+
+// submitScore sends a finished match's score to the arena's global board (one-shot,
+// best-effort; safe to run in a goroutine - it just returns on any error).
+func submitScore(r matchResult, name string) {
+	ini := loadINI(defaultINIPath())
+	host := ini["server"]
+	if host == "" {
+		return
+	}
+	port := ini["port"]
+	if port == "" {
+		port = "7700"
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 3*time.Second)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	_ = proto.WriteMsg(conn, proto.EncodeScore(proto.ScoreSubmit{
+		Token: ini["token"], Mode: r.ModeName, Name: name, BBS: bbsSource(ini),
+		Map: r.MapName, Score: r.Score, When: uint32(r.When),
+		Won: r.Won, Kills: r.Kills, Deaths: r.Deaths,
+		ShotsFired: r.ShotsFired, ShotsHit: r.ShotsHit, Wave: r.Wave,
+	}))
+}
+
+// queryGlobalScores fetches the arena's global high-score board.
+func queryGlobalScores() ([]proto.ScoreRow, error) {
+	ini := loadINI(defaultINIPath())
+	host := ini["server"]
+	if host == "" {
+		return nil, &netErr{"no arena server configured"}
+	}
+	port := ini["port"]
+	if port == "" {
+		port = "7700"
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 3*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	if err := proto.WriteMsg(conn, proto.EncodeScoreQuery(ini["token"])); err != nil {
+		return nil, err
+	}
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	msg, err := proto.ReadMsg(conn)
+	if err != nil {
+		return nil, err
+	}
+	rows, ok := proto.DecodeScores(msg)
+	if !ok {
+		return nil, &netErr{"unexpected reply from server"}
+	}
+	return rows, nil
+}
+
+// queryGlobalPlayers fetches the arena's aggregated career-stats board (winningest
+// / skill / survival-wave boards). An older arena that predates the message simply
+// closes the connection, which surfaces here as an error the caller skips over.
+func queryGlobalPlayers() ([]proto.PlayerRow, error) {
+	ini := loadINI(defaultINIPath())
+	host := ini["server"]
+	if host == "" {
+		return nil, &netErr{"no arena server configured"}
+	}
+	port := ini["port"]
+	if port == "" {
+		port = "7700"
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 3*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	if err := proto.WriteMsg(conn, proto.EncodePlayersQuery(ini["token"])); err != nil {
+		return nil, err
+	}
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	msg, err := proto.ReadMsg(conn)
+	if err != nil {
+		return nil, err
+	}
+	rows, ok := proto.DecodePlayers(msg)
+	if !ok {
+		return nil, &netErr{"unexpected reply from server"}
+	}
+	return rows, nil
 }
 
 type stamped struct {
@@ -111,8 +298,12 @@ type netSession struct {
 	lastMatch gm.MatchSnap
 	curMap    gm.Map             // active map, sent by the server (MsgMap)
 	pairings  []proto.LobbyEntry // votable map+mode candidates (MsgLobby)
+	previews  map[int]gm.Map     // lazy lobby previews by map index (MsgMapPreview)
+	reqPrev   map[int]bool       // indices already requested this connection (dedupe)
 	haveSelf  bool
 	dead      bool
+
+	wmu sync.Mutex // serializes conn writes (step input + async preview requests)
 
 	// prediction state — main goroutine only
 	predPos   gm.V3
@@ -130,7 +321,7 @@ func dialServer(host, port, token, bbsid, handle string, vehicle int, color [3]f
 	if err != nil {
 		return nil, err
 	}
-	if err := proto.WriteMsg(conn, proto.EncodeHello(token, bbsid, handle, vehicle, color, custom, body)); err != nil {
+	if err := proto.WriteMsg(conn, proto.EncodeHello(token, bbsid, handle, vehicle, color, custom, body, proto.ProtocolVersion, version, getParty())); err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -140,24 +331,70 @@ func dialServer(host, port, token, bbsid, handle string, vehicle int, color [3]f
 		conn.Close()
 		return nil, err
 	}
+	if reason, ok := proto.DecodeReject(msg); ok { // version/compat refusal: show the reason verbatim
+		conn.Close()
+		return nil, &rejectErr{reason}
+	}
 	me, ok := proto.DecodeWelcome(msg)
 	if !ok {
 		conn.Close()
 		return nil, &netErr{"server did not send WELCOME"}
 	}
 	conn.SetReadDeadline(time.Time{})
-	ns := &netSession{conn: conn, me: me}
+	ns := &netSession{conn: conn, me: me, previews: map[int]gm.Map{}, reqPrev: map[int]bool{}}
 	if custom != nil { // predict our own movement with the custom build's stats
 		v := gm.MakeCustom(vehicle, *custom)
 		ns.predVeh = &v
 	}
 	go ns.readLoop()
+	go ns.prefetchLoop()
 	return ns, nil
+}
+
+// prefetchLoop warms the lobby map-preview cache in the background: it trickles a
+// request for each not-yet-fetched map in the pool so the lobby is instant
+// instead of paying a round-trip per highlight. It throttles (one request at a
+// time) and pauses during an active match, so it never competes with the live
+// state stream over a slow link. The on-demand path still front-runs it for the
+// highlighted map (requestPreview dedupes), so a selection is never stuck behind
+// the trickle. Exits once every known map is requested or the link dies.
+func (s *netSession) prefetchLoop() {
+	for {
+		s.mu.Lock()
+		dead, n, phase := s.dead, len(s.pairings), s.lastMatch.Phase
+		next := -1
+		for i := 0; i < n; i++ {
+			if !s.reqPrev[i] {
+				next = i
+				break
+			}
+		}
+		s.mu.Unlock()
+		switch {
+		case dead:
+			return
+		case next < 0 && n > 0:
+			return // every map in the pool has been resolved; cache is warm
+		case next < 0 || phase == gm.PhaseActive:
+			time.Sleep(500 * time.Millisecond) // pool not known yet, or hold during live play
+		default:
+			if s.ensurePreview(next) {
+				time.Sleep(150 * time.Millisecond) // a real download: be gentle on the wire
+			} // a disk-cache hit is instant - move straight to the next map
+		}
+	}
 }
 
 type netErr struct{ s string }
 
 func (e *netErr) Error() string { return e.s }
+
+// rejectErr is a server MsgReject reason (e.g. a version mismatch). The menu
+// shows its text verbatim - it's already a complete, actionable sentence - so
+// callers can distinguish it from a plain connection failure.
+type rejectErr struct{ s string }
+
+func (e *rejectErr) Error() string { return e.s }
 
 func (s *netSession) readLoop() {
 	for {
@@ -184,6 +421,23 @@ func (s *netSession) readLoop() {
 				s.pairings = ps
 				s.mu.Unlock()
 				logf("received %d lobby pairings", len(ps))
+			}
+			continue
+		}
+		if len(msg) > 0 && msg[0] == proto.MsgMapPreview {
+			if idx, m, ok := proto.DecodeMapPreview(msg); ok {
+				s.mu.Lock()
+				s.previews[idx] = m
+				name, hash, haveMan := "", uint32(0), idx >= 0 && idx < len(s.pairings)
+				if haveMan {
+					name, _ = splitCapTag(s.pairings[idx].Name)
+					hash = s.pairings[idx].Hash
+				}
+				s.mu.Unlock()
+				if haveMan { // persist to the shared on-disk cache for next time / other users
+					mapCacheStore(name, hash, m)
+				}
+				logf("received preview for map %d (%q, %d obstacles)", idx, m.Name, len(m.Obstacles))
 			}
 			continue
 		}
@@ -214,9 +468,21 @@ func (s *netSession) readLoop() {
 	}
 }
 
+// sendChangeChar tells the arena to swap our character; it takes effect on our
+// next respawn. Best-effort on the live game connection (serialized with step).
+func (s *netSession) sendChangeChar(vehicle, body int, color [3]float64, custom *gm.CustomStats) {
+	token := loadINI(defaultINIPath())["token"]
+	s.wmu.Lock()
+	s.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+	_ = proto.WriteMsg(s.conn, proto.EncodeChangeChar(token, vehicle, color, custom, body))
+	s.wmu.Unlock()
+}
+
 func (s *netSession) step(dt float64, in gm.Input) viewState {
+	s.wmu.Lock()
 	s.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 	_ = proto.WriteMsg(s.conn, proto.EncodeInput(in)) // best-effort; readLoop notices a dead link
+	s.wmu.Unlock()
 
 	s.mu.Lock()
 	haveSelf := s.haveSelf
@@ -251,6 +517,7 @@ func (s *netSession) step(dt float64, in gm.Input) viewState {
 		if s.predVeh != nil { // custom build: predict with our tuned stats, not the chassis
 			pveh = *s.predVeh
 		}
+		pveh.Speed *= gm.BodySpeedMul(self.Body) // match the sim's per-body speed (e.g. the fast insect)
 		s.predPos, s.predHull, s.predTur, s.predPitch, s.predVy = gm.Predict(s.predPos, s.predHull, s.predTur, s.predPitch, s.predVy, in, dt, pveh, cmap, solids)
 		dx, dz := self.Pos.X-s.predPos.X, self.Pos.Z-s.predPos.Z
 		if dx*dx+dz*dz > snapDist*snapDist {
@@ -279,13 +546,78 @@ func (s *netSession) step(dt float64, in gm.Input) viewState {
 		ready: true, tanks: tanks, shots: shots, me: s.me, self: self,
 		camPos: s.predPos, camYaw: s.predHull + s.predTur, viewTurret: s.predTur, viewPitch: s.predPitch,
 		mode: match.Mode, phase: match.Phase, timer: match.Timer, winnerID: match.WinnerID,
-		flags: flags, pickups: pickups, ents: ents, zones: zones, flagsLeft: match.FlagsLeft, flagsTotal: match.FlagsTotal, votes: match.Votes,
-		pairings: pairings, kills: match.Kills, mapIdx: match.MapIdx, wave: match.Wave, teamScore: match.TeamScore,
+		flags: flags, pickups: pickups, ents: ents, zones: zones, flagsLeft: match.FlagsLeft, flagsTotal: match.FlagsTotal, votes: match.Votes, lobbyReady: match.Ready,
+		pairings: pairings, kills: match.Kills, events: match.Events, mapIdx: match.MapIdx, wave: match.Wave, teamScore: match.TeamScore,
 		winnerTeam: match.WinnerTeam, myTeam: self.Team, gmap: cmap,
 	}
 }
 
 func (s *netSession) close() { s.conn.Close() }
+
+// ensurePreview makes map idx available for the lobby, cheapest source first:
+// already in memory -> nothing; on the shared on-disk cache (matching name+hash)
+// -> load it, no network; otherwise -> request it from the arena. Returns true
+// only when it had to hit the network, so the background prefetcher throttles
+// downloads but blows through cache hits instantly. Safe to call every frame.
+func (s *netSession) ensurePreview(idx int) (fetched bool) {
+	if idx < 0 {
+		return false
+	}
+	s.mu.Lock()
+	_, inMem := s.previews[idx]
+	done := inMem || s.reqPrev[idx]
+	name, hash, haveMan := "", uint32(0), idx < len(s.pairings)
+	if haveMan {
+		name, _ = splitCapTag(s.pairings[idx].Name)
+		hash = s.pairings[idx].Hash
+	}
+	s.mu.Unlock()
+	if done {
+		return false // already have it, or already fetching/loaded
+	}
+	if haveMan {
+		if m, ok := mapCacheLoad(name, hash); ok { // served from disk; no download
+			s.mu.Lock()
+			s.previews[idx] = m
+			s.reqPrev[idx] = true
+			s.mu.Unlock()
+			return false
+		}
+	}
+	s.requestPreview(idx)
+	return true
+}
+
+// requestPreview asks the server for map idx's geometry once (lobby preview). The
+// write runs on its own goroutine so a slow socket can never stall the render
+// loop - the reply arrives later via readLoop and the pane swaps it in. Dedupes
+// per connection: one ask is enough on a reliable TCP link.
+func (s *netSession) requestPreview(idx int) {
+	if idx < 0 {
+		return
+	}
+	s.mu.Lock()
+	if s.reqPrev[idx] {
+		s.mu.Unlock()
+		return
+	}
+	s.reqPrev[idx] = true
+	s.mu.Unlock()
+	go func() {
+		s.wmu.Lock()
+		s.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		_ = proto.WriteMsg(s.conn, proto.EncodeMapReq(idx)) // best-effort
+		s.wmu.Unlock()
+	}()
+}
+
+// preview returns a cached lobby map preview by index (ok=false until it lands).
+func (s *netSession) preview(idx int) (gm.Map, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, ok := s.previews[idx]
+	return m, ok
+}
 
 // interpolate renders remote tanks at (now - interpDelay) by lerping the two
 // snapshots straddling that time. Projectiles use the newest snapshot (their
@@ -398,8 +730,25 @@ func loadINI(path string) map[string]string {
 	return m
 }
 
+// iniTruthy interprets a flat-ini boolean value ("true"/"yes"/"on"/"1";
+// anything else, including absent, is false).
+func iniTruthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// doorDropfile is the resolved dropfile path (set once at startup). Identity
+// lookups that run off the main flow - score submission and map publishing, which
+// don't carry the path - read it instead of guessing "DOOR32.SYS" in the cwd,
+// which fails (and yields the "player" default) when the door is launched with
+// -dropfile pointing at a node directory.
+var doorDropfile = "DOOR32.SYS"
+
 // door32Identity pulls the caller's BBS id (line 4) and handle (line 7) from
-// DOOR32.SYS for the server's join log. Best-effort; defaults if absent.
+// the DOOR32.SYS dropfile for the server's join log. Best-effort; defaults if absent.
 func door32Identity(path string) (bbsid, handle string) {
 	bbsid, handle = "local", "player"
 	f, err := os.Open(path)
@@ -419,4 +768,22 @@ func door32Identity(path string) (bbsid, handle string) {
 		handle = lines[6]
 	}
 	return
+}
+
+// dropfileHasUser reports whether DOOR32.SYS names a logged-in user (a handle on
+// line 7). A pre-login launch (login.js bbs.exec with no dropfile, or a dropfile
+// with no alias) returns false, so the door can attract-loop on entry and skip
+// recording scores under the shared anonymous "player" bucket.
+func dropfileHasUser(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var lines []string
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		lines = append(lines, strings.TrimSpace(sc.Text()))
+	}
+	return len(lines) >= 7 && lines[6] != ""
 }

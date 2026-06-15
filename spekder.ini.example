@@ -11,6 +11,11 @@
 # port   = 7700
 # token  = CHANGE_ME      ; must match the arena server's -token
 
+# Source-board name shown on the GLOBAL high-score table next to your players, so
+# scores from different BBSes are distinguishable. Defaults to the DOOR32 BBS id.
+# When "server" is set, finished matches (single-player too) submit to the board.
+# bbsname = Cheese BBS
+
 # Pin OFFLINE single-player to one map by name or index (no rotation). Handy for
 # testing a specific layout; online play uses the arena server's map. The
 # SPEKDER_MAP env var overrides this if set. Omit for normal random/rotating maps.

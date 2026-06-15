@@ -21,3 +21,7 @@
 /data/
 /usermaps/
 /maps/
+
+# Server's live boards (built per-install from play, not source).
+/scores.json
+/players.json

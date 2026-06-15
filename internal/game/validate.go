@@ -5,6 +5,14 @@ import (
 	"math"
 )
 
+// Known event vocabularies (for ValidateMap behavior warnings).
+var knownCondKind = map[string]bool{"var": true, "hp": true, "count": true, "near": true, "side": true, "chance": true}
+var knownAct = map[string]bool{
+	"message": true, "setvar": true, "addvar": true, "setstat": true, "spawn": true,
+	"move": true, "stop": true, "damage": true, "heal": true, "emit": true,
+	"enable": true, "disable": true, "win": true, "lose": true, "nextwave": true,
+}
+
 // MapIssue is one problem found while validating an authored map. Entity is the
 // index into Map.Entities, or -1 for a map-level issue. Fatal marks a map that
 // won't work correctly; non-fatal issues are likely-mistakes worth surfacing.
@@ -134,5 +142,47 @@ func ValidateMap(m Map) []MapIssue {
 			entIssue(i, "flag.team", "team must be -1 (neutral), 0, or 1", true)
 		}
 	}
+
+	// Event behaviors (warnings; the engine tolerates malformed rules at runtime).
+	tags := map[string]bool{}
+	for i := range m.Entities {
+		if t := m.Entities[i].Tag; t != "" {
+			tags[t] = true
+		}
+	}
+	paths := map[string]bool{"": true} // "" = the first/default path
+	for _, p := range m.Paths {
+		paths[p.Name] = true
+	}
+	checkBehaviors := func(ent int, where string, bs []Behavior) {
+		for bi, b := range bs {
+			at := fmt.Sprintf("%s[%d]", where, bi)
+			if b.On == "" {
+				out = append(out, MapIssue{Entity: ent, Field: at + ".on", Msg: "behavior has no trigger (on)"})
+			}
+			for _, c := range b.When {
+				if !knownCondKind[c.Kind] {
+					out = append(out, MapIssue{Entity: ent, Field: at + ".when", Msg: "unknown condition kind: " + c.Kind})
+				}
+			}
+			for _, a := range b.Do {
+				if !knownAct[a.Act] {
+					out = append(out, MapIssue{Entity: ent, Field: at + ".do", Msg: "unknown action: " + a.Act})
+				}
+				if a.Act == "move" && a.What != "" && !paths[a.What] {
+					out = append(out, MapIssue{Entity: ent, Field: at + ".move", Msg: "move references unknown path: " + a.What})
+				}
+				for _, ref := range []string{a.Target, a.At} {
+					if len(ref) > 1 && ref[0] == '#' && !tags[ref[1:]] {
+						out = append(out, MapIssue{Entity: ent, Field: at, Msg: "references unknown tag: " + ref})
+					}
+				}
+			}
+		}
+	}
+	for i := range m.Entities {
+		checkBehaviors(i, "behaviors", m.Entities[i].Behaviors)
+	}
+	checkBehaviors(-1, "logic", m.Logic)
 	return out
 }

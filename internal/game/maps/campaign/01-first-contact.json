@@ -1,0 +1,25 @@
+{
+  "version": 4,
+  "name": "FLAG-1 FIRST CONTACT",
+  "size": 18,
+  "obstacles": [
+    {"pos": [-8, 0.7, 0],  "half": [1.4, 0.7, 1.4], "color": [0.45, 0.5, 0.42]},
+    {"pos": [8, 0.7, 0],   "half": [1.4, 0.7, 1.4], "color": [0.45, 0.5, 0.42]},
+    {"pos": [0, 0.7, -8],  "half": [1.4, 0.7, 1.4], "color": [0.45, 0.5, 0.42]},
+    {"pos": [0, 0.7, 8],   "half": [1.4, 0.7, 1.4], "color": [0.45, 0.5, 0.42]}
+  ],
+  "ramps": null,
+  "scenery": null,
+  "spawns": [[0, -14], [-12, -12], [12, -12], [-12, 12], [12, 12]],
+  "pickupSpots": [
+    {"pos": [0, 0], "kind": 0},
+    {"pos": [0, 14], "kind": 0}
+  ],
+  "entities": [
+    {"kind": "flag", "pos": [-13, 0, 0],  "half": [0.5, 0.5, 0.5], "color": [0, 0, 0], "yaw": 0, "solid": false, "turret": null, "hazard": null, "teleport": null, "destruct": null, "respawn": null, "bounce": null, "flag": {"team": -1}, "zone": null},
+    {"kind": "flag", "pos": [13, 0, 0],   "half": [0.5, 0.5, 0.5], "color": [0, 0, 0], "yaw": 0, "solid": false, "turret": null, "hazard": null, "teleport": null, "destruct": null, "respawn": null, "bounce": null, "flag": {"team": -1}, "zone": null},
+    {"kind": "flag", "pos": [0, 0, 13],   "half": [0.5, 0.5, 0.5], "color": [0, 0, 0], "yaw": 0, "solid": false, "turret": null, "hazard": null, "teleport": null, "destruct": null, "respawn": null, "bounce": null, "flag": {"team": -1}, "zone": null},
+    {"kind": "flag", "pos": [0, 0, -13],  "half": [0.5, 0.5, 0.5], "color": [0, 0, 0], "yaw": 0, "solid": false, "turret": null, "hazard": null, "teleport": null, "destruct": null, "respawn": null, "bounce": null, "flag": {"team": -1}, "zone": null}
+  ],
+  "rules": {"mode": -1, "timeLimit": 180, "target": -1, "lives": 1, "bots": 2}
+}

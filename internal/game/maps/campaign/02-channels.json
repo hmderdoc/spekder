@@ -1,0 +1,26 @@
+{
+  "version": 4,
+  "name": "FLAG-2 CHANNELS",
+  "size": 20,
+  "obstacles": [
+    {"pos": [-6, 1.5, -4], "half": [1, 1.5, 9],  "color": [0.42, 0.46, 0.55]},
+    {"pos": [6, 1.5, 4],   "half": [1, 1.5, 9],  "color": [0.42, 0.46, 0.55]},
+    {"pos": [-14, 0.7, 10], "half": [1.4, 0.7, 1.4], "color": [0.5, 0.5, 0.45]},
+    {"pos": [14, 0.7, -10], "half": [1.4, 0.7, 1.4], "color": [0.5, 0.5, 0.45]}
+  ],
+  "ramps": null,
+  "scenery": null,
+  "spawns": [[0, -16], [-15, -15], [15, -15], [-16, 0], [16, 0]],
+  "pickupSpots": [
+    {"pos": [0, 0], "kind": 0},
+    {"pos": [-15, 15], "kind": 0}
+  ],
+  "entities": [
+    {"kind": "flag", "pos": [-15, 0, -8], "half": [0.5, 0.5, 0.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [-11, 0, 8],  "half": [0.5, 0.5, 0.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, 16],   "half": [0.5, 0.5, 0.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [11, 0, -8],  "half": [0.5, 0.5, 0.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [15, 0, 12],  "half": [0.5, 0.5, 0.5], "flag": {"team": -1}}
+  ],
+  "rules": {"mode": -1, "timeLimit": 180, "target": -1, "lives": 1, "bots": 3}
+}

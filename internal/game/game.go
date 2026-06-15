@@ -17,8 +17,13 @@ import (
 	"strings"
 )
 
-//go:embed maps/*.json
+//go:embed maps/*.json maps/campaign/*.json
 var mapFS embed.FS
+
+// CampaignMaps is the numbered FLAG RUN campaign set, embedded separately from
+// Maps so the levels never appear in rotation, the lobby, or the map picker -
+// the campaign runner plays them in order by appending one at a time.
+var CampaignMaps []Map
 
 // Box is a solid, collidable obstacle. Prop is decorative scenery. Ramp is a
 // drive-up sloped surface (rises toward Dir: 0=+X 1=-X 2=+Z 3=-Z).
@@ -65,13 +70,31 @@ type Entity struct {
 	Bounce   *BounceTrait
 	Flag     *FlagTrait
 	Zone     *ZoneTrait
+	Trigger  *TriggerTrait
+
+	// --- event-driven behavior (authored; see EVENTS.md) ---
+	Tag       string     // author name, referenced by actions/conditions as #tag
+	Watch     []float64  // HP% thresholds that emit hp_below when crossed (needs Destruct)
+	Behaviors []Behavior // rules this entity subscribes to / emits
 
 	// --- runtime instance state (set in the World copy, not authored) ---
 	HP       int     // current hit points (Destruct); 0/unused otherwise
 	Dead     bool    // destroyed; awaiting respawn or gone for good
 	cooldown float64 // turret fire / teleport debounce timer
 	respawnT float64 // sec until respawn while Dead (Respawn trait)
+	bDone    []bool  // per-behavior Once latch (parallel to Behaviors)
+	wHit     []bool  // per-threshold latch (parallel to Watch)
+	inside   []bool  // trigger: which tanks are currently inside the footprint
+	mvPath   string  // move: path being followed ("" = not moving)
+	mvSpeed  float64 // move: units/sec
+	mvDist   float64 // move: distance travelled along the path
+	mvOn     bool    // move: actively advancing along mvPath
 }
+
+// TriggerTrait makes an entity a sensor volume that emits `entered`/`exited` signals
+// as tanks cross its footprint (Pos/Half). Inert: not solid, no damage; author
+// behaviors decide what entering/leaving does.
+type TriggerTrait struct{}
 
 // TurretTrait makes an entity track and shoot the nearest live enemy tank in
 // range, firing the same projectiles tanks use.
@@ -130,7 +153,7 @@ type ZoneTrait struct {
 
 // SchemaVersion is the current map-file format version. Authored maps may set
 // "version"; 0 (absent) is treated as 1 for legacy files.
-const SchemaVersion = 3 // v3 added typed pickup spots (pickupSpots)
+const SchemaVersion = 4 // v4 added event behaviors (vars/logic, entity tag/watch/behaviors)
 
 // Map is a static arena layout. Size is the arena half-extent (0 = default);
 // arenas are square. Pickups reserves power-up spawn spots. Entities are
@@ -145,7 +168,29 @@ type Map struct {
 	Spawns    []V3
 	Pickups   []MapPickup
 	Entities  []Entity
-	Rules     *MapRules // optional per-map victory conditions (nil = implied by objectives)
+	Rules     *MapRules      // optional per-map victory conditions (nil = implied by objectives)
+	Vars      map[string]int // initial blackboard values (event system; see EVENTS.md)
+	Logic     []Behavior     // map-level "director" rules (source = world, -1)
+	Paths     []Path         // named waypoint paths (for the move action / escort)
+	Actors    []Actor        // named tank templates with behaviors (mobile bosses)
+}
+
+// Path is a named ordered list of waypoints an entity can be moved along (the
+// payload/escort building block; referenced by the move action).
+type Path struct {
+	Name   string
+	Points []V3
+}
+
+// Actor is a named tank template the spawn action can instantiate: a mobile,
+// behavior-carrying bot (e.g. a roaming boss). Spawn it with `spawn @<name>`.
+type Actor struct {
+	Name      string
+	Vehicle   int
+	Body      int
+	MaxHP     int // 0 = chassis default
+	Watch     []float64
+	Behaviors []Behavior
 }
 
 // MapPickup is an authored power-up spot: where a drop appears, and (v3) what it
@@ -161,10 +206,21 @@ type MapPickup struct {
 // Each field uses -1 to mean "use the mode's default", so a v1 map (no Rules)
 // behaves exactly as before. Set by the editor's RULES panel.
 type MapRules struct {
-	Mode      int     // -1 = auto (NaturalMode); else a mode index
-	TimeLimit float64 // -1 = default; 0 = endless; >0 = match seconds
-	Target    int     // -1 = default; else the win count (frags/captures/hold-points)
-	Lives     int     // -1 = default; 0 = infinite; >0 = lives per tank
+	Mode       int     // -1 = auto (NaturalMode); else a mode index
+	TimeLimit  float64 // -1 = default; 0 = endless; >0 = match seconds
+	Target     int     // -1 = default; else the win count (frags/captures/hold-points)
+	Lives      int     // -1 = default; 0 = infinite; >0 = lives per tank
+	Bots       int     // -1 = default/session count; >=0 = exact fill-bot count (scripted maps)
+	MaxPlayers int     // <=0 = uncapped; else the most combatants (humans+bots) the map is sized for
+}
+
+// MapCapacity returns a map's combatant cap (0 = uncapped). Rotation, votes,
+// and session creation use it to keep big sessions off small maps.
+func MapCapacity(m Map) int {
+	if m.Rules != nil && m.Rules.MaxPlayers > 0 {
+		return m.Rules.MaxPlayers
+	}
+	return 0
 }
 
 // NewEntities returns a fresh runtime copy of the map's authored entities with
@@ -174,11 +230,25 @@ type MapRules struct {
 func (m Map) NewEntities() []Entity {
 	out := make([]Entity, len(m.Entities))
 	for i, e := range m.Entities {
-		out[i] = e // value copy; trait pointers shared, fine (params are read-only)
+		out[i] = e // value copy
 		out[i].Dead, out[i].cooldown, out[i].respawnT = false, 0, 0
+		// Clone the trait pointers behaviors may tune (setstat), so runtime changes
+		// stay match-local and don't mutate the shared template.
+		if e.Turret != nil {
+			t := *e.Turret
+			out[i].Turret = &t
+		}
+		if e.Hazard != nil {
+			h := *e.Hazard
+			out[i].Hazard = &h
+		}
 		if e.Destruct != nil {
+			d := *e.Destruct
+			out[i].Destruct = &d
 			out[i].HP = e.Destruct.MaxHP
 		}
+		out[i].bDone = make([]bool, len(e.Behaviors))
+		out[i].wHit = make([]bool, len(e.Watch))
 	}
 	return out
 }
@@ -192,8 +262,11 @@ func MapHalf(m Map) float64 {
 	return a - 0.7
 }
 
-// Maps is the indexed, embedded map set (shared by server and door; the wire
-// syncs the active map by index, so both must share the same build).
+// Maps is the indexed, embedded map set plus any usermaps loaded at startup.
+// Indexes are LOCAL to each process: online, the server transmits the full
+// active map over the wire (MsgMap, on join and map change) and lobby votes
+// index the server's own transmitted list - so door and server builds do NOT
+// need matching map sets. The embedded set drives offline play.
 var Maps []Map
 
 type jbox struct {
@@ -242,35 +315,56 @@ type jflag struct {
 type jzone struct {
 	Capture float64 `json:"capture"`
 }
+type jtrigger struct{}
+type jpath struct {
+	Name   string       `json:"name"`
+	Points [][2]float64 `json:"points"`
+}
+type jactor struct {
+	Name      string     `json:"name"`
+	Vehicle   int        `json:"vehicle,omitempty"`
+	Body      int        `json:"body,omitempty"`
+	MaxHP     int        `json:"maxHp,omitempty"`
+	Watch     []float64  `json:"watch,omitempty"`
+	Behaviors []Behavior `json:"behaviors,omitempty"`
+}
 type jentity struct {
-	Kind     string     `json:"kind"`
-	Pos      [3]float64 `json:"pos"`
-	Half     [3]float64 `json:"half"`
-	Color    [3]float64 `json:"color"`
-	Yaw      float64    `json:"yaw"`
-	Solid    bool       `json:"solid"`
-	Weapon   int        `json:"weapon,omitempty"`
-	Turret   *jturret   `json:"turret"`
-	Hazard   *jhazard   `json:"hazard"`
-	Teleport *jteleport `json:"teleport"`
-	Destruct *jdestruct `json:"destruct"`
-	Respawn  *jrespawn  `json:"respawn"`
-	Bounce   *jbounce   `json:"bounce"`
-	Flag     *jflag     `json:"flag"`
-	Zone     *jzone     `json:"zone"`
+	Kind      string     `json:"kind"`
+	Pos       [3]float64 `json:"pos"`
+	Half      [3]float64 `json:"half"`
+	Color     [3]float64 `json:"color"`
+	Yaw       float64    `json:"yaw"`
+	Solid     bool       `json:"solid"`
+	Weapon    int        `json:"weapon,omitempty"`
+	Turret    *jturret   `json:"turret"`
+	Hazard    *jhazard   `json:"hazard"`
+	Teleport  *jteleport `json:"teleport"`
+	Destruct  *jdestruct `json:"destruct"`
+	Respawn   *jrespawn  `json:"respawn"`
+	Bounce    *jbounce   `json:"bounce"`
+	Flag      *jflag     `json:"flag"`
+	Zone      *jzone     `json:"zone"`
+	Trigger   *jtrigger  `json:"trigger,omitempty"`
+	Tag       string     `json:"tag,omitempty"`
+	Watch     []float64  `json:"watch,omitempty"`
+	Behaviors []Behavior `json:"behaviors,omitempty"`
 }
 type jmap struct {
-	Version   int          `json:"version"`
-	Name      string       `json:"name"`
-	Size      float64      `json:"size"`
-	Obstacles []jbox       `json:"obstacles"`
-	Ramps     []jramp      `json:"ramps"`
-	Scenery   []jprop      `json:"scenery"`
-	Spawns    [][2]float64 `json:"spawns"`
-	Pickups   [][2]float64 `json:"pickups,omitempty"`     // v1/v2 legacy: untyped spots (read-only)
-	PickSpots []jpickup    `json:"pickupSpots,omitempty"` // v3: typed pickup spots
-	Entities  []jentity    `json:"entities"`
-	Rules     *jrules      `json:"rules,omitempty"`
+	Version   int            `json:"version"`
+	Name      string         `json:"name"`
+	Size      float64        `json:"size"`
+	Obstacles []jbox         `json:"obstacles"`
+	Ramps     []jramp        `json:"ramps"`
+	Scenery   []jprop        `json:"scenery"`
+	Spawns    [][2]float64   `json:"spawns"`
+	Pickups   [][2]float64   `json:"pickups,omitempty"`     // v1/v2 legacy: untyped spots (read-only)
+	PickSpots []jpickup      `json:"pickupSpots,omitempty"` // v3: typed pickup spots
+	Entities  []jentity      `json:"entities"`
+	Rules     *jrules        `json:"rules,omitempty"`
+	Vars      map[string]int `json:"vars,omitempty"`
+	Logic     []Behavior     `json:"logic,omitempty"`
+	Paths     []jpath        `json:"paths,omitempty"`
+	Actors    []jactor       `json:"actors,omitempty"`
 }
 
 // jpickup is a v3 typed pickup spot. Kind < 0 = any (random); Weapon is the
@@ -282,10 +376,12 @@ type jpickup struct {
 }
 
 type jrules struct {
-	Mode      int     `json:"mode"`
-	TimeLimit float64 `json:"timeLimit"`
-	Target    int     `json:"target"`
-	Lives     int     `json:"lives"`
+	Mode       int     `json:"mode"`
+	TimeLimit  float64 `json:"timeLimit"`
+	Target     int     `json:"target"`
+	Lives      int     `json:"lives"`
+	Bots       *int    `json:"bots,omitempty"`       // pointer: absent (old maps) = default (-1)
+	MaxPlayers int     `json:"maxPlayers,omitempty"` // 0/absent = uncapped
 }
 
 func (je jentity) toEntity() Entity {
@@ -314,6 +410,10 @@ func (je jentity) toEntity() Entity {
 	if je.Zone != nil {
 		e.Zone = &ZoneTrait{Capture: je.Zone.Capture}
 	}
+	if je.Trigger != nil {
+		e.Trigger = &TriggerTrait{}
+	}
+	e.Tag, e.Watch, e.Behaviors = je.Tag, je.Watch, je.Behaviors
 	return e
 }
 
@@ -354,6 +454,26 @@ func init() {
 	}
 	if len(Maps) == 0 {
 		Maps = []Map{{Name: "OPEN", Spawns: []V3{{0, 0, -16}, {0, 0, 16}}}}
+	}
+	if ents, err := mapFS.ReadDir("maps/campaign"); err == nil {
+		var names []string
+		for _, e := range ents {
+			if !e.IsDir() {
+				names = append(names, e.Name())
+			}
+		}
+		sort.Strings(names) // level order = lexical file order
+		for _, n := range names {
+			data, err := mapFS.ReadFile("maps/campaign/" + n)
+			if err != nil {
+				continue
+			}
+			var jm jmap
+			if json.Unmarshal(data, &jm) != nil {
+				continue
+			}
+			CampaignMaps = append(CampaignMaps, jm.toMap())
+		}
 	}
 }
 
@@ -446,7 +566,22 @@ func (jm jmap) toMap() Map {
 		m.Entities = append(m.Entities, e.toEntity())
 	}
 	if jm.Rules != nil {
-		m.Rules = &MapRules{Mode: jm.Rules.Mode, TimeLimit: jm.Rules.TimeLimit, Target: jm.Rules.Target, Lives: jm.Rules.Lives}
+		bots := -1
+		if jm.Rules.Bots != nil {
+			bots = *jm.Rules.Bots
+		}
+		m.Rules = &MapRules{Mode: jm.Rules.Mode, TimeLimit: jm.Rules.TimeLimit, Target: jm.Rules.Target, Lives: jm.Rules.Lives, Bots: bots, MaxPlayers: jm.Rules.MaxPlayers}
+	}
+	m.Vars, m.Logic = jm.Vars, jm.Logic
+	for _, p := range jm.Paths {
+		pts := make([]V3, len(p.Points))
+		for i, wp := range p.Points {
+			pts[i] = v3xz(wp)
+		}
+		m.Paths = append(m.Paths, Path{Name: p.Name, Points: pts})
+	}
+	for _, a := range jm.Actors {
+		m.Actors = append(m.Actors, Actor{Name: a.Name, Vehicle: a.Vehicle, Body: a.Body, MaxHP: a.MaxHP, Watch: a.Watch, Behaviors: a.Behaviors})
 	}
 	return m
 }
@@ -493,6 +628,10 @@ func (e Entity) toJEntity() jentity {
 	if e.Zone != nil {
 		je.Zone = &jzone{Capture: e.Zone.Capture}
 	}
+	if e.Trigger != nil {
+		je.Trigger = &jtrigger{}
+	}
+	je.Tag, je.Watch, je.Behaviors = e.Tag, e.Watch, e.Behaviors
 	return je
 }
 
@@ -521,7 +660,22 @@ func (m Map) toJmap() jmap {
 		jm.Entities = append(jm.Entities, e.toJEntity())
 	}
 	if m.Rules != nil {
-		jm.Rules = &jrules{Mode: m.Rules.Mode, TimeLimit: m.Rules.TimeLimit, Target: m.Rules.Target, Lives: m.Rules.Lives}
+		jm.Rules = &jrules{Mode: m.Rules.Mode, TimeLimit: m.Rules.TimeLimit, Target: m.Rules.Target, Lives: m.Rules.Lives, MaxPlayers: m.Rules.MaxPlayers}
+		if m.Rules.Bots >= 0 {
+			b := m.Rules.Bots
+			jm.Rules.Bots = &b
+		}
+	}
+	jm.Vars, jm.Logic = m.Vars, m.Logic
+	for _, p := range m.Paths {
+		wps := make([][2]float64, len(p.Points))
+		for i, pt := range p.Points {
+			wps[i] = j2(pt)
+		}
+		jm.Paths = append(jm.Paths, jpath{Name: p.Name, Points: wps})
+	}
+	for _, a := range m.Actors {
+		jm.Actors = append(jm.Actors, jactor{Name: a.Name, Vehicle: a.Vehicle, Body: a.Body, MaxHP: a.MaxHP, Watch: a.Watch, Behaviors: a.Behaviors})
 	}
 	return jm
 }
@@ -554,6 +708,7 @@ const (
 	fireDelay          = 0.55
 	jumpSpeed          = 8.5  // upward launch velocity (units/sec)
 	gravity            = 24.0 // downward acceleration (units/sec^2)
+	climbSpeed         = 9.0  // insect wall-scaling rise rate (units/sec) while gripping a face
 	projSpeed          = 24.0
 	projLife           = 2.4
 	projDmg            = 34
@@ -563,9 +718,10 @@ const (
 
 	ArenaA = 22.0 // default playfield half-extent (maps may override via Size)
 
-	respawnDelay   = 3.0
-	spawnGuardTime = 1.6
-	EyeHeight      = 1.35
+	respawnDelay       = 3.0
+	playerRespawnDelay = 5.0 // humans wait a touch longer so the kill-cam replay can run
+	spawnGuardTime     = 1.6
+	EyeHeight          = 1.35
 
 	botFireRange = 26.0
 	botAimTol    = 0.12
@@ -723,7 +879,8 @@ const (
 	matchTime     = 180.0 // sec per match
 	DMFragLimit   = 20    // deathmatch ends at this many kills
 	endTime       = 7.0   // sec the scoreboard lingers before the next match
-	lobbyTime     = 14.0  // sec of mode-vote lobby between matches (server only)
+	lobbyTime     = 30.0  // sec of mode-vote lobby between matches (server only)
+	lobbyFastFwd  = 1.5   // sec the lobby holds once every player has locked (ENTER)
 	flagCount     = 8     // flags scattered in Flag Run
 	flagPickupRad = 1.9   // how close you must drive to grab a flag
 	tankHitFlash  = 0.15  // sec a tank flashes white after taking a hit
@@ -770,7 +927,7 @@ type Vehicle struct {
 var Vehicles = []Vehicle{
 	{Name: "SCOUT", MaxHP: 70, Speed: 8.2, HullTurn: 2.4, AimTurn: 1.7, FireDelay: 0.42, Jump: 10.0, Scale: 0.82, AmmoMax: 6, AmmoRegen: 2.4,
 		Desc: "Fast, fragile recon. Outruns trouble on light armor; pick your fights."},
-	{Name: "HUNTER", MaxHP: 100, Speed: 6.0, HullTurn: 1.9, AimTurn: 1.3, FireDelay: 0.55, Jump: 8.5, Scale: 1.0, AmmoMax: 8, AmmoRegen: 1.8,
+	{Name: "TANK", MaxHP: 100, Speed: 6.0, HullTurn: 1.9, AimTurn: 1.3, FireDelay: 0.55, Jump: 8.5, Scale: 1.0, AmmoMax: 8, AmmoRegen: 1.8,
 		Desc: "The all-rounder. Balanced armor, speed, and fire rate. No bad matchups."},
 	{Name: "HEAVY", MaxHP: 150, Speed: 4.3, HullTurn: 1.3, AimTurn: 1.0, FireDelay: 0.85, Jump: 6.5, Scale: 1.22, AmmoMax: 12, AmmoRegen: 1.2,
 		Desc: "Rolling fortress. Heavy armor and a deep magazine, but slow and ponderous."},
@@ -961,10 +1118,13 @@ func (a V3) Norm() V3 {
 // mode vote (mode index, or -1 for none); only read during PhaseLobby.
 type Input struct {
 	Throttle, Reverse, HullL, HullR, TurretL, TurretR, Fire, Jump bool
+	StrafeL, StrafeR                                              bool // sidestep left/right without turning
 	AimUp, AimDown                                                bool // elevate / depress the gun
 	Recenter                                                      bool // snap turret to hull-forward + level
 	Fire2                                                         bool // fire the secondary weapon (B)
+	Drop                                                          bool // CTF: drop the carried flag where you stand
 	Vote                                                          int
+	Ready                                                         bool // lobby: this player has locked their vote (ENTER)
 }
 
 type Tank struct {
@@ -989,18 +1149,49 @@ type Tank struct {
 	ammo      float64 // regenerating ammo pool (soft fire limit); max/regen per vehicle
 	slowT     float64 // EffSlow remaining (sec)
 	slowMag   float64 // EffSlow magnitude (fraction of speed removed)
-	respawn   float64
-	guard     float64
-	vy        float64 // vertical velocity (jump/gravity)
-	hitFlash  float64 // brief flash timer after taking damage
-	vote      int     // lobby vote: mode index, or -1 for none
-	lives     int     // Survival: respawns remaining (humans)
-	Team      int     // CTF: 0 or 1 (-1 = none in non-team modes)
-	Carrying  int     // CTF: index of the enemy flag being carried, or -1
-	shieldT   float64 // power-up: invulnerability remaining (sec)
-	rapidT    float64 // power-up: rapid-fire remaining (sec)
-	cloakT    float64 // power-up: cloak/invisibility remaining (sec)
-	gone      bool    // player left; slot inert and reusable
+	boostT    float64 // EffSpeed remaining (sec)
+	boostMag  float64 // EffSpeed magnitude (fraction of speed added)
+	shellT    float64 // turtle shell mode remaining (sec): immobile + invulnerable
+
+	// Minotaur barrier (Reinhardt-style): a held frontal shield with its own HP
+	// that absorbs damage from the front, regenerates while lowered, and shatters
+	// into a redeploy cooldown when depleted.
+	shieldHP     float64 // barrier health (0..minoShieldMax)
+	shieldUp     bool    // barrier currently deployed (B held)
+	shieldBroken float64 // post-shatter cooldown remaining (sec); >0 = can't deploy
+
+	// Elephant: a passive, omnidirectional shield buffer that soaks damage from
+	// any side and recharges when not being hit (regenPause gates it), plus the
+	// recharge timer on its trunk hook.
+	bufferHP float64
+	hookT    float64
+
+	healFlash float64 // brief timer after being healed by an ally (drives the mend halo)
+
+	// one damage-over-time slot (poison/burn; the latest application wins):
+	// remaining time, HP/sec, fractional carry, the shooter (kill credit; leech
+	// destination), whether ticks leech back to the shooter, and the feed label.
+	dotT, dotPS, dotDebt float64
+	dotFrom              int
+	dotLeech             bool
+	dotCause             KillCause
+
+	regenDebt  float64 // passive HP regen: fractional carry between ticks
+	regenPause float64 // sec until regen resumes after taking damage
+	respawn    float64
+	guard      float64
+	vy         float64 // vertical velocity (jump/gravity)
+	hitFlash   float64 // brief flash timer after taking damage
+	vote       int     // lobby vote: map index, or -1 for none
+	ready      bool    // lobby: locked their vote (ENTER) -> counts toward fast-forward
+	lives      int     // Survival: respawns remaining (humans)
+	Team       int     // CTF: 0 or 1 (-1 = none in non-team modes)
+	Party      string  // party name (client team-grouping hint; "" = solo)
+	Carrying   int     // CTF: index of the enemy flag being carried, or -1
+	shieldT    float64 // power-up: invulnerability remaining (sec)
+	rapidT     float64 // power-up: rapid-fire remaining (sec)
+	cloakT     float64 // power-up: cloak/invisibility remaining (sec)
+	gone       bool    // player left; slot inert and reusable
 
 	hazardDebt float64 // hazard-trait: fractional HP damage carried between ticks
 	teleT      float64 // teleporter debounce remaining (sec); 0 = can teleport
@@ -1015,6 +1206,15 @@ type Tank struct {
 	roam                                                   V3      // wander destination when no enemy is in sight
 	roamT                                                  float64 // time until a new wander destination is picked
 
+	// grid-path cache (see nav.go): the route this bot is following, its
+	// progress cursor, the goal cell it was computed for, the tick a repath
+	// is due, and the grid signature it belongs to.
+	navPath []int
+	navAt   int
+	navGoal int
+	navTick int64
+	navSig  uint64
+
 	// aim-assist lock (human players): kind 0 none / 1 tank / 2 entity, idx into
 	// that slice; lockBreak accumulates sustained turn input to release the lock;
 	// lockCool suppresses re-acquire after a break so a held turn carries you off.
@@ -1022,6 +1222,20 @@ type Tank struct {
 	lockIdx   int
 	lockBreak float64
 	lockCool  float64
+
+	// event behaviors (mobile bosses / scripted actors): a tank can carry rules and
+	// HP-watch thresholds just like an entity. Empty on ordinary tanks.
+	Behaviors []Behavior
+	Watch     []float64
+	bDone     []bool
+	wHit      []bool
+
+	// per-match tallies for stats (accuracy, pickups, damage, support); ride
+	// TankSnap for the door.
+	shotsFired, shotsHit, pickups int
+	dmgDealt, healDone            int
+
+	lungeVX, lungeVZ float64 // transient forward leap velocity (melee charge), decays
 }
 
 // TankSnap is the renderable/transmittable view of a tank: exported, flat, no
@@ -1039,11 +1253,23 @@ type TankSnap struct {
 	Kills, Deaths          int
 	Vehicle                int
 	Body                   int // render body style (BodyTank/BodySpider/...)
+	ShotsFired             int // per-match tallies (stats: accuracy, pickups, damage, support)
+	ShotsHit               int
+	Pickups                int
+	DmgDealt               int
+	HealDone               int
 	Lives                  int
-	Team                   int  // CTF team (-1 in non-team modes)
-	Carrying               bool // CTF: carrying an enemy flag
-	Cloak                  bool // power-up: cloaked (hidden from enemies)
-	Rapid                  bool // power-up: rapid-fire active
+	Team                   int     // CTF team (-1 in non-team modes)
+	Carrying               bool    // CTF: carrying an enemy flag
+	Cloak                  bool    // power-up: cloaked (hidden from enemies)
+	Rapid                  bool    // power-up: rapid-fire active
+	Shell                  bool    // turtle: tucked into its shell (immobile + invulnerable)
+	Burning                bool    // taking burn/drain damage-over-time (ember tint)
+	Poisoned               bool    // taking poison damage-over-time (sickly-green tint)
+	Bleeding               bool    // taking bleed damage-over-time (red tint)
+	Healing                bool    // just got healed by an ally (mend halo)
+	ShieldUp               bool    // minotaur: frontal barrier deployed
+	ShieldFrac             float64 // minotaur: barrier health 0..1 (HUD gauge + barrier fade)
 	RespawnIn              float64
 	Reload                 float64 // 0 = ready to fire, ->1 = just fired
 	Ammo                   float64 // regenerating ammo, 0..1 of capacity (HUD gauge)
@@ -1084,6 +1310,7 @@ type EntitySnap struct {
 	Dead  bool
 	Yaw   float64
 	Pitch float64 // turret gun elevation (+ up)
+	Pos   V3      // current position (dynamic for moved/payload entities)
 }
 
 type Projectile struct {
@@ -1102,6 +1329,7 @@ type Projectile struct {
 	armT    float64    // mine: arming countdown before it can trigger
 	fx      bool       // visual-only spark (explosion debris); never collides
 	vis     byte       // render kind (Vis*) carried to the client
+	cause   KillCause  // kill-feed label for a lethal hit (zero = CauseCannon)
 }
 
 // Shot visual kinds, carried to the renderer so each projectile draws distinctly.
@@ -1111,12 +1339,15 @@ const (
 	VisMine                // dropped mine
 	VisBeam                // hitscan beam segment
 	VisSpark               // explosion debris
+	VisFlame               // fire-breath particle
 )
 
-// ShotSnap is one projectile to draw: position + visual kind.
+// ShotSnap is one projectile to draw: position + visual kind + firer (so the client
+// can tint it toward the owner's accent color; -1 for FX / environment).
 type ShotSnap struct {
-	Pos V3
-	Vis byte
+	Pos   V3
+	Vis   byte
+	Owner int
 }
 
 func visForDelivery(d Delivery) byte {
@@ -1141,10 +1372,12 @@ func visForDelivery(d Delivery) byte {
 type Delivery int
 
 const (
-	DeliverBolt Delivery = iota // straight projectile (today's shot)
-	DeliverLob                  // arced/lobbed (grenade)        [W4]
-	DeliverMine                 // dropped, proximity/timer fire [W4]
-	DeliverBeam                 // hitscan (laser)               [W4]
+	DeliverBolt  Delivery = iota // straight projectile (today's shot)
+	DeliverLob                   // arced/lobbed (grenade)        [W4]
+	DeliverMine                  // dropped, proximity/timer fire [W4]
+	DeliverBeam                  // hitscan (laser)               [W4]
+	DeliverMelee                 // instant radial strike around the firer (no projectile)
+	DeliverCone                  // forward cone AOE (fire breath); no projectile
 )
 
 type EffectKind int
@@ -1160,6 +1393,10 @@ const (
 	EffDamageUp                     // boost target's outgoing damage (timed) [W2+]
 	EffDamageDown                   // cut target's outgoing damage (timed)   [W2+]
 	EffTeleport                     // relocate the target                    [W4]
+	EffPoison                       // damage over time (Mag HP/sec for Dur)
+	EffDrain                        // damage over time that leeches the HP to the shooter
+	EffBleed                        // damage over time from a wound (no leech; red tint)
+	EffPull                         // yank the target in toward the shooter (the elephant's hook)
 )
 
 // Target selects who a weapon's effect applies to.
@@ -1190,7 +1427,8 @@ type WeaponDef struct {
 	Cost     float64 // ammo drawn per shot (0 = 1); the regen pool soft-limits fire
 	Effect   Effect
 	Affects  Target
-	Glyph    byte // wire-cheap render hint                        [W4]
+	Glyph    byte      // wire-cheap render hint                   [W4]
+	Cause    KillCause // kill-feed label (zero = CauseCannon)
 }
 
 // W4 delivery tuning.
@@ -1205,14 +1443,29 @@ const (
 
 // Weapon palette indices (the wire identity; server and door share this build).
 const (
-	wepCannon  = iota // default damage bolt
-	wepSlower         // drags the target's speed
-	wepMedic          // heals an ally
-	wepKnocker        // shoves the target back
-	wepBuster         // strips a target's shield
-	wepGrenade        // lobbed, blast-radius damage
-	wepMine           // dropped, proximity blast
-	wepLaser          // hitscan beam
+	wepCannon   = iota // default damage bolt
+	wepSlower          // drags the target's speed
+	wepMedic           // heals an ally
+	wepKnocker         // shoves the target back
+	wepBuster          // strips a target's shield
+	wepGrenade         // lobbed, blast-radius damage
+	wepMine            // dropped, proximity blast
+	wepLaser           // hitscan beam
+	wepHealBomb        // lobbed blast that heals allies in radius (butterfly secondary)
+	wepPound           // melee: instant radial strike that hits everyone in range (gorilla)
+	wepFlame           // fire breath: forward cone AOE (t-rex)
+	wepVenom           // poison spit: bite + damage-over-time (serpent)
+	wepTusks           // melee gore: heavy radial strike + shove (elephant)
+	wepAegis           // shield spray: forward cone that shields allies (elephant trunk)
+	wepTalon           // fast light bolt, strafing-run cadence (falcon)
+	wepGust            // wing blast: forward cone knockback (falcon)
+	wepAura            // radial pulse: heals allies in range, stings foes (stag)
+	wepSwift           // ally speed boost bolt; stings foes (stag)
+	wepSnap            // close-range bite (turtle; its B became the shell, so the
+	//                    primary has to carry its lethality)
+	wepHammer  // heavy two-handed melee swing (minotaur; B raises the barrier)
+	wepScratch // fast claw swipe that leaves a bleeding wound (tiger)
+	wepHook    // trunk hook: a ranged grab that reels a foe in to melee (elephant)
 )
 
 // Weapons is the built-in weapon palette. Referenced by index. CANNON preserves
@@ -1221,12 +1474,30 @@ const (
 var Weapons = []WeaponDef{
 	{Name: "CANNON", Delivery: DeliverBolt, Cost: 1, Effect: Effect{Kind: EffDamage}, Affects: TargetFoes, Glyph: 'o'},
 	{Name: "SLOWER", Delivery: DeliverBolt, Cooldown: 1.0, Cost: 2, Effect: Effect{Kind: EffSlow, Mag: 0.55, Dur: 2.5}, Affects: TargetFoes, Glyph: '~'},
-	{Name: "MEDIC", Delivery: DeliverBolt, Cooldown: 1.2, Cost: 2, Effect: Effect{Kind: EffHeal, Mag: 25}, Affects: TargetAllies, Glyph: '+'},
+	{Name: "MEDIC", Delivery: DeliverBolt, Damage: 8, Cooldown: 1.2, Cost: 2, Effect: Effect{Kind: EffHeal, Mag: 25}, Affects: TargetAllies, Glyph: '+'},
 	{Name: "KNOCKER", Delivery: DeliverBolt, Cooldown: 1.1, Cost: 2, Effect: Effect{Kind: EffKnockback, Mag: 4}, Affects: TargetFoes, Glyph: '*'},
 	{Name: "BUSTER", Delivery: DeliverBolt, Cooldown: 1.5, Cost: 2, Effect: Effect{Kind: EffShieldBust}, Affects: TargetFoes, Glyph: 'x'},
 	{Name: "GRENADE", Delivery: DeliverLob, Damage: 32, Speed: 20, Arc: lobGravity, Blast: 4, Cooldown: 1.3, Cost: 3, Effect: Effect{Kind: EffDamage}, Affects: TargetFoes, Glyph: 'g'},
 	{Name: "MINE", Delivery: DeliverMine, Damage: 45, Blast: 4, Cooldown: 2.0, Cost: 3, Effect: Effect{Kind: EffDamage}, Affects: TargetFoes, Glyph: 'm'},
-	{Name: "LASER", Delivery: DeliverBeam, Damage: 18, Life: 40, Cooldown: 0.5, Cost: 1, Effect: Effect{Kind: EffDamage}, Affects: TargetFoes, Glyph: '='},
+	{Name: "LASER", Delivery: DeliverBeam, Damage: 18, Life: 28, Cooldown: 0.5, Cost: 2, Effect: Effect{Kind: EffDamage}, Affects: TargetFoes, Glyph: '='},
+	{Name: "HEALBOMB", Delivery: DeliverLob, Speed: 20, Arc: lobGravity, Blast: 5, Cooldown: 1.6, Cost: 3, Effect: Effect{Kind: EffHeal, Mag: 30}, Affects: TargetAllies, Glyph: '+'},
+	{Name: "POUND", Delivery: DeliverMelee, Damage: 38, Blast: 4.5, Cooldown: 0.7, Cost: 2, Effect: Effect{Kind: EffKnockback, Mag: 5}, Affects: TargetFoes, Glyph: '*', Cause: CauseMelee},
+	// FLAME is the burn of the design notes: an initial bite plus a lingering
+	// drain that leeches the burned HP back to the breather.
+	{Name: "FLAME", Delivery: DeliverCone, Damage: 15, Blast: 9, Cooldown: 0.2, Cost: 1, Effect: Effect{Kind: EffDrain, Mag: 4, Dur: 3}, Affects: TargetFoes, Glyph: '^', Cause: CauseFire},
+	{Name: "VENOM", Delivery: DeliverBolt, Damage: 6, Cooldown: 0.8, Cost: 1, Effect: Effect{Kind: EffPoison, Mag: 5, Dur: 4}, Affects: TargetFoes, Glyph: 'v', Cause: CausePoison},
+	{Name: "TUSKS", Delivery: DeliverMelee, Damage: 30, Blast: 3.2, Cooldown: 0.9, Cost: 2, Effect: Effect{Kind: EffKnockback, Mag: 2.5}, Affects: TargetFoes, Glyph: '*', Cause: CauseMelee},
+	{Name: "AEGIS", Delivery: DeliverCone, Blast: 7, Cooldown: 7.0, Cost: 3, Effect: Effect{Kind: EffShield, Dur: 2.5}, Affects: TargetAllies, Glyph: '+'},
+	{Name: "TALON", Delivery: DeliverBolt, Damage: 10, Speed: 30, Cooldown: 0.28, Cost: 1, Effect: Effect{Kind: EffDamage}, Affects: TargetFoes, Glyph: '\''},
+	{Name: "GUST", Delivery: DeliverCone, Damage: 6, Blast: 7, Cooldown: 2.5, Cost: 2, Effect: Effect{Kind: EffKnockback, Mag: 5}, Affects: TargetFoes, Glyph: '~', Cause: CauseMelee},
+	{Name: "AURA", Delivery: DeliverMelee, Damage: 6, Blast: 5, Cooldown: 1.0, Cost: 2, Effect: Effect{Kind: EffHeal, Mag: 14}, Affects: TargetAllies, Glyph: '+', Cause: CauseMelee},
+	{Name: "SWIFT", Delivery: DeliverBolt, Damage: 6, Cooldown: 1.2, Cost: 2, Effect: Effect{Kind: EffSpeed, Mag: 0.45, Dur: 3}, Affects: TargetAllies, Glyph: '>', Cause: CauseMelee},
+	{Name: "SNAP", Delivery: DeliverMelee, Damage: 16, Blast: 2.4, Cooldown: 0.8, Cost: 1, Effect: Effect{Kind: EffDamage}, Affects: TargetFoes, Glyph: '*', Cause: CauseMelee},
+	{Name: "HAMMER", Delivery: DeliverMelee, Damage: 45, Blast: 4.0, Cooldown: 1.0, Cost: 2, Effect: Effect{Kind: EffKnockback, Mag: 2}, Affects: TargetFoes, Glyph: '*', Cause: CauseMelee},
+	{Name: "SCRATCH", Delivery: DeliverMelee, Damage: 12, Blast: 2.6, Cooldown: 0.55, Cost: 1, Effect: Effect{Kind: EffBleed, Mag: 6, Dur: 4}, Affects: TargetFoes, Glyph: '*', Cause: CauseBleed},
+	// HOOK: a hitscan grab. Low cooldown here (the real gate is hookRecharge, a
+	// separate timer) so reeling a foe in doesn't lock out the follow-up gore.
+	{Name: "HOOK", Delivery: DeliverBeam, Damage: 8, Life: 22, Cooldown: 0.3, Cost: 1, Effect: Effect{Kind: EffPull, Mag: hookPullDist}, Affects: TargetFoes, Glyph: '=', Cause: CauseMelee},
 }
 
 // Flag is a Flag Run pickup, or (in CTF) a team flag that can be carried,
@@ -1284,6 +1555,10 @@ const (
 	CauseTurret                   // a map turret entity
 	CauseHazard                   // a hazard pad / environment
 	CauseSuicide                  // self / unknown
+	CauseMelee                    // a melee strike (gorilla pound, etc.)
+	CauseFire                     // fire breath (t-rex)
+	CausePoison                   // venom / burn damage-over-time
+	CauseBleed                    // a bleeding wound (tiger's scratch)
 )
 
 // Word is the "...with a X" / "the X" fragment for the kill feed.
@@ -1295,6 +1570,14 @@ func (c KillCause) Word() string {
 		return "a hazard"
 	case CauseSuicide:
 		return "the void"
+	case CauseMelee:
+		return "bare hands"
+	case CauseFire:
+		return "fire breath"
+	case CausePoison:
+		return "venom"
+	case CauseBleed:
+		return "blood loss"
 	default:
 		return "a cannon"
 	}
@@ -1323,6 +1606,8 @@ type MatchSnap struct {
 	Wave       int         // Survival: current wave
 	TeamScore  [2]int      // CTF: captures per team
 	WinnerTeam int         // CTF: winning team (0/1), -1 = tie/none
+	Events     []string    // author messages this tick (toast banners)
+	Ready      int         // lobby: humans who have locked their vote (ENTER)
 }
 
 // Match returns the current match state for the snapshot/wire.
@@ -1343,7 +1628,7 @@ func (w *World) Match() MatchSnap {
 	return MatchSnap{
 		Mode: w.Mode, Phase: w.Phase, Timer: w.Timer, WinnerID: w.WinnerID,
 		FlagsLeft: left, FlagsTotal: len(w.flags), Votes: votes, Kills: w.kills, MapIdx: w.MapIdx, Wave: w.wave,
-		TeamScore: w.teamScore, WinnerTeam: w.winnerTeam,
+		TeamScore: w.teamScore, WinnerTeam: w.winnerTeam, Events: w.events, Ready: w.lobbyReadyCount(),
 	}
 }
 
@@ -1374,15 +1659,202 @@ type World struct {
 	assistAim bool         // sticky aim assist for human players (default on)
 	kills     []KillEvent  // kills recorded this tick (consumed into MatchSnap)
 	spawnQ    []Projectile // shots queued mid-step (explosion FX), appended after
+
+	nav   *navGrid // bot pathfinding grid (lazy; re-baked when solids change)
+	ticks int64    // simulation tick counter (drives nav repath staggering)
+
+	// campLives, when >0, overrides the lives humans get at match start (the
+	// FLAG RUN campaign carries a life pool across levels while the map's own
+	// Rules.Lives=1 makes its bots stay dead).
+	campLives int
+
+	// demoHero (-1 = none) marks one bot as the attract demo's player stand-in:
+	// it alone collects Flag Run flags (the rest defend, as they would against
+	// a human), and it renders as the player's default tank.
+	demoHero int
+
+	// event-driven behavior runtime (see behavior.go / EVENTS.md)
+	tickT     float64        // accumulator for the periodic `tick` signal
+	vars      map[string]int // per-match blackboard
+	logic     []Behavior     // active map's director rules
+	logicDone []bool         // Once latch for director rules
+	bus       []Signal       // signals queued this tick
+	delayed   []delayedSig   // pending delayed emits
+	events    []string       // author messages this tick (toasts -> MatchSnap.Events)
+	started   bool           // whether the `start` signal has fired this match
+	voteLog   []VoteEvent    // lobby vote commits since the last drain (server -> chat toasts)
+}
+
+// VoteEvent records a player committing a lobby vote, so the server can announce
+// "<who> voted for <map>" as a chat toast. Drained each tick by the arena.
+type VoteEvent struct {
+	Who    string
+	MapIdx int
+}
+
+// DrainVoteLog returns and clears the vote commits accumulated since the last
+// call. The arena reads it every tick (so none are lost) and turns each into a
+// chat notification.
+func (w *World) DrainVoteLog() []VoteEvent {
+	out := w.voteLog
+	w.voteLog = nil
+	return out
 }
 
 // SetAimAssist toggles sticky aim assist for human players.
 func (w *World) SetAimAssist(on bool) { w.assistAim = on }
 
+// SetCampaignLives sets the life pool humans start the next match with,
+// overriding the map's Rules.Lives for humans only (campaign carry-over).
+func (w *World) SetCampaignLives(n int) { w.campLives = n }
+
+// SetDemoHero marks bot i as the attract demo's player stand-in (see demoHero).
+func (w *World) SetDemoHero(i int) { w.demoHero = i }
+
+// DemoHero returns the stand-in's tank index (-1 = none).
+func (w *World) DemoHero() int { return w.demoHero }
+
 // SetDifficulty sets the active bot profile; takes effect at the next match start
 // (when bots re-roll their per-bot AI). Offline play sets this from the user's
 // chosen tier; the arena server sets it from its config.
 func (w *World) SetDifficulty(d Difficulty) { w.bots = ProfileFor(d) }
+
+// rollBotLook gives a bot a fresh character (chassis + body + matching secondary),
+// so the field changes appearance between matches like the player can re-pick.
+func (w *World) rollBotLook(i int) {
+	t := &w.Tanks[i]
+	if i == w.demoHero { // the demo's player stand-in looks like the player default
+		t.body, t.Vehicle = BodyTank, ChassisFor(BodyTank)
+		t.custom = nil
+		t.weapon2 = defaultSecondary(BodyTank)
+		return
+	}
+	t.body = botBodies[rand.Intn(len(botBodies))] // character first ...
+	t.Vehicle = ChassisFor(t.body)                // ... its chassis comes with it
+	t.custom = nil
+	t.weapon2 = defaultSecondary(t.body)
+}
+
+// assignHealers gives each team exactly one butterfly healer (a strong team pick that
+// never gets chosen randomly - it's left out of botBodies since it's useless without
+// allies). Called after teams are assigned + looks rolled, so there's one per side.
+func (w *World) assignHealers() {
+	for team := 0; team < 2; team++ {
+		var bots []int
+		has := false
+		for i := range w.Tanks {
+			t := &w.Tanks[i]
+			if !t.Bot || t.gone || t.Team != team {
+				continue
+			}
+			bots = append(bots, i)
+			if t.body == BodyButterfly {
+				has = true
+			}
+		}
+		if has || len(bots) < 2 { // already covered, or too few to spare one
+			continue
+		}
+		t := &w.Tanks[bots[rand.Intn(len(bots))]]
+		t.body = BodyButterfly
+		t.Vehicle = ChassisFor(t.body) // SCOUT chassis: fragile flyer
+		t.custom, t.weapon2 = nil, wepHealBomb
+		t.HP, t.ammo = veh(t.Vehicle).MaxHP, veh(t.Vehicle).AmmoMax
+	}
+}
+
+// mostHurtAlly returns the most-wounded living teammate worth healing, or -1.
+func (w *World) mostHurtAlly(self int) int {
+	if w.rules().Teams != 2 {
+		return -1 // no allies to heal outside team modes
+	}
+	s := &w.Tanks[self]
+	best, bestPct := -1, 0.92 // only bother below ~92% HP
+	for j := range w.Tanks {
+		t := &w.Tanks[j]
+		if j == self || t.Dead || t.gone || t.Team != s.Team {
+			continue
+		}
+		max := t.veh().MaxHP
+		if max <= 0 {
+			max = 1
+		}
+		if pct := float64(t.HP) / float64(max); pct < bestPct {
+			bestPct, best = pct, j
+		}
+	}
+	return best
+}
+
+// nearestAlly returns the closest living teammate (-1 outside team modes / none).
+func (w *World) nearestAlly(self int) int {
+	if w.rules().Teams != 2 {
+		return -1
+	}
+	s := &w.Tanks[self]
+	best, bestD := -1, math.MaxFloat64
+	for j := range w.Tanks {
+		t := &w.Tanks[j]
+		if j == self || t.Dead || t.gone || t.Team != s.Team {
+			continue
+		}
+		d := t.Pos.Sub(s.Pos)
+		if dd := d.X*d.X + d.Z*d.Z; dd < bestD {
+			bestD, best = dd, j
+		}
+	}
+	return best
+}
+
+// botHealerAI drives a butterfly bot to mend its most-wounded ally (the medic bolt
+// heals on hit); with no one hurt it trails the squad rather than wandering off.
+func (w *World) botHealerAI(i int, dt float64) {
+	b := &w.Tanks[i]
+	v := b.veh()
+	ally := w.mostHurtAlly(i)
+	if ally < 0 {
+		if mate := w.nearestAlly(i); mate >= 0 { // stick with the team
+			d := w.Tanks[mate].Pos.Sub(b.Pos)
+			ang := math.Atan2(d.X, d.Z)
+			b.HullYaw = turnToward(b.HullYaw, w.avoidYaw(b, w.navYaw(i, w.Tanks[mate].Pos, ang)), v.HullTurn*dt)
+			if math.Hypot(d.X, d.Z) > 6 {
+				w.driveForward(i, dt, 0.7)
+			}
+			w.botVertical(i, dt, false)
+			return
+		}
+		w.botWander(i, dt)
+		return
+	}
+	a := &w.Tanks[ally]
+	d := a.Pos.Sub(b.Pos)
+	dist := math.Hypot(d.X, d.Z)
+	ang := math.Atan2(d.X, d.Z)
+	b.HullYaw = turnToward(b.HullYaw, w.avoidYaw(b, w.navYaw(i, a.Pos, ang)), v.HullTurn*dt)
+	wantPitch := clampPitch(math.Atan2((a.Pos.Y+turretAimHeight)-(b.Pos.Y+EyeHeight), dist))
+	b.TurretYaw = turnToward(b.TurretYaw, angDiff(ang, b.HullYaw), b.aiTrack*dt)
+	b.TurretPitch = turnToward(b.TurretPitch, wantPitch, b.aiTrack*dt)
+	approach, radial := 9.0, false // butterfly: close to heal-beam range, then hold
+	if b.body == BodyStag {
+		approach, radial = 3.5, true // the aura is a radial pulse: get alongside
+	}
+	if dist > approach {
+		w.driveForward(i, dt, 0.8)
+	}
+	w.botVertical(i, dt, w.wantHop(b))
+	if radial {
+		if dist < 4.5 && b.cooldown <= 0 {
+			w.fire(i) // aura pulse -> heals everyone alongside
+		} else if b.weapon2 == wepSwift && b.cooldown2 <= 0 && dist > 6 && dist < 18 &&
+			math.Abs(angDiff(b.HullYaw+b.TurretYaw, ang)) < botAimTol &&
+			math.Abs(wantPitch-b.TurretPitch) < botAimTol {
+			w.fireWeapon(i, &Weapons[wepSwift], true) // too far to pulse: speed the ally instead
+		}
+	} else if dist < botFireRange && math.Abs(angDiff(b.HullYaw+b.TurretYaw, ang)) < botAimTol &&
+		math.Abs(wantPitch-b.TurretPitch) < botAimTol && b.cooldown <= 0 {
+		w.fire(i) // medic bolt -> heals the ally
+	}
+}
 
 // rollBotAI rolls a bot's per-bot AI params around the active profile's centers,
 // so bots within a tier vary (engagement distance, react/track, wobble, cadence).
@@ -1409,7 +1881,7 @@ func (w *World) rollBotAI(i int) {
 func (w *World) Entities() []EntitySnap {
 	out := make([]EntitySnap, len(w.entities))
 	for i := range w.entities {
-		out[i] = EntitySnap{HP: w.entities[i].HP, Dead: w.entities[i].Dead, Yaw: w.entities[i].Yaw, Pitch: w.entities[i].Pitch}
+		out[i] = EntitySnap{HP: w.entities[i].HP, Dead: w.entities[i].Dead, Yaw: w.entities[i].Yaw, Pitch: w.entities[i].Pitch, Pos: w.entities[i].Pos}
 	}
 	return out
 }
@@ -1440,7 +1912,10 @@ func (w *World) Zones() []ZoneSnap {
 }
 
 // resetEntities re-instantiates the active map's entities for a new match.
-func (w *World) resetEntities() { w.entities = w.ActiveMap().NewEntities() }
+func (w *World) resetEntities() {
+	w.entities = w.ActiveMap().NewEntities()
+	w.resetBehaviors() // re-seed blackboard + director rules, clear the bus
+}
 
 // ActiveMap returns the world's current map.
 func (w *World) ActiveMap() Map {
@@ -1473,7 +1948,56 @@ func (w *World) PinMap(idx int) {
 
 // collide pushes a point out of the world's live collidables (static obstacles
 // plus alive solid entities), so a destructible wall blocks until destroyed.
-func (w *World) collide(p *V3) { CollideBoxes(w.collidables(), p) }
+func (w *World) collide(p *V3) {
+	CollideBoxes(w.collidables(), p)
+	CollideRamps(w.ActiveMap().Ramps, p)
+}
+
+// CollideRamps blocks horizontal movement into the SOLID body of a ramp - the
+// wedge beneath its sloped surface - so a ramp is a solid wedge, not a tent you
+// can walk under or through the back of. Walking UP the incline or standing on
+// top is unaffected: there your feet sit at/above the local surface, so the
+// block (which only fires when you're below the surface) never triggers. Shared
+// by the server/offline sim and the net predictor.
+func CollideRamps(ramps []Ramp, p *V3) {
+	const rad = 1.0
+	for i := range ramps {
+		r := ramps[i]
+		minx, maxx := r.Pos.X-r.Half.X-rad, r.Pos.X+r.Half.X+rad
+		minz, maxz := r.Pos.Z-r.Half.Z-rad, r.Pos.Z+r.Half.Z+rad
+		if p.X <= minx || p.X >= maxx || p.Z <= minz || p.Z >= maxz {
+			continue
+		}
+		// Surface height at the nearest point of the ramp footprint to us.
+		cx := math.Max(r.Pos.X-r.Half.X, math.Min(p.X, r.Pos.X+r.Half.X))
+		cz := math.Max(r.Pos.Z-r.Half.Z, math.Min(p.Z, r.Pos.Z+r.Half.Z))
+		rh, ok := rampHeight(r, cx, cz)
+		if !ok || p.Y >= rh-stepUp {
+			continue // on/above the surface (walking up or standing): not the wedge
+		}
+		dxl, dxr, dzl, dzr := p.X-minx, maxx-p.X, p.Z-minz, maxz-p.Z
+		mn, axis := dxl, 0
+		if dxr < mn {
+			mn, axis = dxr, 1
+		}
+		if dzl < mn {
+			mn, axis = dzl, 2
+		}
+		if dzr < mn {
+			mn, axis = dzr, 3
+		}
+		switch axis {
+		case 0:
+			p.X = minx
+		case 1:
+			p.X = maxx
+		case 2:
+			p.Z = minz
+		case 3:
+			p.Z = maxz
+		}
+	}
+}
 
 // collidables is the set a tank/shot collides with this tick: the map's static
 // obstacles plus a box per alive, solid entity. Returns the map slice directly
@@ -1557,6 +2081,43 @@ func CollideBoxes(boxes []Box, p *V3) {
 	}
 }
 
+// obstacleSide reports whether p is pressed against an obstacle's vertical face -
+// inside its inflated footprint and below its climbable top - the exact condition
+// CollideBoxes uses to push a tank out. The insect uses this to scale the face
+// instead of bouncing off it. Arena border walls (clampArena) and ramps are not
+// collidables here, so you scale props, not your way out of the arena.
+func (w *World) obstacleSide(p V3) bool {
+	const rad = 1.0
+	for _, b := range w.collidables() {
+		if p.Y >= b.Pos.Y+b.Half.Y-stepUp {
+			continue // at/above the top: that's the surface, not a face
+		}
+		if math.Abs(p.X-b.Pos.X) < b.Half.X+rad && math.Abs(p.Z-b.Pos.Z) < b.Half.Z+rad {
+			return true
+		}
+	}
+	return false
+}
+
+// climbCrest returns the resting spot atop the obstacle whose face p is scaling:
+// the box top, with p's XZ pulled just inside the footprint so the climber stands
+// ON the surface instead of bobbing at the lip (where the ground is still the
+// floor and gravity drags it back off). ok=false if p isn't pressing a face.
+func (w *World) climbCrest(p V3) (V3, bool) {
+	const rad, inset = 1.0, 0.4
+	for _, b := range w.collidables() {
+		if p.Y >= b.Pos.Y+b.Half.Y-stepUp {
+			continue
+		}
+		if math.Abs(p.X-b.Pos.X) < b.Half.X+rad && math.Abs(p.Z-b.Pos.Z) < b.Half.Z+rad {
+			x := math.Max(b.Pos.X-b.Half.X+inset, math.Min(p.X, b.Pos.X+b.Half.X-inset))
+			z := math.Max(b.Pos.Z-b.Half.Z+inset, math.Min(p.Z, b.Pos.Z+b.Half.Z-inset))
+			return V3{x, b.Pos.Y + b.Half.Y, z}, true
+		}
+	}
+	return V3{}, false
+}
+
 // GroundHeight returns the surface height under (x,z) for a tank whose feet are
 // at feetY: the top of any box/ramp it's over and can reach (feet within stepUp
 // of the surface), else 0 (the floor). This is how tanks stand on objects.
@@ -1589,6 +2150,30 @@ func (w *World) ground(x, z, feetY float64) float64 {
 	return GroundBoxes(w.collidables(), w.ActiveMap().Ramps, x, z, feetY)
 }
 
+// zoneAir is how far above the local surface still counts as "on the hill" - a
+// jump's worth, so jumping or a low hover while holding doesn't drop the capture.
+const zoneAir = 1.6
+
+// inZone reports whether a tank at p is holding zone z: inside the XZ footprint
+// AND standing on the ground surface there (within stepUp below to a jump above) -
+// NOT flying high over it, NOT at the base below it. Because an elevated hill's
+// footprint sits on top of its platform, the only place you can be inside it is
+// up on the platform, so capturing it requires climbing; a flat or low hill (or
+// the auto-placed default hill on any terrain) captures from its surface as
+// before. Anchoring to the live surface makes it robust to any platform height
+// (the authored Pos.Y band wrongly froze maps whose dais was a hair too tall).
+func (w *World) inZone(z *Zone, p V3) bool {
+	if math.Abs(p.X-z.Pos.X) >= z.Half.X || math.Abs(p.Z-z.Pos.Z) >= z.Half.Z {
+		return false
+	}
+	// Probe the terrain TOP at this XZ (large feetY) - the hill's standing surface,
+	// independent of where the tank currently is. You hold the hill only if your
+	// feet are at that surface (a stepUp below to a jump above); below it you're
+	// inside/at the base of the platform (not on the hill), above it you're flying.
+	surf := w.ground(p.X, p.Z, 1e9)
+	return p.Y >= surf-stepUp && p.Y <= surf+zoneAir
+}
+
 // rampHeight returns the ramp surface height at (x,z) and whether (x,z) is on it.
 func rampHeight(r Ramp, x, z float64) (float64, bool) {
 	if math.Abs(x-r.Pos.X) > r.Half.X || math.Abs(z-r.Pos.Z) > r.Half.Z {
@@ -1613,20 +2198,79 @@ func rampHeight(r Ramp, x, z float64) (float64, bool) {
 	return frac * r.H, true
 }
 
+// rampMouthXZ / rampTopXZ give a ramp's low (ground) and high (platform) ends in
+// XZ, by rise direction. Dir: 0=+X, 1=-X, 2=+Z, 3=-Z (the high side).
+func rampMouthXZ(r Ramp) (float64, float64) {
+	switch r.Dir {
+	case 0:
+		return r.Pos.X - r.Half.X, r.Pos.Z
+	case 1:
+		return r.Pos.X + r.Half.X, r.Pos.Z
+	case 2:
+		return r.Pos.X, r.Pos.Z - r.Half.Z
+	default:
+		return r.Pos.X, r.Pos.Z + r.Half.Z
+	}
+}
+
+func rampTopXZ(r Ramp) (float64, float64) {
+	switch r.Dir {
+	case 0:
+		return r.Pos.X + r.Half.X, r.Pos.Z
+	case 1:
+		return r.Pos.X - r.Half.X, r.Pos.Z
+	case 2:
+		return r.Pos.X, r.Pos.Z + r.Half.Z
+	default:
+		return r.Pos.X, r.Pos.Z - r.Half.Z
+	}
+}
+
+// rampApproach steers a bot up to an elevated hill: it picks the ramp leading up
+// to the zone whose mouth is nearest the bot, and returns the mouth to drive to
+// (to get onto the ramp) or, once the bot is on the ramp, its high end (to climb
+// onto the platform). Returns false if the hill has no ascending ramp (e.g. a
+// stepped pyramid - the bot just walks up via stepUp).
+func (w *World) rampApproach(z *Zone, p V3) (V3, bool) {
+	ramps := w.ActiveMap().Ramps
+	best, bestD := -1, math.MaxFloat64
+	for i := range ramps {
+		tx, tz := rampTopXZ(ramps[i])
+		if math.Abs(tx-z.Pos.X) > z.Half.X+3 || math.Abs(tz-z.Pos.Z) > z.Half.Z+3 {
+			continue // this ramp doesn't lead up to this hill
+		}
+		mx, mz := rampMouthXZ(ramps[i])
+		if d := (mx-p.X)*(mx-p.X) + (mz-p.Z)*(mz-p.Z); d < bestD {
+			bestD, best = d, i
+		}
+	}
+	if best < 0 {
+		return V3{}, false
+	}
+	r := ramps[best]
+	if math.Abs(p.X-r.Pos.X) < r.Half.X && math.Abs(p.Z-r.Pos.Z) < r.Half.Z {
+		tx, tz := rampTopXZ(r) // already on the ramp: climb toward the platform
+		return V3{X: tx, Z: tz}, true
+	}
+	mx, mz := rampMouthXZ(r) // get onto the ramp at its base first
+	return V3{X: mx, Z: mz}, true
+}
+
 // NewWorld creates a world for the given mode, seeded with numBots AI tanks
 // (indices 0..numBots-1). Human players are added afterward with AddPlayer. The
 // match starts in a countdown.
 func NewWorld(numBots int, mode Mode) *World {
 	w := &World{Mode: mode, Phase: PhaseCountdown, Timer: countdownTime, WinnerID: -1,
-		bots: ProfileFor(DiffNormal), assistAim: true} // gentler default; setters override
+		demoHero: -1, bots: ProfileFor(DiffNormal), assistAim: true} // gentler default; setters override
 	if len(Maps) > 0 {
-		w.MapIdx = rand.Intn(len(Maps)) // start on a random map, not always the empty one
+		w.MapIdx = randomMapIdx(mode, numBots+1) // a map suited to the mode and session size
 	}
 	for b := 0; b < numBots; b++ {
-		vi := rand.Intn(len(Vehicles))
+		body := botBodies[rand.Intn(len(botBodies))] // character first; chassis follows
+		vi := ChassisFor(body)
 		w.Tanks = append(w.Tanks, Tank{
 			Bot: true, HP: veh(vi).MaxHP, ammo: veh(vi).AmmoMax, guard: spawnGuardTime, vote: -1, Vehicle: vi,
-			body:  botBodies[rand.Intn(len(botBodies))], // mix in creatures, not just tanks
+			body:  body,
 			Color: BotPalette[b%len(BotPalette)], Name: botName(b), Team: -1, Carrying: -1, weapon2: wepGrenade,
 		})
 		w.Tanks[b].Pos = w.spawnPoint(b)
@@ -1669,7 +2313,13 @@ func (w *World) AddPlayerCustom(color [3]float64, vehicle int, name string, cust
 		if custom != nil {
 			eff = *custom
 		}
-		t := Tank{HP: eff.MaxHP, ammo: eff.AmmoMax, Color: color, Name: name, guard: spawnGuardTime, vote: -1, Vehicle: vehicle, custom: custom, body: body, lives: survivalLives, Team: -1, Carrying: -1, weapon2: wepGrenade}
+		t := Tank{HP: eff.MaxHP, ammo: eff.AmmoMax, Color: color, Name: name, guard: spawnGuardTime, vote: -1, Vehicle: vehicle, custom: custom, body: body, lives: survivalLives, Team: -1, Carrying: -1, weapon2: defaultSecondary(body)}
+		if body == BodyMinotaur {
+			t.shieldHP = minoShieldMax // join with a full barrier
+		}
+		if body == BodyElephant {
+			t.bufferHP = elephantBufferMax // join with a full shield buffer
+		}
 		t.Pos = w.spawnPoint(i)
 		t.HullYaw = w.faceTarget(i)
 		return t
@@ -1684,6 +2334,31 @@ func (w *World) AddPlayerCustom(color [3]float64, vehicle int, name string, cust
 	w.Tanks = append(w.Tanks, Tank{})
 	w.Tanks[i] = mk(i)
 	return i
+}
+
+// SetPlayerLoadout swaps a human tank's character (body/chassis/color/secondary).
+// The body-derived fields take effect on the next respawn (respawns() refreshes
+// HP/ammo from the new chassis), so the natural use is to change while dead. It
+// never touches live HP, so it can't be abused as a mid-fight heal.
+func (w *World) SetPlayerLoadout(i int, color [3]float64, vehicle int, custom *Vehicle, body int) {
+	if i < 0 || i >= len(w.Tanks) {
+		return
+	}
+	t := &w.Tanks[i]
+	if t.gone || t.Bot {
+		return
+	}
+	t.body = body
+	t.Vehicle = vehicle
+	t.custom = custom
+	t.Color = w.freeColor(color)
+	t.weapon2 = defaultSecondary(body)
+	switch body {
+	case BodyMinotaur:
+		t.shieldHP = minoShieldMax
+	case BodyElephant:
+		t.bufferHP = elephantBufferMax
+	}
 }
 
 // RemovePlayer marks a tank's slot vacated (skipped everywhere, reusable).
@@ -1751,7 +2426,259 @@ func clampArena(p *V3, half float64) {
 func (w *World) half() float64 { return MapHalf(w.ActiveMap()) }
 
 // fire shoots a tank's primary weapon (the cannon for now).
-func (w *World) fire(owner int) { w.fireWeapon(owner, &Weapons[wepCannon], false) }
+func (w *World) fire(owner int) {
+	t := &w.Tanks[owner]
+	if t.shieldUp { // can't swing while bracing the barrier (covers bots too)
+		return
+	}
+	if t.body == BodyElephant { // smart primary: gore up close, else hook them in
+		w.elephantFire(owner)
+		return
+	}
+	def := &Weapons[wepCannon]
+	if bd := bodyDefFor(t.body); bd.weapon >= 0 { // beasts fire their signature
+		def = &Weapons[bd.weapon]
+	}
+	w.fireWeapon(owner, def, false)
+}
+
+// elephantFire gores with TUSKS when a foe is already in reach, otherwise fires
+// the trunk HOOK to reel one in. The hook is gated by its own recharge (hookT,
+// not the shared fire cooldown) so a grab never locks out the follow-up gore.
+func (w *World) elephantFire(owner int) {
+	t := &w.Tanks[owner]
+	if w.foeInRange(owner, Weapons[wepTusks].Blast+1.0) {
+		w.fireWeapon(owner, &Weapons[wepTusks], false)
+		return
+	}
+	if t.hookT <= 0 {
+		w.fireWeapon(owner, &Weapons[wepHook], false)
+		t.hookT = hookRecharge
+	}
+}
+
+// foeInRange reports whether the nearest opponent is within r units.
+func (w *World) foeInRange(i int, r float64) bool {
+	tgt := w.nearestEnemy(i)
+	if tgt < 0 {
+		return false
+	}
+	d := w.Tanks[tgt].Pos.Sub(w.Tanks[i].Pos)
+	return d.X*d.X+d.Z*d.Z <= r*r
+}
+
+const lungeSpeed = 16.0 // forward leap speed for melee chargers (decays via stepLunge)
+
+// BodySizeScale enlarges certain characters beyond the normalized size - both the
+// rendered model AND the hit footprint - so e.g. the T-Rex towers and is a
+// correspondingly bigger target (fair: big and powerful, but easy to hit).
+func BodySizeScale(body int) float64 {
+	switch body {
+	case BodyTrex:
+		return 1.3 // towering, but 1.75 read too large; ~75% of that
+	case BodyQuad:
+		return 1.9 // the tiger read far too small; nearly double so it has presence
+	case BodyInsect:
+		return 1.5 // bumped up from the tiny base size, then trimmed to 75%
+	case BodyCrab:
+		return 1.5 // wide armored shell should LOOK the part
+	case BodyElephant:
+		return 1.35 // it should tower like the trex does
+	case BodyMinotaur:
+		return 1.2 // a big bruiser, broader than a humanoid
+	}
+	return 1
+}
+
+// areaHit applies an area strike's payload to one eligible target. Knockback
+// weapons shove radially out from the strike (and still deal their damage);
+// everything else rides applyShotHit, so cones and melee strikes can carry any
+// effect in the palette (fire breath, shield spray, heal pulse). dx/dz/dist is
+// the target's offset from the firer.
+func (w *World) areaHit(s *Projectile, ti int, dx, dz, dist float64) {
+	if w.absorbedByShield(s, ti) {
+		return
+	}
+	if s.eff == EffKnockback {
+		t := &w.Tanks[ti]
+		if s.mag > 0 && dist > 0.01 {
+			t.Pos.X += dx / dist * s.mag
+			t.Pos.Z += dz / dist * s.mag
+			clampArena(&t.Pos, w.half())
+			w.collide(&t.Pos)
+		}
+		t.hitFlash = tankHitFlash
+		if s.dmg > 0 {
+			w.hurt(ti, s.dmg, s.owner, s.cause)
+		}
+		return
+	}
+	w.applyShotHit(s, ti)
+}
+
+// coneStrike applies a weapon's payload to every eligible tank within a forward
+// cone (the T-Rex's fire breath, the elephant's shield spray) and spawns a
+// forward plume. dir is the 3D aim direction.
+func (w *World) coneStrike(s *Projectile, dir V3) {
+	o := &w.Tanks[s.owner]
+	rng := s.blast
+	if rng <= 0 {
+		rng = 9
+	}
+	n := math.Hypot(dir.X, dir.Z)
+	if n < 1e-6 {
+		return
+	}
+	fx, fz := dir.X/n, dir.Z/n // horizontal facing
+	const cosHalf = 0.6        // ~53deg half-angle cone
+	for ti := range w.Tanks {
+		if w.Tanks[ti].cloakT > 0 {
+			continue // can't aim a cone at what you can't see
+		}
+		if !w.shotCanAffect(s, ti) {
+			continue
+		}
+		t := &w.Tanks[ti]
+		dx, dz := t.Pos.X-o.Pos.X, t.Pos.Z-o.Pos.Z
+		d2 := dx*dx + dz*dz
+		if d2 > rng*rng {
+			continue
+		}
+		dist := math.Sqrt(d2)
+		if dist < 0.01 {
+			dist = 0.01
+		}
+		if (dx*fx+dz*fz)/dist < cosHalf { // outside the forward cone
+			continue
+		}
+		w.areaHit(s, ti, dx, dz, dist)
+	}
+	if s.eff == EffShield { // the sprayer coats itself too (still worth firing in FFA)
+		if self := s.dur * 0.6; o.shieldT < self {
+			o.shieldT = self
+		}
+	}
+	at := V3{o.Pos.X, o.Pos.Y + 1.4*BodySizeScale(o.body), o.Pos.Z}
+	if s.affects == TargetAllies {
+		w.spawnSprayFX(at, fx, fz) // support plume: sparks, not fire
+	} else {
+		w.spawnFlameFX(at, fx, fz)
+	}
+}
+
+// spawnFlameFX puffs a forward plume of fire particles.
+func (w *World) spawnFlameFX(from V3, fx, fz float64) {
+	base := math.Atan2(fx, fz)
+	for i := 0; i < 12; i++ {
+		a := base + (rand.Float64()*2-1)*0.5
+		sp := 7 + rand.Float64()*7
+		w.spawnQ = append(w.spawnQ, Projectile{
+			Pos:   from,
+			vel:   V3{X: math.Sin(a) * sp, Y: 0.4 + rand.Float64()*1.6, Z: math.Cos(a) * sp},
+			life:  0.25 + rand.Float64()*0.25,
+			owner: -1,
+			fx:    true,
+			vis:   VisFlame,
+		})
+	}
+}
+
+// spawnSprayFX puffs a forward plume of spark particles (a support cone's
+// mist - the elephant's shield spray - so it doesn't read as fire).
+func (w *World) spawnSprayFX(from V3, fx, fz float64) {
+	base := math.Atan2(fx, fz)
+	for i := 0; i < 10; i++ {
+		a := base + (rand.Float64()*2-1)*0.55
+		sp := 6 + rand.Float64()*6
+		w.spawnQ = append(w.spawnQ, Projectile{
+			Pos:   from,
+			vel:   V3{X: math.Sin(a) * sp, Y: 1 + rand.Float64()*2, Z: math.Cos(a) * sp},
+			life:  0.25 + rand.Float64()*0.2,
+			owner: -1,
+			fx:    true,
+			vis:   VisSpark,
+		})
+	}
+}
+
+// meleeStrike applies a weapon's payload to every eligible tank within its Blast
+// radius of the firer at once (the gorilla's pound shoves and hurts, the stag's
+// aura heals the pack), with a ground-burst FX.
+func (w *World) meleeStrike(s *Projectile) {
+	o := &w.Tanks[s.owner]
+	rng := s.blast
+	if rng <= 0 {
+		rng = 4
+	}
+	for ti := range w.Tanks {
+		if w.Tanks[ti].cloakT > 0 {
+			continue
+		}
+		if !w.shotCanAffect(s, ti) {
+			continue
+		}
+		t := &w.Tanks[ti]
+		dx, dz := t.Pos.X-o.Pos.X, t.Pos.Z-o.Pos.Z
+		d2 := dx*dx + dz*dz
+		if d2 > rng*rng {
+			continue
+		}
+		w.areaHit(s, ti, dx, dz, math.Sqrt(d2))
+	}
+	w.spawnBlastFX(V3{o.Pos.X, o.Pos.Y + 0.3, o.Pos.Z})
+}
+
+// leapLand resolves a leaping bruiser's touchdown: anyone hostile right next
+// to the impact takes a small hit and a shove. Only a real leap slams (a
+// standing hop with the lunge spent does nothing).
+func (w *World) leapLand(i int) {
+	t := &w.Tanks[i]
+	if math.Hypot(t.lungeVX, t.lungeVZ) < lungeSpeed*0.25 {
+		return
+	}
+	const rad, dmg, shove = 2.8, 12, 1.2
+	for j := range w.Tanks {
+		v := &w.Tanks[j]
+		if j == i || v.Dead || v.gone || v.guard > 0 || v.shieldT > 0 || v.shellT > 0 {
+			continue
+		}
+		if w.rules().Teams == 2 && v.Team == t.Team {
+			continue
+		}
+		dx, dz := v.Pos.X-t.Pos.X, v.Pos.Z-t.Pos.Z
+		dd := math.Hypot(dx, dz)
+		if dd > rad {
+			continue
+		}
+		if dd > 0.01 {
+			v.Pos.X += dx / dd * shove
+			v.Pos.Z += dz / dd * shove
+			clampArena(&v.Pos, w.half())
+			w.collide(&v.Pos)
+		}
+		w.hurt(j, dmg, i, CauseCannon)
+	}
+}
+
+// stepLunge advances and damps a tank's transient forward-leap velocity.
+func (w *World) stepLunge(t *Tank, dt float64) {
+	if t.lungeVX == 0 && t.lungeVZ == 0 {
+		return
+	}
+	t.Pos.X += t.lungeVX * dt
+	t.Pos.Z += t.lungeVZ * dt
+	clampArena(&t.Pos, w.half())
+	w.collide(&t.Pos)
+	if damp := 1 - 3.0*dt; damp > 0 {
+		t.lungeVX *= damp
+		t.lungeVZ *= damp
+	} else {
+		t.lungeVX, t.lungeVZ = 0, 0
+	}
+	if math.Abs(t.lungeVX) < 0.05 && math.Abs(t.lungeVZ) < 0.05 {
+		t.lungeVX, t.lungeVZ = 0, 0
+	}
+}
 
 // fireWeapon spawns a projectile carrying the given weapon's payload and sets the
 // firer's cooldown (primary or, when secondary, the B-key cooldown). Driving
@@ -1767,6 +2694,7 @@ func (w *World) fireWeapon(owner int, def *WeaponDef, secondary bool) {
 		return
 	}
 	t.ammo -= cost
+	t.shotsFired++
 	yaw, pitch := t.HullYaw+t.TurretYaw, t.TurretPitch
 	if t.aiWobble > 0 { // bots miss by their tier+jitter; humans have aiWobble 0
 		yaw += (rand.Float64()*2 - 1) * t.aiWobble
@@ -1787,8 +2715,13 @@ func (w *World) fireWeapon(owner int, def *WeaponDef, secondary bool) {
 		blast:   def.Blast,
 		affects: def.Affects,
 		vis:     visForDelivery(def.Delivery),
+		cause:   def.Cause,
 	}
-	muzzle := V3{t.Pos.X + d.X*1.7, t.Pos.Y + EyeHeight + d.Y*1.7, t.Pos.Z + d.Z*1.7}
+	// Spawn from the body's muzzle origin (rotated by facing), so a scorpion fires
+	// from its tail, a humanoid from its hand, a tank from its barrel.
+	mz := bodyDefFor(t.body).muzzle
+	sy, cy := math.Sin(yaw), math.Cos(yaw)
+	muzzle := V3{t.Pos.X + mz.X*cy + mz.Z*sy, t.Pos.Y + mz.Y, t.Pos.Z - mz.X*sy + mz.Z*cy}
 	switch def.Delivery {
 	case DeliverMine: // dropped at the firer's feet; arms, then triggers on a foe
 		p.Pos = V3{X: t.Pos.X, Y: t.Pos.Y + 0.2, Z: t.Pos.Z}
@@ -1802,6 +2735,10 @@ func (w *World) fireWeapon(owner int, def *WeaponDef, secondary bool) {
 		w.Shots = append(w.Shots, p)
 	case DeliverBeam: // hitscan: resolve instantly along the ray, draw a beam
 		w.fireBeam(&p, muzzle, d, def)
+	case DeliverMelee: // instant radial strike; no projectile travels
+		w.meleeStrike(&p)
+	case DeliverCone: // forward cone (fire breath, shield spray); no projectile travels
+		w.coneStrike(&p, d)
 	default: // DeliverBolt
 		p.Pos, p.vel, p.life = muzzle, V3{d.X * speed, d.Y * speed, d.Z * speed}, life
 		w.Shots = append(w.Shots, p)
@@ -1844,9 +2781,11 @@ func (w *World) fireBeam(p *Projectile, muzzle, d V3, def *WeaponDef) {
 				continue
 			}
 			tk := &w.Tanks[ti]
+			sz := BodySizeScale(tk.body)
 			dx, dz := tk.Pos.X-pt.X, tk.Pos.Z-pt.Z
-			dyLow, dyHigh := tk.Pos.Y-0.3, tk.Pos.Y+tankBodyTop*veh(tk.Vehicle).Scale
-			if dx*dx+dz*dz < hitRadius*hitRadius && pt.Y >= dyLow && pt.Y <= dyHigh {
+			dyLow, dyHigh := tk.Pos.Y-0.3, tk.Pos.Y+tankBodyTop*veh(tk.Vehicle).Scale*sz
+			r := hitRadius * sz
+			if dx*dx+dz*dz < r*r && pt.Y >= dyLow && pt.Y <= dyHigh {
 				found = ti
 				break
 			}
@@ -1865,11 +2804,11 @@ func (w *World) fireBeam(p *Projectile, muzzle, d V3, def *WeaponDef) {
 			break
 		}
 	}
-	w.spawnBeamFX(muzzle, V3{X: muzzle.X + d.X*stopT, Y: muzzle.Y + d.Y*stopT, Z: muzzle.Z + d.Z*stopT})
+	w.spawnBeamFX(muzzle, V3{X: muzzle.X + d.X*stopT, Y: muzzle.Y + d.Y*stopT, Z: muzzle.Z + d.Z*stopT}, p.owner)
 }
 
 // spawnBeamFX lays a short-lived line of segments from a to b (the beam visual).
-func (w *World) spawnBeamFX(a, b V3) {
+func (w *World) spawnBeamFX(a, b V3, owner int) {
 	dx, dy, dz := b.X-a.X, b.Y-a.Y, b.Z-a.Z
 	n := int(math.Hypot(dx, dz) / 0.6)
 	if n < 1 {
@@ -1881,7 +2820,7 @@ func (w *World) spawnBeamFX(a, b V3) {
 	for i := 0; i <= n; i++ {
 		f := float64(i) / float64(n)
 		w.Shots = append(w.Shots, Projectile{
-			Pos: V3{X: a.X + dx*f, Y: a.Y + dy*f, Z: a.Z + dz*f}, life: 0.12, owner: -1, fx: true, vis: VisBeam,
+			Pos: V3{X: a.X + dx*f, Y: a.Y + dy*f, Z: a.Z + dz*f}, life: 0.12, owner: owner, fx: true, vis: VisBeam,
 		})
 	}
 }
@@ -1890,7 +2829,8 @@ func (w *World) spawnBeamFX(a, b V3) {
 // buttons this tick (absent => idle); bots are driven by AI. The match
 // lifecycle (countdown -> active -> ended -> next countdown) gates simulation.
 func (w *World) Update(dt float64, inputs map[int]Input) {
-	w.kills = w.kills[:0] // kill feed is per-tick; Match() reads this tick's kills
+	w.kills = w.kills[:0]   // kill feed is per-tick; Match() reads this tick's kills
+	w.events = w.events[:0] // author toasts are per-tick too
 	w.Timer -= dt
 	switch w.Phase {
 	case PhaseCountdown:
@@ -1905,6 +2845,9 @@ func (w *World) Update(dt float64, inputs map[int]Input) {
 		return // frozen scoreboard
 	case PhaseLobby:
 		w.applyVotes(inputs)
+		if w.lobbyAllReady() && w.Timer > lobbyFastFwd {
+			w.Timer = lobbyFastFwd // everyone locked in: skip the rest of the wait
+		}
 		if w.Timer <= 0 {
 			mapIdx, mode := w.pickNextPairing()
 			w.startCountdownMap(mode, mapIdx)
@@ -1921,6 +2864,7 @@ func (w *World) afterEnded() {
 	if w.Lobby {
 		for i := range w.Tanks {
 			w.Tanks[i].vote = -1
+			w.Tanks[i].ready = false
 		}
 		w.Phase, w.Timer = PhaseLobby, lobbyTime
 		return
@@ -1928,9 +2872,29 @@ func (w *World) afterEnded() {
 	w.startCountdown(w.Mode)
 }
 
+// SkipCountdown jumps a counting-in world straight to active play. The world
+// is frozen during the count-in, so this is state-identical to waiting it out.
+// Used by attract/demo displays, which should open on action, not a frozen grid.
+func (w *World) SkipCountdown() {
+	if w.Phase == PhaseCountdown {
+		w.startMatch()
+	}
+}
+
 func (w *World) startCountdown(mode Mode) {
 	if len(Maps) > 1 && !w.pinned {
-		w.MapIdx = (w.MapIdx + 1) % len(Maps) // rotate the map each match (offline/solo)
+		// Rotate within the maps suited to this mode and session size (CTF
+		// cycles the CTF maps, KotH the hill maps, DM the generic arenas).
+		if pool := modePool(mode, w.activeCount()); len(pool) > 0 {
+			next := pool[0]
+			for _, i := range pool {
+				if i > w.MapIdx {
+					next = i
+					break
+				}
+			}
+			w.MapIdx = next
+		}
 	}
 	w.Mode, w.Phase, w.Timer, w.WinnerID = mode, PhaseCountdown, countdownTime, -1
 }
@@ -1985,12 +2949,121 @@ func EffectiveMode(m Map) Mode {
 // pickNextPairing chooses the next (map, mode) from per-map votes: the most-voted
 // map wins (mode = its NaturalMode); with no votes it advances the rotation so an
 // idle arena still cycles. A lone human's vote therefore decides the pairing.
+// Scripted reports whether a map is event-scripted (boss/escort/...) - it has a
+// director, paths, or entity behaviors. Such maps are reached deliberately (the
+// map picker or an explicit vote), not via random rotation where they'd surprise
+// a normal match.
+func (m Map) Scripted() bool {
+	if len(m.Logic) > 0 || len(m.Paths) > 0 || len(m.Actors) > 0 {
+		return true
+	}
+	for i := range m.Entities {
+		if len(m.Entities[i].Behaviors) > 0 || len(m.Entities[i].Watch) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// fitsPlayers reports whether map mi accommodates n combatants (uncapped maps
+// always do).
+func fitsPlayers(mi, n int) bool {
+	c := MapCapacity(Maps[mi])
+	return c == 0 || n <= c
+}
+
+// activeCount is the number of present combatants (humans + bots).
+func (w *World) activeCount() int {
+	n := 0
+	for i := range w.Tanks {
+		if !w.Tanks[i].gone {
+			n++
+		}
+	}
+	return n
+}
+
+// hasObjectives reports whether a map authors flags or zones (i.e. was built
+// for an objective mode rather than as a generic arena).
+func hasObjectives(m Map) bool {
+	for i := range m.Entities {
+		if m.Entities[i].Flag != nil || m.Entities[i].Zone != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// modePool returns the map indexes suited to playing `mode` with n combatants:
+// the maps authored FOR that mode when any exist (CTF rotates the CTF maps,
+// KotH the hill maps), else the generic arenas (no authored objectives, no
+// pinned mode), which play any mode via the procedural fallbacks.
+func modePool(mode Mode, n int) []int {
+	var authored, generic []int
+	for i := range Maps {
+		m := &Maps[i]
+		if m.Scripted() || !fitsPlayers(i, n) {
+			continue
+		}
+		switch {
+		case hasObjectives(*m) || (m.Rules != nil && m.Rules.Mode >= 0):
+			if EffectiveMode(*m) == mode {
+				authored = append(authored, i)
+			}
+		default:
+			generic = append(generic, i)
+		}
+	}
+	if len(authored) > 0 {
+		return authored
+	}
+	return generic
+}
+
+// randomMapIdx returns a random map suited to the mode and player count,
+// loosening to any non-scripted map (then any map) if nothing fits.
+func randomMapIdx(mode Mode, n int) int {
+	if pool := modePool(mode, n); len(pool) > 0 {
+		return pool[rand.Intn(len(pool))]
+	}
+	var loose []int
+	for i := range Maps {
+		if !Maps[i].Scripted() {
+			loose = append(loose, i)
+		}
+	}
+	if len(loose) == 0 {
+		return rand.Intn(len(Maps))
+	}
+	return loose[rand.Intn(len(loose))]
+}
+
+// nextRotation advances deterministically from `from` to the next non-scripted
+// map that fits n combatants (ignoring the cap if nothing fits).
+func nextRotation(from, n int) int {
+	for off := 1; off <= len(Maps); off++ {
+		if i := (from + off) % len(Maps); !Maps[i].Scripted() && fitsPlayers(i, n) {
+			return i
+		}
+	}
+	for off := 1; off <= len(Maps); off++ {
+		if i := (from + off) % len(Maps); !Maps[i].Scripted() {
+			return i
+		}
+	}
+	return (from + 1) % len(Maps)
+}
+
 func (w *World) pickNextPairing() (mapIdx int, mode Mode) {
 	if len(Maps) == 0 {
 		return 0, w.Mode
 	}
+	active := w.activeCount()
 	best, bestN := -1, 0
 	for mi := 0; mi < len(Maps); mi++ {
+		if !fitsPlayers(mi, active) {
+			continue // sized below the current arena population: not votable
+		}
 		n := 0
 		for i := range w.Tanks {
 			t := &w.Tanks[i]
@@ -2003,7 +3076,7 @@ func (w *World) pickNextPairing() (mapIdx int, mode Mode) {
 		}
 	}
 	if best < 0 {
-		best = (w.MapIdx + 1) % len(Maps) // no votes: rotate
+		best = nextRotation(w.MapIdx, active) // no votes: rotate to the next fitting map
 	}
 	return best, EffectiveMode(Maps[best])
 }
@@ -2014,10 +3087,47 @@ func (w *World) applyVotes(inputs map[int]Input) {
 		if t.Bot || t.gone {
 			continue
 		}
-		if in, ok := inputs[i]; ok {
+		in, ok := inputs[i]
+		if !ok {
+			continue
+		}
+		if in.Vote != t.vote { // a committed vote changed: announce it (server -> chat)
 			t.vote = in.Vote
+			if t.vote >= 0 && t.vote < len(Maps) {
+				w.voteLog = append(w.voteLog, VoteEvent{Who: t.Name, MapIdx: t.vote})
+			}
+		}
+		t.ready = in.Ready
+	}
+}
+
+// lobbyAllReady reports whether every present human has locked a valid vote, so
+// the lobby can fast-forward instead of waiting out the full timer.
+func (w *World) lobbyAllReady() bool {
+	humans := 0
+	for i := range w.Tanks {
+		t := &w.Tanks[i]
+		if t.Bot || t.gone {
+			continue
+		}
+		humans++
+		if !t.ready || t.vote < 0 {
+			return false
 		}
 	}
+	return humans > 0
+}
+
+// lobbyReadyCount is how many present humans have locked (for the UI).
+func (w *World) lobbyReadyCount() int {
+	n := 0
+	for i := range w.Tanks {
+		t := &w.Tanks[i]
+		if !t.Bot && !t.gone && t.ready && t.vote >= 0 {
+			n++
+		}
+	}
+	return n
 }
 
 // HumanCount returns the number of connected (non-bot, present) players.
@@ -2040,6 +3150,7 @@ func (w *World) ForceLobby() {
 	}
 	for i := range w.Tanks {
 		w.Tanks[i].vote = -1
+		w.Tanks[i].ready = false
 	}
 	w.Phase, w.Timer = PhaseLobby, lobbyTime
 }
@@ -2061,10 +3172,22 @@ func (w *World) startMatch() {
 		if t.gone {
 			continue
 		}
+		if t.Bot && r.Bots != BotWaves { // re-pick a character each match (not Survival waves)
+			w.rollBotLook(i)
+		}
 		t.Kills, t.Deaths, t.Carrying = 0, 0, -1
 		t.HP, t.Dead, t.vy = t.veh().MaxHP, false, 0
 		t.ammo = t.veh().AmmoMax
 		t.shieldT, t.rapidT, t.cloakT = 0, 0, 0
+		t.shellT, t.boostT, t.dotT, t.dotDebt, t.regenDebt, t.regenPause = 0, 0, 0, 0, 0, 0
+		t.shieldUp, t.shieldBroken = false, 0
+		t.shieldHP, t.bufferHP, t.hookT = 0, 0, 0
+		if t.body == BodyMinotaur {
+			t.shieldHP = minoShieldMax // a minotaur spawns with a full barrier
+		}
+		if t.body == BodyElephant {
+			t.bufferHP = elephantBufferMax // and an elephant with a full shield buffer
+		}
 		t.guard = spawnGuardTime
 		t.holdScore = 0
 		t.Pos = w.spawnPoint(i)
@@ -2072,10 +3195,16 @@ func (w *World) startMatch() {
 		t.TurretYaw, t.TurretPitch = 0, 0
 		if r.Lives > 0 && !(r.Bots == BotWaves && t.Bot) {
 			t.lives = r.Lives // wave bots are exempt (infinite); everyone else gets lives
+			if !t.Bot && w.campLives > 0 {
+				t.lives = w.campLives // campaign: the run's life pool, not the map's
+			}
 		}
 		if t.Bot {
 			w.rollBotAI(i) // re-roll per-bot variation each match
 		}
+	}
+	if r.Teams == 2 && r.Bots != BotWaves {
+		w.assignHealers() // one butterfly medic per team
 	}
 	w.pickups, w.pickupTimer = nil, pickupInterval
 	w.resetEntities()
@@ -2104,16 +3233,58 @@ func (w *World) ctfBase(team int) V3 {
 
 // assignTeams splits active tanks into two CTF teams (humans together on team 0,
 // bots balanced) and recolors each tank with a team-tinted shade.
+// SetPlayerParty records a joining player's party (a team-grouping hint sent in
+// HELLO); same-party humans are kept on the same side by assignTeams.
+func (w *World) SetPlayerParty(i int, party string) {
+	if i >= 0 && i < len(w.Tanks) {
+		w.Tanks[i].Party = party
+	}
+}
+
 func (w *World) assignTeams() {
 	var count [2]int
-	// Humans go on team 0 so callers play together.
+	// Group the humans: each party is a group, and ALL unpartied callers share one
+	// "solo" group (key "") so strangers play together, not carved apart. Splitting
+	// only happens once there are two or more groups - i.e. once someone forms a
+	// party to opt into a side. With no parties at all, every human lands on team 0
+	// (co-op vs bots), the friendly default. One game per server means at most two
+	// parties form, so the groups fall naturally onto the two teams.
+	groups := map[string][]int{}
+	var order []string // group keys in first-seen order (stable assignment)
 	for i := range w.Tanks {
 		t := &w.Tanks[i]
 		if t.gone || t.Bot {
 			continue
 		}
-		t.Team = 0
-		count[0]++
+		key := t.Party // "" = the shared solo pool
+		if _, seen := groups[key]; !seen {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], i)
+	}
+	if len(order) <= 1 {
+		// No party formed (everyone solo, or a single party with no one else):
+		// keep all humans together on team 0, vs bots. No human-vs-human split.
+		for _, key := range order {
+			for _, i := range groups[key] {
+				w.Tanks[i].Team = 0
+				count[0]++
+			}
+		}
+	} else {
+		// A party exists: hand the groups out to the smaller side, largest first,
+		// so each group (party or the solo pool) stays whole on one team.
+		sort.SliceStable(order, func(a, b int) bool { return len(groups[order[a]]) > len(groups[order[b]]) })
+		for _, key := range order {
+			team := 1
+			if count[0] <= count[1] {
+				team = 0
+			}
+			for _, i := range groups[key] {
+				w.Tanks[i].Team = team
+				count[team]++
+			}
+		}
 	}
 	// Bots fill whichever team is smaller, keeping sides even.
 	for i := range w.Tanks {
@@ -2198,11 +3369,40 @@ func (w *World) setupZones() {
 		if cap <= 0 {
 			cap = zoneCaptureTime
 		}
-		w.zones = append(w.zones, Zone{Pos: V3{e.Pos.X, 0, e.Pos.Z}, Half: e.Half, Cap: cap, Owner: -1, cont: -1})
+		// Anchor Y to the actual surface under the hill (top of any platform/dais
+		// it sits on), so the markers render up on the platform and capture reads
+		// the real terrain - not the authored guess.
+		pos := V3{e.Pos.X, w.ground(e.Pos.X, e.Pos.Z, 1e4), e.Pos.Z}
+		w.zones = append(w.zones, Zone{Pos: pos, Half: e.Half, Cap: cap, Owner: -1, cont: -1})
 	}
 	if len(w.zones) == 0 {
-		w.zones = append(w.zones, Zone{Pos: V3{}, Half: V3{X: zoneFallbackR, Y: 1, Z: zoneFallbackR}, Cap: zoneCaptureTime, Owner: -1, cont: -1})
+		// No authored hill: drop one on open, reachable ground near center. Maps
+		// not built for KotH can have an unclimbable central structure (a tall
+		// dais, a no-ramp platform); a hill stuck on top of that would freeze the
+		// match, so seek clear floor outward from the middle instead.
+		spot := w.openHillSpot()
+		w.zones = append(w.zones, Zone{Pos: spot, Half: V3{X: zoneFallbackR, Y: 1, Z: zoneFallbackR}, Cap: zoneCaptureTime, Owner: -1, cont: -1})
 	}
+}
+
+// openHillSpot finds a clear ground location (no obstacle taller than a step) for
+// the auto-placed default hill, spiralling outward from center so the fallback
+// hill is always reachable on the flat.
+func (w *World) openHillSpot() V3 {
+	lim := w.half() - zoneFallbackR - 1
+	for _, r := range []float64{0, 6, 10, 14, 18} {
+		if r > lim {
+			break
+		}
+		for k := 0; k < 8; k++ {
+			ang := float64(k) * math.Pi / 4
+			x, z := r*math.Cos(ang), r*math.Sin(ang)
+			if w.ground(x, z, 1e4) <= stepUp { // floor-ish: standable without climbing
+				return V3{X: x, Z: z}
+			}
+		}
+	}
+	return V3{} // nothing clear found: fall back to dead center
 }
 
 // stepZones advances each control zone: a single uncontested contender (a team
@@ -2221,7 +3421,7 @@ func (w *World) stepZones(dt float64) {
 			if t.Dead || t.gone {
 				continue
 			}
-			if math.Abs(t.Pos.X-z.Pos.X) >= z.Half.X || math.Abs(t.Pos.Z-z.Pos.Z) >= z.Half.Z {
+			if !w.inZone(z, t.Pos) { // elevated hills require you to actually be up there
 				continue
 			}
 			count++
@@ -2252,7 +3452,18 @@ func (w *World) stepZones(dt float64) {
 		}
 
 		if contested || contender < 0 {
-			z.Prog, z.cont = 0, -1 // partial capture lapses
+			// Partial capture decays rather than vanishing: with bots now
+			// actively contesting the hill, a hard reset meant nobody could
+			// ever finish a capture - progress survives brief interruptions
+			// and the fights themselves decide who completes it.
+			if z.Prog > 0 {
+				if z.Prog -= dt * 0.5; z.Prog < 0 {
+					z.Prog = 0
+				}
+			}
+			if contested {
+				z.cont = -1 // a new sole contender will resume, whoever it is
+			}
 			continue
 		}
 		if z.Owner == contender { // owner holds -> accrue points
@@ -2268,13 +3479,19 @@ func (w *World) stepZones(dt float64) {
 			}
 			continue
 		}
-		// Capturing from a different (or no) owner.
+		// Capturing from a different (or no) owner. A named rival restarts the
+		// meter; resuming after a contested scuffle (cont reset to -1) keeps
+		// whatever progress survived the decay.
 		if z.cont != contender {
-			z.Prog, z.cont = 0, contender
+			if z.cont >= 0 {
+				z.Prog = 0
+			}
+			z.cont = contender
 		}
 		z.Prog += dt
 		if z.Prog >= z.Cap {
 			z.Owner, z.Prog, z.hold = contender, 0, 0
+			w.emit("captured", -1, contender) // subject = capturing team/tank
 		}
 	}
 }
@@ -2326,7 +3543,7 @@ func (w *World) setupSurvival() {
 
 // survivalBodies is the creature rotation Survival draws its wave enemies from; the
 // per-wave offset shifts the mix so successive waves look different.
-var survivalBodies = []int{BodySpider, BodyInsect, BodyScorpion, BodyCrab, BodyQuad, BodySerpent, BodyOctopod, BodyHumanoid, BodyTripod, BodyDrone}
+var survivalBodies = []int{BodySpider, BodyInsect, BodyScorpion, BodyCrab, BodyQuad, BodySerpent, BodyOctopod, BodyMantis, BodyGorilla, BodyTrex}
 
 // spawnWave activates the next, larger wave of bots (tougher vehicles later).
 func (w *World) spawnWave() {
@@ -2372,10 +3589,12 @@ func (w *World) activeBots() int {
 }
 
 // collectFlags lets live human tanks grab nearby untaken flags (Flag Run).
+// In the attract demo the designated hero bot collects instead - one player
+// stand-in running the level, exactly as a human would.
 func (w *World) collectFlags() {
 	for ti := range w.Tanks {
 		t := &w.Tanks[ti]
-		if t.Bot || t.Dead || t.gone {
+		if (t.Bot && ti != w.demoHero) || t.Dead || t.gone {
 			continue
 		}
 		for fi := range w.flags {
@@ -2457,6 +3676,98 @@ func (w *World) stepCTF(dt float64) {
 	}
 }
 
+// Turtle shell mode: how long a shell-up lasts, and the secondary-cooldown
+// recharge after popping out (manual or expiry) before the next shell-up.
+const (
+	shellDuration = 4.0
+	shellRecharge = 6.0
+	shellHealRate = 22.0 // HP/sec recovered while tucked into the shell
+)
+
+// regenHitPause is how long taking damage suppresses passive HP regen.
+const regenHitPause = 3.0
+
+// healFlashDur is how long the mend halo shows after an ally heal lands.
+const healFlashDur = 0.6
+
+// Minotaur barrier tuning.
+const (
+	minoShieldMax     = 220.0 // barrier HP pool
+	minoShieldRegen   = 45.0  // HP/sec recovered while the barrier is lowered
+	minoShieldBreakCD = 5.0   // sec before a shattered barrier can deploy again
+	minoShieldArc     = 0.40  // cos of the half-angle it covers (~133 deg frontal)
+	minoShieldMoveMul = 0.55  // movement speed while the barrier is up
+)
+
+// Elephant tuning: a regenerating damage buffer + the trunk hook.
+const (
+	elephantBufferMax   = 130.0 // passive shield buffer HP
+	elephantBufferRegen = 28.0  // buffer HP/sec recovered when not recently hit
+	hookRecharge        = 3.5   // sec between trunk-hook grabs
+	hookPullDist        = 3.2   // how close a hooked foe is reeled in (into tusk reach)
+)
+
+// stepDot ticks tank i's damage-over-time slot (venom, burn): fractional HP
+// accrues in dotDebt, whole points land through hurt (kill credit), and a
+// leeching DoT (the T-Rex's burn) feeds the damage back to the shooter.
+func (w *World) stepDot(i int, dt float64) {
+	t := &w.Tanks[i]
+	if t.dotT <= 0 {
+		return
+	}
+	if t.Dead || t.gone || t.shieldT > 0 || t.shellT > 0 { // death/shield/shell purge it
+		t.dotT, t.dotDebt = 0, 0
+		return
+	}
+	t.dotT -= dt
+	t.dotDebt += t.dotPS * dt
+	if t.dotDebt < 1 {
+		return
+	}
+	n := int(t.dotDebt)
+	t.dotDebt -= float64(n)
+	if t.dotLeech && t.dotFrom >= 0 && t.dotFrom < len(w.Tanks) {
+		if o := &w.Tanks[t.dotFrom]; !o.Dead && !o.gone {
+			if max := o.veh().MaxHP; o.HP < max {
+				if o.HP += n; o.HP > max {
+					o.HP = max
+				}
+			}
+		}
+	}
+	// A DoT tick shouldn't strobe the white damage-flash several times a second
+	// (it would drown the burn/poison tint); the colored tint is the feedback.
+	preFlash := t.hitFlash
+	w.hurt(i, n, t.dotFrom, t.dotCause)
+	if !t.Dead {
+		t.hitFlash = preFlash
+	}
+}
+
+// stepRegen ticks a character's passive HP recharge (a bodyDef trait: fragile
+// fast movers knit themselves back together; the armored bruisers don't).
+// Taking damage pauses it (regenPause, set in hurt).
+func (w *World) stepRegen(t *Tank, dt float64) {
+	rate := bodyDefFor(t.body).hpRegen
+	if rate <= 0 || t.Dead || t.gone || t.regenPause > 0 || t.dotT > 0 {
+		return
+	}
+	max := t.veh().MaxHP
+	if t.HP >= max {
+		t.regenDebt = 0
+		return
+	}
+	t.regenDebt += rate * dt
+	if t.regenDebt < 1 {
+		return
+	}
+	n := int(t.regenDebt)
+	t.regenDebt -= float64(n)
+	if t.HP += n; t.HP > max {
+		t.HP = max
+	}
+}
+
 // stepPickups ages buff timers, periodically spawns a new drop (up to the cap),
 // and grants the effect to any live tank that drives over one. Mode-agnostic.
 func (w *World) stepPickups(dt float64) {
@@ -2471,6 +3782,46 @@ func (w *World) stepPickups(dt float64) {
 		if t.cloakT > 0 {
 			t.cloakT -= dt
 		}
+		if t.boostT > 0 {
+			t.boostT -= dt
+		}
+		if t.regenPause > 0 {
+			t.regenPause -= dt
+		}
+		if t.shellT > 0 {
+			// Tucked in: heal fast (the shell is a recovery move, gated by the
+			// pop-out recharge so it can't be spammed).
+			if max := t.veh().MaxHP; t.HP < max {
+				t.regenDebt += shellHealRate * dt
+				if n := int(t.regenDebt); n > 0 {
+					t.regenDebt -= float64(n)
+					if t.HP += n; t.HP > max {
+						t.HP = max
+					}
+				}
+			}
+			if t.shellT -= dt; t.shellT <= 0 { // shell time spent: pop out, recharge
+				t.shellT, t.cooldown2 = 0, shellRecharge
+			}
+		}
+		if t.body == BodyElephant && t.regenPause <= 0 && t.bufferHP < elephantBufferMax {
+			if t.bufferHP += elephantBufferRegen * dt; t.bufferHP > elephantBufferMax {
+				t.bufferHP = elephantBufferMax
+			}
+		}
+		if t.body == BodyMinotaur { // barrier: count down a shatter, regen while lowered
+			if t.shieldBroken > 0 {
+				if t.shieldBroken -= dt; t.shieldBroken < 0 {
+					t.shieldBroken = 0
+				}
+			} else if !t.shieldUp && t.shieldHP < minoShieldMax {
+				if t.shieldHP += minoShieldRegen * dt; t.shieldHP > minoShieldMax {
+					t.shieldHP = minoShieldMax
+				}
+			}
+		}
+		w.stepDot(i, dt)
+		w.stepRegen(t, dt)
 	}
 	w.pickupTimer -= dt
 	if w.pickupTimer <= 0 {
@@ -2489,6 +3840,7 @@ func (w *World) stepPickups(dt float64) {
 			dx, dz := p.Pos.X-t.Pos.X, p.Pos.Z-t.Pos.Z
 			if dx*dx+dz*dz < pickupRadius*pickupRadius {
 				w.applyPickup(t, p.Kind, p.Weapon)
+				w.emit("picked", -1, ti) // subject = the tank that grabbed it
 				w.pickups = append(w.pickups[:pi], w.pickups[pi+1:]...)
 				continue // don't advance pi; the slice shifted
 			}
@@ -2530,6 +3882,22 @@ func (w *World) stepEntities(dt float64) {
 		if e.Bounce != nil {
 			w.stepBounce(e)
 		}
+		if e.Trigger != nil {
+			w.stepTrigger(e, i)
+		}
+		if e.mvOn {
+			w.stepMove(e, i, dt)
+		}
+		// HP-threshold watchers: emit hp_below as the entity crosses each level.
+		if len(e.Watch) > 0 && e.Destruct != nil {
+			pct := float64(e.HP) / float64(e.Destruct.MaxHP) * 100
+			for k, thr := range e.Watch {
+				if !e.wHit[k] && pct <= thr {
+					e.wHit[k] = true
+					w.emit("hp_below", i, -1)
+				}
+			}
+		}
 	}
 }
 
@@ -2539,7 +3907,7 @@ func (w *World) stepEntities(dt float64) {
 func (w *World) stepHazard(e *Entity, dt float64) {
 	for ti := range w.Tanks {
 		t := &w.Tanks[ti]
-		if t.Dead || t.gone || t.guard > 0 || t.shieldT > 0 {
+		if t.Dead || t.gone || t.guard > 0 || t.shieldT > 0 || t.shellT > 0 {
 			continue
 		}
 		if math.Abs(t.Pos.X-e.Pos.X) >= e.Half.X || math.Abs(t.Pos.Z-e.Pos.Z) >= e.Half.Z {
@@ -2582,8 +3950,8 @@ func (w *World) stepTeleport(e *Entity) {
 // stepBounce launches any tank resting on/near the pad straight up with the
 // trait's fixed Power. The "near the surface and not already rising" gate both
 // debounces (one launch per descent) and gives a trampoline its repeat bounce:
-// you come back down, touch, and fire again. Only tanks with vertical physics
-// (players) actually leave the ground today; bots snap to ground each tick.
+// you come back down, touch, and fire again. Both players and bots have vertical
+// physics, so a trampoline launches either.
 func (w *World) stepBounce(e *Entity) {
 	padTop := e.Pos.Y + e.Half.Y
 	for ti := range w.Tanks {
@@ -2598,6 +3966,82 @@ func (w *World) stepBounce(e *Entity) {
 			t.vy = e.Bounce.Power
 		}
 	}
+}
+
+// stepTrigger emits entered/exited (self-scoped) as tanks cross a sensor volume.
+func (w *World) stepTrigger(e *Entity, i int) {
+	if len(e.inside) < len(w.Tanks) {
+		grown := make([]bool, len(w.Tanks))
+		copy(grown, e.inside)
+		e.inside = grown
+	}
+	for ti := range w.Tanks {
+		t := &w.Tanks[ti]
+		in := !t.Dead && !t.gone &&
+			math.Abs(t.Pos.X-e.Pos.X) < e.Half.X && math.Abs(t.Pos.Z-e.Pos.Z) < e.Half.Z &&
+			t.Pos.Y <= e.Pos.Y+e.Half.Y+0.5
+		switch {
+		case in && !e.inside[ti]:
+			e.inside[ti] = true
+			w.emit("entered", i, ti)
+		case !in && e.inside[ti]:
+			e.inside[ti] = false
+			w.emit("exited", i, ti)
+		}
+	}
+}
+
+// stepMove advances a moving entity along its path; emits `arrived` (self-scoped)
+// at the end. Position rides EntitySnap.Pos to clients.
+func (w *World) stepMove(e *Entity, i int, dt float64) {
+	pts := w.pathFor(e.mvPath)
+	if len(pts) < 2 {
+		e.mvOn = false
+		return
+	}
+	e.mvDist += e.mvSpeed * dt
+	pos, done := pathAt(pts, e.mvDist)
+	e.Pos = pos
+	if done {
+		e.mvOn = false
+		w.emit("arrived", i, -1)
+	}
+}
+
+// pathFor returns a named path's waypoints from the active map (empty name = the
+// first path, the common single-path case).
+func (w *World) pathFor(name string) []V3 {
+	ps := w.ActiveMap().Paths
+	for i := range ps {
+		if name == "" || strings.EqualFold(ps[i].Name, name) {
+			return ps[i].Points
+		}
+	}
+	return nil
+}
+
+// pathAt returns the point at cumulative distance d along a polyline, and whether
+// d is at/past the end.
+func pathAt(pts []V3, d float64) (V3, bool) {
+	if d <= 0 {
+		return pts[0], false
+	}
+	for i := 1; i < len(pts); i++ {
+		seg := pts[i].Sub(pts[i-1])
+		segLen := math.Sqrt(seg.X*seg.X + seg.Y*seg.Y + seg.Z*seg.Z)
+		if d <= segLen || i == len(pts)-1 {
+			if segLen <= 0 {
+				return pts[i], i == len(pts)-1 && d >= 0
+			}
+			f := d / segLen
+			if f >= 1 {
+				return pts[i], i == len(pts)-1
+			}
+			return V3{pts[i-1].X + seg.X*f, pts[i-1].Y + seg.Y*f, pts[i-1].Z + seg.Z*f}, false
+		}
+		d -= segLen
+	}
+	return pts[len(pts)-1], true
 }
 
 // stepTurret aims a turret entity at the nearest eligible tank and fires when
@@ -2737,6 +4181,7 @@ func (w *World) pickupSpot() (MapPickup, bool) {
 
 // applyPickup grants a power-up's effect to a tank.
 func (w *World) applyPickup(t *Tank, kind, weapon int) {
+	t.pickups++
 	switch kind {
 	case PickRepair:
 		t.HP = t.veh().MaxHP
@@ -2749,7 +4194,9 @@ func (w *World) applyPickup(t *Tank, kind, weapon int) {
 	case PickAmmo:
 		t.ammo = t.veh().AmmoMax // instant refill of the regen pool
 	case PickWeapon:
-		if weapon > 0 && weapon < len(Weapons) {
+		if t.body == BodyTurtle {
+			t.ammo = t.veh().AmmoMax // the turtle's B is its shell; take ammo instead
+		} else if weapon > 0 && weapon < len(Weapons) {
 			t.weapon2 = weapon // swap the secondary (B) weapon
 		}
 	}
@@ -2911,12 +4358,19 @@ func (w *World) computeWinner() int {
 }
 
 func (w *World) simulate(dt float64, inputs map[int]Input) {
+	w.ticks++ // nav repath staggering rides the tick count
 	for i := range w.Tanks {
 		if w.Tanks[i].cooldown > 0 {
 			w.Tanks[i].cooldown -= dt
 		}
 		if w.Tanks[i].cooldown2 > 0 {
 			w.Tanks[i].cooldown2 -= dt
+		}
+		if w.Tanks[i].hookT > 0 {
+			w.Tanks[i].hookT -= dt
+		}
+		if w.Tanks[i].healFlash > 0 {
+			w.Tanks[i].healFlash -= dt
 		}
 		if max := w.Tanks[i].veh().AmmoMax; w.Tanks[i].ammo < max { // regenerate ammo
 			if w.Tanks[i].ammo += w.Tanks[i].veh().AmmoRegen * dt; w.Tanks[i].ammo > max {
@@ -2961,8 +4415,11 @@ func (w *World) simulate(dt float64, inputs map[int]Input) {
 	w.stepEntities(dt)
 	w.respawns(dt)
 	if r.Bots == BotWaves && w.activeBots() == 0 {
+		w.emit("wave_cleared", -1, -1)
 		w.spawnWave() // wave cleared -> next, bigger wave
 	}
+	w.stepTankWatch()  // mobile-boss HP thresholds -> hp_below
+	w.runBehaviors(dt) // dispatch this tick's signals (start/killed/.../custom)
 }
 
 // aimAssistStep is lock-on-sweep aim assist for a human player. While the player
@@ -3110,15 +4567,59 @@ func (w *World) applyInput(i int, in Input, dt float64) {
 	t := &w.Tanks[i]
 	v := t.veh()
 	f := fwd(t.HullYaw)
-	spd := v.Speed
+	if t.body == BodyTurtle && in.Fire2 && t.cooldown2 <= 0 {
+		if t.shellT > 0 { // pop out early; the recharge starts now
+			t.shellT, t.cooldown2 = 0, shellRecharge
+		} else { // shell up: immobile + invulnerable until it expires or B again
+			t.shellT, t.cooldown2 = shellDuration, 0.4 // short debounce vs a held key
+		}
+	}
+	if t.shellT > 0 { // tucked in: nothing else moves, aims, or fires
+		clampArena(&t.Pos, w.half())
+		w.collide(&t.Pos)
+		support := w.ground(t.Pos.X, t.Pos.Z, t.Pos.Y)
+		stepVertical(&t.Pos, &t.vy, false, dt, 0, support) // gravity still applies
+		return
+	}
+	// Minotaur barrier: B TOGGLES it (a terminal can't hold a key while you also
+	// drive with WASD, so hold-to-brace would strand you). Tap to raise (when it
+	// has HP and isn't on the post-shatter cooldown), tap again to lower. While
+	// up you can turn and shuffle but not attack or jump - gated below on
+	// shieldUp. cooldown2 is a short debounce so key auto-repeat can't flicker it.
+	if t.body == BodyMinotaur && in.Fire2 && t.cooldown2 <= 0 {
+		if t.shieldUp {
+			t.shieldUp, t.cooldown2 = false, 0.4
+		} else if t.shieldBroken <= 0 && t.shieldHP > 0 {
+			t.shieldUp, t.cooldown2 = true, 0.4
+		}
+	}
+	if t.body == BodyMinotaur && t.shieldUp && in.Fire {
+		t.shieldUp = false // swinging drops the barrier; the fire below lands this tick
+	}
+	spd := v.Speed * BodySpeedMul(t.body)
 	if t.slowT > 0 { // EffSlow drag
 		spd *= 1 - t.slowMag
+	}
+	if t.boostT > 0 { // EffSpeed lift
+		spd *= 1 + t.boostMag
+	}
+	if t.shieldUp { // a braced barrier slows the advance
+		spd *= minoShieldMoveMul
 	}
 	if in.Throttle {
 		t.Pos = t.Pos.Add(V3{f.X * spd * dt, 0, f.Z * spd * dt})
 	}
 	if in.Reverse {
 		t.Pos = t.Pos.Sub(V3{f.X * spd * dt, 0, f.Z * spd * dt})
+	}
+	if in.StrafeL || in.StrafeR { // sidestep along the right vector (f rotated -90)
+		rt := V3{f.Z, 0, -f.X}
+		if in.StrafeR {
+			t.Pos = t.Pos.Add(V3{rt.X * spd * dt, 0, rt.Z * spd * dt})
+		}
+		if in.StrafeL {
+			t.Pos = t.Pos.Sub(V3{rt.X * spd * dt, 0, rt.Z * spd * dt})
+		}
 	}
 	if in.HullL {
 		t.HullYaw -= v.HullTurn * dt
@@ -3144,16 +4645,71 @@ func (w *World) applyInput(i int, in Input, dt float64) {
 	} else {
 		w.aimAssistStep(i, in.TurretL || in.TurretR, in.AimUp || in.AimDown, dt)
 	}
+	desired := t.Pos // post-move, pre-collision: tells us if we pressed into a wall
 	clampArena(&t.Pos, w.half())
 	w.collide(&t.Pos)
 	support := w.ground(t.Pos.X, t.Pos.Z, t.Pos.Y)
-	stepVertical(&t.Pos, &t.vy, in.Jump, dt, v.Jump, support)
-	if in.Fire && t.cooldown <= 0 {
+	jump := in.Jump && !t.shieldUp // can't jump/charge while bracing the barrier
+	bd := bodyDefFor(t.body)
+	moving := in.Throttle || in.Reverse || in.StrafeL || in.StrafeR
+	switch {
+	case bd.fly:
+		stepFlight(&t.Pos, &t.vy, jump, dt, support) // butterfly: true hover
+	case bd.climb && moving && w.obstacleSide(desired):
+		// Scaling a wall: the insect presses into an obstacle face and scuttles up
+		// it, gripping (no gravity). The moment the rise would clear the lip, snap
+		// onto the top surface (pulled just inside the footprint) so it actually
+		// crests over instead of bobbing at the edge and sliding back off.
+		crest, ok := w.climbCrest(desired)
+		if ok && t.Pos.Y+climbSpeed*dt >= crest.Y-stepUp {
+			t.Pos, t.vy = crest, 0
+		} else {
+			t.Pos.Y += climbSpeed * dt
+			t.vy = 0
+		}
+	default:
+		jumpV := v.Jump
+		if bd.jump > 0 {
+			jumpV = bd.jump // per-character jump (a gorilla bounds, a turtle barely hops)
+		}
+		if bd.leap && jump && t.Pos.Y <= support+0.0001 && t.vy <= 0 { // leap forward into the fray
+			f := fwd(t.HullYaw)
+			t.lungeVX, t.lungeVZ = f.X*lungeSpeed, f.Z*lungeSpeed
+		}
+		wasAir := t.Pos.Y > support+0.05
+		stepVertical(&t.Pos, &t.vy, jump, dt, jumpV, support)
+		if bd.leap && wasAir && t.Pos.Y <= support {
+			w.leapLand(i) // the bruiser slams down: splash anyone alongside
+		}
+	}
+	w.stepLunge(t, dt)
+	if in.Fire && t.cooldown <= 0 && !t.shieldUp { // no attacking while the barrier is braced
 		w.fire(i)
 	}
-	if in.Fire2 && t.cooldown2 <= 0 && t.weapon2 > 0 && t.weapon2 < len(Weapons) {
+	// B is the barrier for the minotaur (handled above), not a weapon; everyone
+	// else fires their secondary.
+	if in.Fire2 && t.cooldown2 <= 0 && t.weapon2 > 0 && t.weapon2 < len(Weapons) && t.body != BodyMinotaur {
 		w.fireWeapon(i, &Weapons[t.weapon2], true) // B: secondary weapon
 	}
+	if in.Drop {
+		w.dropFlag(i) // CTF: set the carried flag down where we stand
+	}
+}
+
+// dropFlag releases a carried CTF flag at the carrier's feet: it sits on the
+// usual drop-return timer (a friendly touch returns it home, an enemy can
+// pick it up, or it auto-returns). Lets a carrier hand off or stash the flag
+// while their own is still in enemy hands.
+func (w *World) dropFlag(i int) {
+	t := &w.Tanks[i]
+	if t.Carrying < 0 || t.Carrying >= len(w.flags) {
+		return
+	}
+	f := &w.flags[t.Carrying]
+	f.Carrier, f.atHome = -1, false
+	f.Pos = V3{t.Pos.X, 0, t.Pos.Z}
+	f.dropTimer = flagReturnTime
+	t.Carrying = -1
 }
 
 // stepVertical applies a jump impulse (only when grounded on `support`) then
@@ -3170,6 +4726,28 @@ func stepVertical(pos *V3, vy *float64, jump bool, dt, jumpV, support float64) {
 	}
 }
 
+// stepFlight is true flight (the butterfly): hold jump to rise, release to drift
+// down, floating up to a ceiling above the ground - dodgy and above ground hazards.
+func stepFlight(pos *V3, vy *float64, rise bool, dt, support float64) {
+	const lift, fall, maxV, ceil = 24.0, 7.0, 12.0, 8.0
+	if rise {
+		*vy += lift * dt
+	} else {
+		*vy -= fall * dt
+	}
+	if *vy > maxV {
+		*vy = maxV
+	} else if *vy < -maxV {
+		*vy = -maxV
+	}
+	pos.Y += *vy * dt
+	if pos.Y < support {
+		pos.Y, *vy = support, 0
+	} else if pos.Y > support+ceil {
+		pos.Y, *vy = support+ceil, 0
+	}
+}
+
 // Predict advances a tank's kinematics from one input sample using the same
 // movement constants as the authoritative sim (firing/combat excluded). The
 // net client uses it to predict its own tank between server snapshots so steering
@@ -3183,6 +4761,15 @@ func Predict(pos V3, hullYaw, turretYaw, pitch, vy float64, in Input, dt float64
 	}
 	if in.Reverse {
 		pos = pos.Sub(V3{f.X * v.Speed * dt, 0, f.Z * v.Speed * dt})
+	}
+	if in.StrafeL || in.StrafeR { // sidestep along the right vector (must match applyInput)
+		rt := V3{f.Z, 0, -f.X}
+		if in.StrafeR {
+			pos = pos.Add(V3{rt.X * v.Speed * dt, 0, rt.Z * v.Speed * dt})
+		}
+		if in.StrafeL {
+			pos = pos.Sub(V3{rt.X * v.Speed * dt, 0, rt.Z * v.Speed * dt})
+		}
 	}
 	if in.HullL {
 		hullYaw -= v.HullTurn * dt
@@ -3211,6 +4798,7 @@ func Predict(pos V3, hullYaw, turretYaw, pitch, vy float64, in Input, dt float64
 	}
 	clampArena(&pos, MapHalf(m))
 	CollideBoxes(boxes, &pos)
+	CollideRamps(m.Ramps, &pos)
 	support := GroundBoxes(boxes, m.Ramps, pos.X, pos.Z, pos.Y)
 	stepVertical(&pos, &vy, in.Jump, dt, v.Jump, support)
 	return pos, hullYaw, turretYaw, pitch, vy
@@ -3228,38 +4816,219 @@ func BuiltinVehicles() int { return len(Vehicles) }
 // the renderer's appendCreature draws them with an animated gait. BodyTank = 0 so
 // the zero value is an ordinary tank.
 const (
-	BodyTank = iota
-	BodySpider
+	BodyTank   = iota
+	BodySpider // retired from the roster (kept so existing indices/maps don't shift)
 	BodyQuad
 	BodyInsect
 	BodyHumanoid
 	BodyScorpion
 	BodySerpent
-	BodyTripod
-	BodyDrone
+	BodyTripod // retired from the roster (kept so existing indices/maps don't shift)
+	BodyDrone  // retired from the roster (kept so existing indices/maps don't shift)
 	BodyCrab
 	BodyOctopod
+	BodyButterfly // flying healer / support
+	BodyMantis
+	BodyTurtle
+	BodyTrex
+	BodyGorilla
+	BodyElephant // support tank: tusk gore + trunk shield-spray
+	BodyFalcon   // flying striker
+	BodyStag     // ground healer: radial aura + speed boost
+	BodyMinotaur // bruiser: hammer + a held, destructible frontal barrier
 	BodyKinds
 )
 
-// botBodies is the pool regular (non-Survival) bots roll their appearance from -
-// tanks weighted so the field stays mostly armor with a scatter of creatures.
+// botBodies is the pool regular (non-Survival) bots roll their characters from -
+// the tank weighted in so the field keeps some armor among the creatures.
 var botBodies = []int{
 	BodyTank, BodyTank, BodyTank,
-	BodySpider, BodyQuad, BodyInsect, BodyHumanoid,
-	BodyScorpion, BodySerpent, BodyTripod, BodyDrone, BodyCrab, BodyOctopod,
+	BodyQuad, BodyInsect, BodyHumanoid, BodyScorpion, BodySerpent,
+	BodyCrab, BodyOctopod, BodyMantis, BodyTurtle, BodyTrex, BodyGorilla,
+	BodyElephant, BodyFalcon, BodyStag, BodyMinotaur,
+}
+
+// ChassisFor maps a body to the chassis whose stats fit that character. The
+// roster is body-first: picking a character implies its chassis (BodyTank is
+// the HUNTER, the one true tank). Bots and the player roster share this map,
+// so nobody fields a mutant - artillery innards only ever wear the bodies
+// built for them, never a tank shell.
+func ChassisFor(body int) int {
+	switch body {
+	case BodySerpent, BodySpider, BodyButterfly, BodyFalcon:
+		return 0 // SCOUT: fast, fragile
+	case BodyTrex, BodyCrab, BodyTurtle, BodyElephant, BodyMinotaur:
+		return 2 // HEAVY: slow, armored
+	case BodyQuad, BodyStag:
+		return 3 // RANGER: quick skirmisher
+	case BodyInsect, BodyOctopod, BodyScorpion:
+		return 4 // ARTILLERY: deep magazine, glass (the scorpion's hitscan laser
+		//            is a sniper's gun - it belongs on a fragile, low-mobility
+		//            body, not the durable all-rounder it used to ride)
+	}
+	return 1 // TANK, and the balanced bipeds
+}
+
+// bodyDef gives each character a distinct identity beyond the chassis: a signature
+// primary weapon, a jump override, a muzzle origin (body-local: x lateral, y up, z
+// forward; rotated by facing) so shots leave from the right place, and a flight
+// flag (the butterfly hovers). Stats (HP/speed/...) still come from the chassis.
+type bodyDef struct {
+	weapon    int     // signature primary; -1 = the cannon
+	secondary int     // secondary (B) default; 0 = the usual grenade
+	jump      float64 // jump velocity override; 0 = chassis default
+	muzzle    V3      // local muzzle origin
+	fly       bool    // true flight (hover) instead of a one-shot jump
+	leap      bool    // a jump also lunges forward (melee charge)
+	climb     bool    // scales obstacle walls: presses into a face and scuttles up it
+	hpRegen   float64 // passive HP/sec recharge (fragile fast movers; 0 = none)
+	speedMul  float64 // move-speed multiplier over the chassis (0 = 1.0)
+}
+
+// BodySpeedMul is a body's move-speed multiplier over its chassis (1.0 if none).
+// Applied wherever movement speed is computed (sim, bots, and the net predictor).
+func BodySpeedMul(body int) float64 {
+	if m := bodyDefFor(body).speedMul; m > 0 {
+		return m
+	}
+	return 1
+}
+
+// defaultSecondary is a character's starting B-weapon (pickups can still change it).
+func defaultSecondary(body int) int {
+	if s := bodyDefFor(body).secondary; s > 0 {
+		return s
+	}
+	return wepGrenade
+}
+
+// WeaponName is the display name of weapon index i (CANNON if out of range).
+func WeaponName(i int) string {
+	if i < 0 || i >= len(Weapons) {
+		return "CANNON"
+	}
+	return Weapons[i].Name
+}
+
+// PrimaryWeapon is the weapon index a body fires as its primary (CANNON for the
+// plain tank and any body with no signature weapon).
+func PrimaryWeapon(body int) int {
+	if bd := bodyDefFor(body); bd.weapon >= 0 {
+		return bd.weapon
+	}
+	return wepCannon
+}
+
+// SecondaryWeapon is a body's default B-weapon (pickups can change it in play).
+func SecondaryWeapon(body int) int { return defaultSecondary(body) }
+
+// EffectiveJump is a body's jump impulse on a chassis: its bodyDef override if
+// set, else the chassis default. Used for the character-select jump stat.
+func EffectiveJump(body, chassis int) float64 {
+	if j := bodyDefFor(body).jump; j > 0 {
+		return j
+	}
+	return veh(chassis).Jump
+}
+
+func bodyDefFor(body int) bodyDef {
+	switch body {
+	case BodyScorpion:
+		return bodyDef{weapon: wepLaser, muzzle: V3{0, 2.2, 0.2}, hpRegen: 1.5} // arched tail
+	case BodySerpent:
+		return bodyDef{weapon: wepVenom, muzzle: V3{0, 1.0, 1.6}, hpRegen: 3} // poison spit from the raised head
+	case BodySpider: // retired from the roster
+		return bodyDef{weapon: wepSlower, muzzle: V3{0, 0.8, 1.3}} // web from the fangs
+	case BodyCrab:
+		return bodyDef{weapon: wepGrenade, secondary: wepMine, muzzle: V3{0.6, 0.8, 0.9}} // claw lob; drops mines behind
+	case BodyOctopod:
+		return bodyDef{weapon: wepSlower, muzzle: V3{0, 1.0, 0.8}, hpRegen: 2} // ink
+	case BodyInsect:
+		return bodyDef{weapon: wepCannon, muzzle: V3{0, 0.8, 1.0}, climb: true, hpRegen: 2, speedMul: 1.45} // scuttles fast and scales walls despite the deep artillery magazine
+	case BodyHumanoid:
+		return bodyDef{weapon: wepCannon, muzzle: V3{0.4, 1.6, 0.4}, hpRegen: 1.5} // hand
+	case BodyQuad: // the tiger: pounce in (leap), scratch for a bleed, lick wounds (regen)
+		return bodyDef{weapon: wepScratch, jump: 12, leap: true, muzzle: V3{0, 0.9, 1.0}, hpRegen: 3.5, speedMul: 1.2}
+	case BodyButterfly:
+		return bodyDef{weapon: wepMedic, secondary: wepHealBomb, fly: true, muzzle: V3{0, 1.6, 0.6}, hpRegen: 2.5} // heal beam + heal bombs, flies
+	case BodyMantis:
+		return bodyDef{weapon: wepCannon, jump: 12, muzzle: V3{0.3, 1.4, 0.7}, hpRegen: 2} // raptorial forearm
+	case BodyTurtle:
+		return bodyDef{weapon: wepSnap, jump: 4, muzzle: V3{0, 0.7, 1.1}} // bunker: snapping bite up close, B = shell up
+	case BodyTrex:
+		return bodyDef{weapon: wepFlame, jump: 7, muzzle: V3{0, 2.4, 1.6}} // towering fire-breather (jaws)
+	case BodyGorilla:
+		return bodyDef{weapon: wepPound, jump: 13, leap: true, muzzle: V3{0, 1.2, 0.6}, hpRegen: 1} // melee bruiser: leaps in, pounds everyone in range
+	case BodyElephant:
+		return bodyDef{weapon: wepTusks, secondary: wepAegis, jump: 5, muzzle: V3{0, 1.6, 1.4}} // support tank: gores up close, trunk-sprays shields
+	case BodyFalcon:
+		return bodyDef{weapon: wepTalon, secondary: wepGust, fly: true, muzzle: V3{0, 1.2, 0.8}, hpRegen: 3} // flying striker
+	case BodyStag:
+		return bodyDef{weapon: wepAura, secondary: wepSwift, jump: 12, leap: true, muzzle: V3{0, 1.4, 0.9}, hpRegen: 2.5} // pack healer; antler charge
+	case BodyMinotaur:
+		return bodyDef{weapon: wepHammer, secondary: -1, jump: 8, leap: true, muzzle: V3{0, 1.7, 0.9}} // hammer + a B-toggled barrier; a gore-charge on jump
+	}
+	return bodyDef{weapon: -1, muzzle: V3{0, EyeHeight, 1.7}} // tank default
+}
+
+// HPRegen is a body's passive HP/sec recharge (0 for the armored bruisers).
+// Exposed for the character-select UI.
+func HPRegen(body int) float64 { return bodyDefFor(body).hpRegen }
+
+// SecondaryWeaponName is the display name of a body's B-key action: the turtle's
+// B is its shell (a mode, not a palette weapon), everyone else's is a weapon.
+func SecondaryWeaponName(body int) string {
+	switch body {
+	case BodyTurtle:
+		return "SHELL"
+	case BodyMinotaur:
+		return "SHIELD"
+	}
+	return WeaponName(SecondaryWeapon(body))
 }
 
 func (w *World) botAI(i int, dt float64) {
+	if w.Tanks[i].shellT > 0 {
+		return // tucked into the shell: sit it out
+	}
+	w.botSpecial(i)
+	if w.Tanks[i].shellT > 0 {
+		return // just shelled up
+	}
+	if w.Tanks[i].body == BodyMinotaur { // braces its barrier toward the threat, then commits
+		w.botMinotaurAI(i, dt)
+		return
+	}
+	// Healers mend allies instead of fighting. The butterfly always plays medic;
+	// the stag only when there's a team to heal (in FFA its aura stings, so it
+	// skirmishes like everyone else).
+	if w.Tanks[i].body == BodyButterfly || (w.Tanks[i].body == BodyStag && w.rules().Teams == 2) {
+		w.botHealerAI(i, dt)
+		return
+	}
 	if w.rules().Teams == 2 {
 		w.ctfBotAI(i, dt)
 		return
 	}
 	b := &w.Tanks[i]
 	tgt := w.nearestEnemy(i)
+	od, seekObj, holdObj := w.botObjectiveDest(i)
 	if tgt < 0 {
 		b.lastTgt, b.acquireT = -1, 0
-		w.botWander(i, dt) // no one in sight: roam instead of standing still
+		switch {
+		case seekObj: // no one in sight: take ground at the objective
+			v := b.veh()
+			ang := math.Atan2(od.X-b.Pos.X, od.Z-b.Pos.Z)
+			b.HullYaw = turnToward(b.HullYaw, w.avoidYaw(b, w.navYaw(i, od, ang)), v.HullTurn*dt)
+			b.TurretYaw = turnToward(b.TurretYaw, 0, b.aiTrack*dt*0.5)
+			w.driveForward(i, dt, 0.7)
+			w.botVertical(i, dt, w.wantHop(b))
+		case holdObj: // in position: stand the post, scan, let the capture run
+			b.TurretYaw = turnToward(b.TurretYaw, 0, b.aiTrack*dt*0.5)
+			w.botVertical(i, dt, false)
+		default:
+			w.botWander(i, dt) // no one in sight: roam instead of standing still
+		}
 		return
 	}
 	if tgt != b.lastTgt { // newly acquired target: take a beat to react
@@ -3273,28 +5042,222 @@ func (w *World) botAI(i int, dt float64) {
 	d := w.Tanks[tgt].Pos.Sub(b.Pos)
 	dist := math.Hypot(d.X, d.Z)
 	angTo := math.Atan2(d.X, d.Z)
-	b.HullYaw = turnToward(b.HullYaw, angTo, v.HullTurn*dt)
+	// Drive along the grid path to the target (direct when the way is open);
+	// the whiskers still deflect locally. The turret aims at the target itself.
+	b.HullYaw = turnToward(b.HullYaw, w.avoidYaw(b, w.navYaw(i, w.Tanks[tgt].Pos, angTo)), v.HullTurn*dt)
 	wantPitch := clampPitch(math.Atan2((w.Tanks[tgt].Pos.Y+turretAimHeight)-(b.Pos.Y+EyeHeight), dist))
 	if !reacting { // hold turret while reacting, then track at the bot's rate
 		b.TurretYaw = turnToward(b.TurretYaw, angDiff(angTo, b.HullYaw), b.aiTrack*dt)
 		b.TurretPitch = turnToward(b.TurretPitch, wantPitch, b.aiTrack*dt)
 	}
-	// Movement: smart bots divert to a nearby power-up, else hold engagement range.
-	if pp, ok := w.botSeekTarget(b); ok {
-		ang := math.Atan2(pp.X-b.Pos.X, pp.Z-b.Pos.Z)
-		b.HullYaw = turnToward(b.HullYaw, ang, v.HullTurn*dt)
-		w.driveForward(i, dt, 0.8)
-	} else if dist > b.aiKeep {
-		w.driveForward(i, dt, 0.7)
+	// Movement: the mode's objective ground comes first (the hill, a flag to
+	// guard); then a power-up detour; melee bruisers charge to contact;
+	// everyone else holds engagement range. The turret fights throughout.
+	mr := w.botMeleeRange(b)
+	keep := b.aiKeep
+	if mr > 0 {
+		keep = mr * 0.55 // close well inside strike range
 	}
-	b.Pos.Y = w.ground(b.Pos.X, b.Pos.Z, b.Pos.Y+stepUp)
-	if !reacting && dist < botFireRange && math.Abs(angDiff(b.HullYaw+b.TurretYaw, angTo)) < botAimTol &&
-		math.Abs(wantPitch-b.TurretPitch) < botAimTol && b.cooldown <= 0 {
+	if seekObj {
+		ang := math.Atan2(od.X-b.Pos.X, od.Z-b.Pos.Z)
+		b.HullYaw = turnToward(b.HullYaw, w.avoidYaw(b, w.navYaw(i, od, ang)), v.HullTurn*dt)
+		w.driveForward(i, dt, 0.8)
+	} else if holdObj {
+		// Fight from the objective: aim and fire (handled below) but don't
+		// chase off the hill / abandon the flag for range adjustments.
+	} else if pp, ok := w.botSeekTarget(b); ok {
+		ang := math.Atan2(pp.X-b.Pos.X, pp.Z-b.Pos.Z)
+		b.HullYaw = turnToward(b.HullYaw, w.avoidYaw(b, w.navYaw(i, pp, ang)), v.HullTurn*dt)
+		w.driveForward(i, dt, 0.8)
+	} else if dist > keep {
+		frac := 0.7
+		if mr > 0 {
+			frac = 0.95 // bruisers rush in
+		}
+		w.driveForward(i, dt, frac)
+	}
+	w.botVertical(i, dt, w.wantHop(b))
+	fireRange, pitchOK := botFireRange, math.Abs(wantPitch-b.TurretPitch) < botAimTol
+	if mr > 0 {
+		fireRange, pitchOK = mr, true // a radial strike only lands in range, and ignores pitch
+	}
+	if !reacting && dist < fireRange && math.Abs(angDiff(b.HullYaw+b.TurretYaw, angTo)) < botAimTol &&
+		pitchOK && b.cooldown <= 0 {
 		w.fire(i) // fire() applies this bot's wobble + reload cadence
 	}
 	if !reacting {
 		w.botSecondary(i, dist, angTo)
 	}
+}
+
+// botObjectiveDest returns the mode's positional objective for bot i: a spot
+// to drive to (the control zone, the nearest untaken flag to guard), whether
+// to go there (seek), and whether the bot is already in position and should
+// stand its ground (hold) instead of wandering off mid-capture.
+func (w *World) botObjectiveDest(i int) (dest V3, seek, hold bool) {
+	b := &w.Tanks[i]
+	switch w.rules().Objective {
+	case ObjZone:
+		best, bestD := -1, math.MaxFloat64
+		for zi := range w.zones {
+			z := &w.zones[zi]
+			dx, dz := z.Pos.X-b.Pos.X, z.Pos.Z-b.Pos.Z
+			if dd := dx*dx + dz*dz; dd < bestD {
+				bestD, best = dd, zi
+			}
+		}
+		if best < 0 {
+			return V3{}, false, false
+		}
+		z := &w.zones[best]
+		if w.inZone(z, b.Pos) {
+			return V3{}, false, true // actually on the hill (right XZ AND height): stand and fight
+		}
+		// FFA zones score on SOLE presence, so piling everyone on deadlocks
+		// the hill as "contested" forever: go take an empty hill or duel its
+		// one occupant, but with two-plus already brawling, fight from here.
+		// Team zones contest by TEAM - teammates stack freely (reinforcing a
+		// held hill is good play), so no pileup limit applies.
+		if w.rules().Teams != 2 {
+			occupants := 0
+			for ti := range w.Tanks {
+				t := &w.Tanks[ti]
+				if t.Dead || t.gone {
+					continue
+				}
+				if w.inZone(z, t.Pos) {
+					occupants++
+				}
+			}
+			if occupants >= 2 {
+				return V3{}, false, false
+			}
+		}
+		// Elevated hill: if we're below it, head for an ascending ramp instead of
+		// grinding into the platform's sides (sparse-ramp maps otherwise leave bots
+		// circling the base, never contesting - the hill looks dead).
+		if b.Pos.Y < z.Pos.Y-stepUp-0.3 {
+			if dest, ok := w.rampApproach(z, b.Pos); ok {
+				return dest, true, false
+			}
+		}
+		return z.Pos, true, false
+	case ObjNeutralFlags:
+		best, bestD := -1, math.MaxFloat64
+		for fi := range w.flags {
+			f := &w.flags[fi]
+			if f.Taken {
+				continue
+			}
+			dx, dz := f.Pos.X-b.Pos.X, f.Pos.Z-b.Pos.Z
+			if dd := dx*dx + dz*dz; dd < bestD {
+				bestD, best = dd, fi
+			}
+		}
+		if best < 0 {
+			return V3{}, false, false
+		}
+		if i == w.demoHero {
+			// The demo's player stand-in plays the level: drive onto the
+			// flag and take it, exactly as a human collector would.
+			return w.flags[best].Pos, true, false
+		}
+		const guard = 5.5 // patrol ring: defend the flag, don't stack on it
+		if bestD < guard*guard {
+			return V3{}, false, true // in the guard ring: stay on post
+		}
+		return w.flags[best].Pos, true, false
+	}
+	return V3{}, false, false
+}
+
+// botMeleeRange is the strike radius if this bot's primary is a melee weapon (the
+// gorilla's pound), else 0 - so the AI knows to charge in instead of firing from afar.
+func (w *World) botMeleeRange(b *Tank) float64 {
+	if b.body == BodyElephant {
+		return 0 // the elephant hooks from range (fire() auto-gores once a foe is reeled in) - don't rush
+	}
+	def := &Weapons[wepCannon]
+	if bd := bodyDefFor(b.body); bd.weapon >= 0 {
+		def = &Weapons[bd.weapon]
+	}
+	if def.Delivery == DeliverMelee {
+		if def.Blast > 0 {
+			return def.Blast
+		}
+		return 4
+	}
+	return 0
+}
+
+// botSpecial drives the body-specific defensive kit a bot can't express through
+// aim-and-shoot: the turtle shells up when cornered, the elephant trunk-sprays
+// shields when it (or a nearby ally) is in trouble. Called each tick from botAI.
+func (w *World) botSpecial(i int) {
+	b := &w.Tanks[i]
+	switch b.body {
+	case BodyTurtle:
+		if b.shellT > 0 || b.cooldown2 > 0 || b.HP*2 >= b.veh().MaxHP {
+			return // healthy (>= 50%) or shell not recharged
+		}
+		if tgt := w.nearestEnemy(i); tgt >= 0 {
+			d := w.Tanks[tgt].Pos.Sub(b.Pos)
+			if d.X*d.X+d.Z*d.Z < 16*16 { // hurt and cornered: bunker down
+				b.shellT, b.cooldown2 = shellDuration, 0.4
+			}
+		}
+	case BodyElephant:
+		if b.weapon2 != wepAegis || b.cooldown2 > 0 {
+			return
+		}
+		need := b.HP*5 < b.veh().MaxHP*3 // own armor below 60%
+		if !need {
+			if a := w.mostHurtAlly(i); a >= 0 {
+				d := w.Tanks[a].Pos.Sub(b.Pos)
+				need = d.X*d.X+d.Z*d.Z < 36 // a wounded ally in trunk range
+			}
+		}
+		if need && w.nearestEnemy(i) >= 0 { // only worth a coat mid-fight
+			w.fireWeapon(i, &Weapons[wepAegis], true)
+		}
+	}
+}
+
+// botMinotaurAI drives the minotaur bot: it keeps its hull (and thus the barrier
+// and hammer) pointed at the nearest foe, braces the barrier while closing the
+// gap at a slowed pace, and drops the barrier to swing once in hammer reach -
+// exposing itself, the way a player must. Without the facing, the directional
+// barrier would point wherever the bot happened to be steering and rarely block.
+func (w *World) botMinotaurAI(i int, dt float64) {
+	b := &w.Tanks[i]
+	v := b.veh()
+	tgt := w.nearestEnemy(i)
+	if tgt < 0 {
+		b.shieldUp = false
+		w.botWander(i, dt)
+		return
+	}
+	d := w.Tanks[tgt].Pos.Sub(b.Pos)
+	dist := math.Hypot(d.X, d.Z)
+	ang := math.Atan2(d.X, d.Z)
+	b.HullYaw = turnToward(b.HullYaw, w.avoidYaw(b, w.navYaw(i, w.Tanks[tgt].Pos, ang)), v.HullTurn*dt)
+	b.TurretYaw = turnToward(b.TurretYaw, angDiff(ang, b.HullYaw), b.aiTrack*dt)
+	melee := w.botMeleeRange(b) // hammer reach (~4)
+	canShield := b.shieldBroken <= 0 && b.shieldHP > 0
+	if dist > melee*0.9 { // approach: brace the barrier (slowed) unless it's broken
+		b.shieldUp = canShield && dist < 34
+		frac := 0.85
+		if b.shieldUp {
+			frac = 0.5 // a braced advance is a slow one
+		}
+		w.driveForward(i, dt, frac)
+	} else { // in reach: drop the barrier and swing, exposed
+		b.shieldUp = false
+		if b.cooldown <= 0 && math.Abs(angDiff(b.HullYaw, ang)) < botAimTol {
+			w.fire(i)
+		}
+	}
+	w.botVertical(i, dt, w.wantHop(b))
 }
 
 // botSecondary lets a bot lob its secondary (grenade) at a target in the mid-range
@@ -3305,13 +5268,35 @@ func (w *World) botSecondary(i int, dist, angTo float64) {
 	if b.weapon2 <= 0 || b.weapon2 >= len(Weapons) || b.cooldown2 > 0 {
 		return
 	}
-	if dist < 9 || dist > 20 { // too close/far for a level lob to land near them
+	if b.body == BodyTurtle || Weapons[b.weapon2].Affects == TargetAllies {
+		return // the shell and the support secondaries are botSpecial's job
+	}
+	// A character whose primary carries no damage (the octopod's ink slower)
+	// fights WITH its secondary: wider envelope and nearly every opportunity,
+	// instead of the occasional opportunistic lob.
+	prim := &Weapons[wepCannon]
+	if bd := bodyDefFor(b.body); bd.weapon >= 0 {
+		prim = &Weapons[bd.weapon]
+	}
+	lo, hi, p := 9.0, 20.0, 0.5
+	if prim.Effect.Kind != EffDamage && prim.Damage <= 0 {
+		lo, hi, p = 5.0, 22.0, 0.85
+	}
+	if def2 := &Weapons[b.weapon2]; def2.Delivery == DeliverCone {
+		// A forward cone (the falcon's gust) only reaches Blast units; the
+		// lob band would have it firing at air.
+		lo, hi = 1.5, def2.Blast*0.9
+		if hi <= lo {
+			hi = lo + 2
+		}
+	}
+	if dist < lo || dist > hi {
 		return
 	}
 	if math.Abs(angDiff(b.HullYaw+b.TurretYaw, angTo)) > botAimTol {
 		return
 	}
-	if rand.Float64() < 0.5 { // occasional, not every opportunity
+	if rand.Float64() < p {
 		w.fireWeapon(i, &Weapons[b.weapon2], true)
 	}
 }
@@ -3333,10 +5318,10 @@ func (w *World) botWander(i int, dt float64) {
 		b.roamT = 3 + rand.Float64()*3
 		dx, dz = b.roam.X-b.Pos.X, b.roam.Z-b.Pos.Z
 	}
-	b.HullYaw = turnToward(b.HullYaw, math.Atan2(dx, dz), v.HullTurn*dt)
+	b.HullYaw = turnToward(b.HullYaw, w.navYaw(i, b.roam, math.Atan2(dx, dz)), v.HullTurn*dt)
 	b.TurretYaw = turnToward(b.TurretYaw, 0, b.aiTrack*dt*0.5) // ease the barrel back to center while scanning
 	w.driveForward(i, dt, 0.5)                                 // amble, not a charge
-	b.Pos.Y = w.ground(b.Pos.X, b.Pos.Z, b.Pos.Y+stepUp)
+	w.botVertical(i, dt, w.wantHop(b))
 }
 
 // botSeekTarget returns a power-up a SeekPickups bot should divert toward (the
@@ -3371,7 +5356,7 @@ func (w *World) ctfBotAI(i int, dt float64) {
 
 	// Pick a destination from the objective.
 	var dst V3
-	have := false
+	have, hold := false, false
 	switch {
 	case b.Carrying >= 0:
 		if of := w.ownFlag(b.Team); of != nil {
@@ -3380,21 +5365,28 @@ func (w *World) ctfBotAI(i int, dt float64) {
 	default:
 		if ef := w.enemyFlag(b.Team); ef != nil && ef.Carrier < 0 {
 			dst, have = ef.Pos, true // go grab the enemy flag
+		} else if zd, zok, zhold := w.botObjectiveDest(i); zok {
+			dst, have = zd, true // Team KotH: converge on the hill
+		} else if zhold {
+			hold = true // on the hill: stand the post
 		}
 	}
 	tgt := w.nearestEnemy(i)
 	if !have && tgt >= 0 {
 		dst, have = w.Tanks[tgt].Pos, true // nothing to fetch: hunt
 	}
-	if have {
+	switch {
+	case have:
 		d := dst.Sub(b.Pos)
 		if math.Hypot(d.X, d.Z) > 1.0 {
 			angTo := math.Atan2(d.X, d.Z)
-			b.HullYaw = turnToward(b.HullYaw, angTo, v.HullTurn*dt)
+			b.HullYaw = turnToward(b.HullYaw, w.avoidYaw(b, w.navYaw(i, dst, angTo)), v.HullTurn*dt)
 			w.driveForward(i, dt, 0.7)
 		}
-	} else {
-		w.botWander(i, dt) // no flag objective and no enemy: roam
+	case hold:
+		// On the hill: stand the post (the turret below still fights).
+	default:
+		w.botWander(i, dt) // no objective and no enemy: roam
 	}
 	// Turret tracks/fires at the nearest enemy regardless of where we're driving.
 	if tgt >= 0 {
@@ -3411,8 +5403,12 @@ func (w *World) ctfBotAI(i int, dt float64) {
 		if b.acquireT <= 0 {
 			b.TurretYaw = turnToward(b.TurretYaw, angDiff(angTo, b.HullYaw), b.aiTrack*dt)
 			b.TurretPitch = turnToward(b.TurretPitch, wantPitch, b.aiTrack*dt)
-			if dist < botFireRange && math.Abs(angDiff(b.HullYaw+b.TurretYaw, angTo)) < botAimTol &&
-				math.Abs(wantPitch-b.TurretPitch) < botAimTol && b.cooldown <= 0 {
+			fireRange, pitchOK := botFireRange, math.Abs(wantPitch-b.TurretPitch) < botAimTol
+			if mr := w.botMeleeRange(b); mr > 0 {
+				fireRange, pitchOK = mr, true
+			}
+			if dist < fireRange && math.Abs(angDiff(b.HullYaw+b.TurretYaw, angTo)) < botAimTol &&
+				pitchOK && b.cooldown <= 0 {
 				w.fire(i)
 			}
 			w.botSecondary(i, dist, angTo)
@@ -3420,28 +5416,132 @@ func (w *World) ctfBotAI(i int, dt float64) {
 	} else {
 		b.lastTgt, b.acquireT = -1, 0
 	}
-	b.Pos.Y = w.ground(b.Pos.X, b.Pos.Z, b.Pos.Y+stepUp)
+	w.botVertical(i, dt, w.wantHop(b))
 }
 
-// driveForward moves a bot along its hull heading at the given speed fraction,
-// using whisker avoidance to route around obstacles instead of shoving them.
+// inHazard reports whether a point lies in (or just outside, by a keep-clear
+// margin) any live hazard's footprint - so bots steer around lava/spikes.
+func (w *World) inHazard(p V3) bool {
+	const margin = 1.0
+	for i := range w.entities {
+		e := &w.entities[i]
+		if e.Hazard == nil || e.Dead {
+			continue
+		}
+		if math.Abs(p.X-e.Pos.X) < e.Half.X+margin && math.Abs(p.Z-e.Pos.Z) < e.Half.Z+margin {
+			return true
+		}
+	}
+	return false
+}
+
+// jumpApex is how high this character's jump reaches (0 = effectively can't clear
+// anything), from its body's jump override or its chassis default.
+func (w *World) jumpApex(b *Tank) float64 {
+	jv := b.veh().Jump
+	if bd := bodyDefFor(b.body); bd.jump > 0 {
+		jv = bd.jump
+	}
+	if jv <= 0 {
+		return 0
+	}
+	return jv * jv / (2 * gravity)
+}
+
+// avoidYaw deflects a desired heading around obstacles and walls using whisker
+// probes, returning the nearest clear heading (or `desired` if the way is open).
+// Probes ride at the character's jump apex, so a strong jumper ignores low cover it
+// can hop (wantHop then makes it jump) and only routes around what it can't clear.
+func (w *World) avoidYaw(b *Tank, desired float64) float64 {
+	clearH := w.jumpApex(b) * 0.8
+	clear := func(yaw float64) bool {
+		f := fwd(yaw)
+		for _, d := range []float64{2.0, 4.0} { // look a few body-lengths ahead
+			p := V3{b.Pos.X + f.X*d, b.Pos.Y + clearH, b.Pos.Z + f.Z*d}
+			if w.blocked(p) || w.inHazard(p) { // route around solid cover and lava alike
+				return false
+			}
+		}
+		return true
+	}
+	if clear(desired) {
+		return desired
+	}
+	for _, off := range []float64{0.45, -0.45, 0.9, -0.9, 1.4, -1.4, 2.0, -2.0} {
+		if clear(desired + off) { // smallest deflection that opens up
+			return desired + off
+		}
+	}
+	return desired + math.Pi // boxed in: turn around
+}
+
+// wantHop reports whether a clearable obstacle sits dead ahead - so a jumping
+// character bounds over low cover instead of stopping at it.
+func (w *World) wantHop(b *Tank) bool {
+	apex := w.jumpApex(b)
+	if apex < 0.5 {
+		return false
+	}
+	f := fwd(b.HullYaw)
+	low := V3{b.Pos.X + f.X*2.5, b.Pos.Y, b.Pos.Z + f.Z*2.5}
+	if !w.blocked(low) { // nothing immediately ahead
+		return false
+	}
+	high := V3{low.X, b.Pos.Y + apex*0.8, low.Z}
+	return !w.blocked(high) // ...and a jump would clear its top
+}
+
+// botVertical integrates a bot's jump/gravity (bots otherwise stay glued to the
+// ground). wantJump launches it when grounded.
+func (w *World) botVertical(i int, dt float64, wantJump bool) {
+	b := &w.Tanks[i]
+	support := w.ground(b.Pos.X, b.Pos.Z, b.Pos.Y+stepUp)
+	if bodyDefFor(b.body).fly { // flyers (butterfly) cruise at altitude, soaring over cover
+		const cruiseAlt = 3.2
+		b.Pos.Y += (support + cruiseAlt - b.Pos.Y) * math.Min(1, 4*dt)
+		b.vy = 0
+		w.stepLunge(b, dt)
+		return
+	}
+	if wantJump && b.Pos.Y <= support+0.05 && b.vy <= 0 {
+		bd := bodyDefFor(b.body)
+		jv := b.veh().Jump
+		if bd.jump > 0 {
+			jv = bd.jump
+		}
+		b.vy = jv
+		if bd.leap { // leapers charge forward when they jump
+			f := fwd(b.HullYaw)
+			b.lungeVX, b.lungeVZ = f.X*lungeSpeed, f.Z*lungeSpeed
+		}
+	}
+	wasAir := b.Pos.Y > support+0.05
+	b.vy -= gravity * dt
+	b.Pos.Y += b.vy * dt
+	if b.Pos.Y < support {
+		b.Pos.Y, b.vy = support, 0
+		if wasAir && bodyDefFor(b.body).leap {
+			w.leapLand(i) // bot bruisers slam down too
+		}
+	}
+	w.stepLunge(b, dt)
+}
+
+// driveForward moves a bot along its hull heading at the given speed fraction
+// (turning to route around obstacles is the AI's job, via avoidYaw). It creeps
+// rather than ramming when something is still close ahead.
 func (w *World) driveForward(i int, dt, frac float64) {
 	b := &w.Tanks[i]
 	v := b.veh()
 	f := fwd(b.HullYaw)
-	ahead := V3{b.Pos.X + f.X*3, b.Pos.Y, b.Pos.Z + f.Z*3}
-	if w.blocked(ahead) {
-		lf := fwd(b.HullYaw - 0.7)
-		if w.blocked(V3{b.Pos.X + lf.X*3, b.Pos.Y, b.Pos.Z + lf.Z*3}) {
-			b.HullYaw += v.HullTurn * dt
-		} else {
-			b.HullYaw -= v.HullTurn * dt
-		}
-		f = fwd(b.HullYaw)
-		b.Pos = b.Pos.Add(V3{f.X * v.Speed * 0.3 * dt, 0, f.Z * v.Speed * 0.3 * dt})
-	} else {
-		b.Pos = b.Pos.Add(V3{f.X * v.Speed * frac * dt, 0, f.Z * v.Speed * frac * dt})
+	if w.inHazard(V3{b.Pos.X + f.X*2.2, b.Pos.Y, b.Pos.Z + f.Z*2.2}) && b.Pos.Y <= w.ground(b.Pos.X, b.Pos.Z, b.Pos.Y)+0.2 {
+		return // lava dead ahead and we're grounded: hold while the hull turns away
 	}
+	if w.blocked(V3{b.Pos.X + f.X*3, b.Pos.Y, b.Pos.Z + f.Z*3}) {
+		frac *= 0.35
+	}
+	spd := v.Speed * BodySpeedMul(b.body)
+	b.Pos = b.Pos.Add(V3{f.X * spd * frac * dt, 0, f.Z * spd * frac * dt})
 	clampArena(&b.Pos, w.half())
 	w.collide(&b.Pos)
 }
@@ -3475,17 +5575,63 @@ func (w *World) nearestEnemy(self int) int {
 // deaths, buff clearing, Survival lives, CTF flag drop, kill credit). owner is
 // the firing tank index for kill credit; <0 means no credit (e.g. a turret or
 // a hazard killed them). Caller has already checked the tank is vulnerable.
+// shieldFracOf is the 0..1 shield gauge for the HUD/render: the minotaur's
+// barrier charge, or the elephant's regenerating buffer.
+func shieldFracOf(t *Tank) float64 {
+	switch t.body {
+	case BodyMinotaur:
+		return t.shieldHP / minoShieldMax
+	case BodyElephant:
+		return t.bufferHP / elephantBufferMax
+	}
+	return 0
+}
+
 func (w *World) hurt(ti, dmg, owner int, cause KillCause) {
 	t := &w.Tanks[ti]
+	// A regenerating shield buffer (elephant) soaks damage from any direction
+	// first; only the overflow reaches HP, and the hit pauses the buffer's regen.
+	if t.bufferHP > 0 && dmg > 0 {
+		t.hitFlash, t.regenPause = tankHitFlash, regenHitPause
+		if float64(dmg) <= t.bufferHP {
+			t.bufferHP -= float64(dmg)
+			return // fully soaked
+		}
+		dmg -= int(t.bufferHP)
+		t.bufferHP = 0
+	}
+	if owner >= 0 && owner != ti && owner < len(w.Tanks) { // credit effective damage (no overkill)
+		eff := dmg
+		if t.HP > 0 && eff > t.HP {
+			eff = t.HP
+		}
+		if eff > 0 {
+			w.Tanks[owner].dmgDealt += eff
+		}
+	}
 	t.HP -= dmg
 	t.hitFlash = tankHitFlash
+	t.regenPause = regenHitPause // passive regen waits out the fight
 	if t.HP > 0 {
 		return
 	}
 	t.Dead = true
 	t.respawn = respawnDelay
+	if !t.Bot {
+		t.respawn = playerRespawnDelay // longer wait so the human's kill-cam replay can play
+	}
 	t.Deaths++
-	t.shieldT, t.rapidT, t.cloakT = 0, 0, 0 // buffs die with you
+	w.bus = append(w.bus, Signal{Name: "killed", Source: -1, Subject: ti, Other: owner}) // subject=victim, other=killer
+	t.shieldT, t.rapidT, t.cloakT = 0, 0, 0                                              // buffs die with you
+	t.shellT, t.boostT, t.dotT, t.dotDebt = 0, 0, 0, 0
+	t.shieldUp, t.shieldBroken = false, 0
+	t.shieldHP, t.bufferHP, t.hookT = 0, 0, 0
+	if t.body == BodyMinotaur {
+		t.shieldHP = minoShieldMax // the barrier comes back fresh on respawn
+	}
+	if t.body == BodyElephant {
+		t.bufferHP = elephantBufferMax // the shield buffer comes back fresh on respawn
+	}
 	if r := w.rules(); r.Lives > 0 && !(r.Bots == BotWaves && t.Bot) {
 		t.lives-- // wave bots don't burn lives; humans (and elimination bots) do
 	}
@@ -3541,6 +5687,12 @@ func (w *World) destroyEntity(e *Entity) {
 	e.Dead, e.HP = true, 0
 	if e.Respawn != nil {
 		e.respawnT = e.Respawn.Delay
+	}
+	for i := range w.entities { // self-scoped signal: only this entity (+ director)
+		if &w.entities[i] == e {
+			w.emit("destroyed", i, -1)
+			break
+		}
 	}
 }
 
@@ -3600,12 +5752,14 @@ func (w *World) stepProjectiles(dt float64) {
 				continue
 			}
 			t := &w.Tanks[ti]
+			sz := BodySizeScale(t.body)
 			dx, dz := t.Pos.X-s.Pos.X, t.Pos.Z-s.Pos.Z
 			// Height-aware: the shot must also be within the tank's body span, so
 			// elevation matters (shoot over cover, or miss high). The window spans
 			// from just below the feet to above the turret, scaled by vehicle size.
-			dyLow, dyHigh := t.Pos.Y-0.3, t.Pos.Y+tankBodyTop*t.veh().Scale
-			if dx*dx+dz*dz < hitRadius*hitRadius && s.Pos.Y >= dyLow && s.Pos.Y <= dyHigh {
+			dyLow, dyHigh := t.Pos.Y-0.3, t.Pos.Y+tankBodyTop*t.veh().Scale*sz
+			r := hitRadius * sz
+			if dx*dx+dz*dz < r*r && s.Pos.Y >= dyLow && s.Pos.Y <= dyHigh {
 				w.shotImpact(&s, s.Pos, ti)
 				hit = true
 				break
@@ -3631,14 +5785,19 @@ func (w *World) shotCanAffect(s *Projectile, ti int) bool {
 		return false
 	}
 	teammate := w.rules().Teams == 2 && s.owner >= 0 && s.owner < len(w.Tanks) && w.Tanks[s.owner].Team == t.Team
-	if s.affects == TargetAllies && !teammate { // support: teammates only
-		return false
+	if s.affects == TargetAllies && !teammate && s.dmg <= 0 {
+		return false // pure support: teammates only (a stinging medic bolt passes)
 	}
 	if s.affects == TargetFoes && teammate { // damage/debuffs: no friendly fire
 		return false
 	}
-	if s.affects != TargetAllies && (t.guard > 0 || t.shieldT > 0) && s.eff != EffShieldBust {
+	// Shields/spawn-guard block anything that would harm; healing an ally through
+	// their shield is fine.
+	if !(s.affects == TargetAllies && teammate) && (t.guard > 0 || t.shieldT > 0 || t.shellT > 0) && s.eff != EffShieldBust {
 		return false
+	}
+	if t.shellT > 0 && s.eff == EffShieldBust {
+		return false // the shell is armor, not a buff - a buster can't strip it
 	}
 	return true
 }
@@ -3651,6 +5810,9 @@ func (w *World) shotImpact(s *Projectile, p V3, direct int) {
 		return
 	}
 	if direct >= 0 {
+		if s.owner >= 0 && s.owner < len(w.Tanks) {
+			w.Tanks[s.owner].shotsHit++ // direct hit (bolt/beam); blast counted in detonate
+		}
 		w.applyShotHit(s, direct)
 	}
 }
@@ -3660,6 +5822,7 @@ func (w *World) shotImpact(s *Projectile, p V3, direct int) {
 // a burst of visual debris.
 func (w *World) detonate(s *Projectile, at V3) {
 	w.spawnBlastFX(at)
+	connected := false
 	for ti := range w.Tanks {
 		if !w.shotCanAffect(s, ti) {
 			continue
@@ -3670,6 +5833,7 @@ func (w *World) detonate(s *Projectile, at V3) {
 		if d2 > s.blast*s.blast {
 			continue
 		}
+		connected = true
 		w.applyShotHit(s, ti)
 		if s.eff == EffDamage { // damage blasts also shove outward, strongest at the center
 			dist := math.Sqrt(d2)
@@ -3698,6 +5862,9 @@ func (w *World) detonate(s *Projectile, at V3) {
 				}
 			}
 		}
+	}
+	if connected && s.owner >= 0 && s.owner < len(w.Tanks) {
+		w.Tanks[s.owner].shotsHit++ // a blast counts as one connecting shot (accuracy)
 	}
 }
 
@@ -3733,21 +5900,131 @@ func (w *World) foeNear(s *Projectile, r float64) bool {
 	return false
 }
 
+// absorbedByShield handles a minotaur's deployed frontal barrier: a harmful hit
+// arriving from within the barrier's frontal arc is soaked by the shield's HP
+// instead of the tank. The hit drains the barrier; when it runs the barrier dry
+// it shatters (lowers + enters its redeploy cooldown) and any overkill leaks
+// through as real damage. Returns true if the hit was (fully or partly) eaten by
+// the barrier - callers then skip their normal effect application. Friendly
+// effects (heals/buffs) and hits from the sides/back are never absorbed.
+func (w *World) absorbedByShield(s *Projectile, ti int) bool {
+	t := &w.Tanks[ti]
+	if t.body != BodyMinotaur || !t.shieldUp || t.shieldHP <= 0 || s.affects == TargetAllies {
+		return false
+	}
+	// Source of the hit: the firer (or, for environment fire, the shot itself).
+	src := s.Pos
+	if s.owner >= 0 && s.owner < len(w.Tanks) {
+		src = w.Tanks[s.owner].Pos
+	}
+	dx, dz := src.X-t.Pos.X, src.Z-t.Pos.Z
+	n := math.Hypot(dx, dz)
+	if n < 0.01 {
+		return false // right on top of the minotaur: no facing to block with
+	}
+	f := fwd(t.HullYaw)
+	if (f.X*dx+f.Z*dz)/n < minoShieldArc {
+		return false // came from a flank or behind: the barrier doesn't cover it
+	}
+	cost := float64(s.dmg)
+	if s.eff == EffDamage && cost <= 0 {
+		cost = projDmg
+	}
+	if cost <= 0 {
+		cost = 8 // a debuff/utility hit still chips the barrier
+	}
+	if cost < t.shieldHP {
+		t.shieldHP -= cost
+		return true
+	}
+	// The barrier shatters; surplus damage carries through to the minotaur.
+	leak := cost - t.shieldHP
+	t.shieldHP, t.shieldUp, t.shieldBroken = 0, false, minoShieldBreakCD
+	if (s.eff == EffDamage || s.dmg > 0) && leak >= 1 {
+		w.hurt(ti, int(leak), s.owner, s.cause)
+	}
+	return true
+}
+
 // applyShotHit resolves a projectile striking tank ti by its effect payload. W1
 // handles EffDamage (ordinary damage); the effect palette (heal/slow/knockback/
 // shield-bust) lands in W2, dispatched off the same switch.
 func (w *World) applyShotHit(s *Projectile, ti int) {
+	if w.absorbedByShield(s, ti) {
+		return
+	}
 	t := &w.Tanks[ti]
 	switch s.eff {
 	case EffHeal:
+		teammate := w.rules().Teams == 2 && s.owner >= 0 && s.owner < len(w.Tanks) && w.Tanks[s.owner].Team == t.Team
+		if !teammate && s.dmg > 0 {
+			// The medic bolt stings anyone who isn't kin - so a butterfly is
+			// never a zero-damage character (it just isn't much of one).
+			w.hurt(ti, s.dmg, s.owner, CauseCannon)
+			return
+		}
 		if max := t.veh().MaxHP; t.HP < max {
-			if t.HP += int(s.mag); t.HP > max {
-				t.HP = max
+			healed := int(s.mag)
+			if t.HP+healed > max {
+				healed = max - t.HP
+			}
+			t.HP += healed
+			t.healFlash = healFlashDur // mend halo (drawn above the tank)
+			if s.owner >= 0 && s.owner != ti && s.owner < len(w.Tanks) {
+				w.Tanks[s.owner].healDone += healed // support: HP restored to allies
 			}
 		}
 		t.hitFlash = tankHitFlash // brief blink as feedback
 	case EffSlow:
 		t.slowT, t.slowMag = s.dur, clampF01(s.mag)
+		t.hitFlash = tankHitFlash
+	case EffSpeed:
+		teammate := w.rules().Teams == 2 && s.owner >= 0 && s.owner < len(w.Tanks) && w.Tanks[s.owner].Team == t.Team
+		if !teammate && s.dmg > 0 { // the swift bolt stings anyone who isn't kin (medic pattern)
+			w.hurt(ti, s.dmg, s.owner, s.cause)
+			return
+		}
+		t.boostT, t.boostMag = s.dur, s.mag
+		t.hitFlash = tankHitFlash
+	case EffShield:
+		if t.shieldT < s.dur {
+			t.shieldT = s.dur
+		}
+		t.hitFlash = tankHitFlash
+	case EffPoison, EffDrain, EffBleed:
+		if s.dmg > 0 { // the bite/burn/scratch itself, on top of the lingering DoT
+			w.hurt(ti, s.dmg, s.owner, s.cause)
+			if t.Dead {
+				return // no DoT on a corpse
+			}
+		}
+		t.dotT, t.dotPS, t.dotFrom = s.dur, s.mag, s.owner
+		t.dotLeech = s.eff == EffDrain
+		if t.dotCause = s.cause; t.dotCause == CauseCannon {
+			t.dotCause = CausePoison
+		}
+		t.hitFlash = tankHitFlash
+	case EffPull:
+		// Reel the target in toward the shooter, ending ~Mag units away (point
+		// blank, in tusk reach). The elephant's trunk hook.
+		if s.owner >= 0 && s.owner < len(w.Tanks) {
+			o := &w.Tanks[s.owner]
+			dx, dz := t.Pos.X-o.Pos.X, t.Pos.Z-o.Pos.Z
+			d := math.Hypot(dx, dz)
+			if d > 0.01 {
+				end := s.mag
+				if end < 0.5 {
+					end = 0.5
+				}
+				t.Pos.X = o.Pos.X + dx/d*end
+				t.Pos.Z = o.Pos.Z + dz/d*end
+				clampArena(&t.Pos, w.half())
+				w.collide(&t.Pos)
+			}
+		}
+		if s.dmg > 0 {
+			w.hurt(ti, s.dmg, s.owner, s.cause)
+		}
 		t.hitFlash = tankHitFlash
 	case EffKnockback:
 		n := math.Hypot(s.vel.X, s.vel.Z)
@@ -3766,9 +6043,9 @@ func (w *World) applyShotHit(s *Projectile, ti int) {
 		if dmg <= 0 {
 			dmg = projDmg
 		}
-		cause := CauseCannon // a tank's shot; entity-fired shots have no tank owner
+		cause := s.cause // melee/cone strikes label themselves (pound, tusks)
 		if s.owner < 0 {
-			cause = CauseTurret
+			cause = CauseTurret // entity-fired shots have no tank owner
 		}
 		w.hurt(ti, dmg, s.owner, cause)
 	}
@@ -3796,6 +6073,20 @@ func (w *World) blocked(p V3) bool {
 			continue
 		}
 		if math.Abs(p.X-b.Pos.X) < b.Half.X+rad && math.Abs(p.Z-b.Pos.Z) < b.Half.Z+rad {
+			return true
+		}
+	}
+	// A ramp's solid wedge blocks too: inside the footprint and below the surface
+	// (with a step's grace) is the wall under the incline, not walkable ground.
+	// Without this, bot avoidance and pathing don't see ramp sides and drive into
+	// them (the collision now stops them; this stops them aiming there at all).
+	for _, r := range w.ActiveMap().Ramps {
+		cx := math.Max(r.Pos.X-r.Half.X, math.Min(p.X, r.Pos.X+r.Half.X))
+		cz := math.Max(r.Pos.Z-r.Half.Z, math.Min(p.Z, r.Pos.Z+r.Half.Z))
+		if math.Abs(p.X-r.Pos.X) >= r.Half.X+rad || math.Abs(p.Z-r.Pos.Z) >= r.Half.Z+rad {
+			continue
+		}
+		if rh, ok := rampHeight(r, cx, cz); ok && p.Y < rh-stepUp {
 			return true
 		}
 	}
@@ -3864,6 +6155,7 @@ func (w *World) spawnPoint(self int) V3 {
 		}
 		return true
 	}
+	lim := w.half() - 1
 	// Prefer the map's authored spawn points (clear of other tanks).
 	if sp := w.ActiveMap().Spawns; len(sp) > 0 {
 		for _, k := range rand.Perm(len(sp)) {
@@ -3871,16 +6163,24 @@ func (w *World) spawnPoint(self int) V3 {
 				return sp[k]
 			}
 		}
-		return sp[rand.Intn(len(sp))]
+		// More tanks than clear spawns: jitter around one so they don't stack.
+		k := rand.Intn(len(sp))
+		p := V3{
+			math.Max(-lim, math.Min(lim, sp[k].X+(rand.Float64()*2-1)*4)),
+			0,
+			math.Max(-lim, math.Min(lim, sp[k].Z+(rand.Float64()*2-1)*4)),
+		}
+		w.collide(&p)
+		return p
 	}
 	for tries := 0; tries < 24; tries++ {
-		x := (rand.Float64()*2 - 1) * (w.half() - 1)
-		z := (rand.Float64()*2 - 1) * (w.half() - 1)
+		x := (rand.Float64()*2 - 1) * lim
+		z := (rand.Float64()*2 - 1) * lim
 		if clear(x, z) {
 			return V3{x, 0, z}
 		}
 	}
-	return V3{0, 0, 0}
+	return V3{(rand.Float64()*2 - 1) * lim, 0, (rand.Float64()*2 - 1) * lim} // last resort: random, not origin
 }
 
 func (w *World) faceTarget(self int) float64 {
@@ -3932,14 +6232,21 @@ func (w *World) Snapshot() ([]TankSnap, []ShotSnap, []FlagSnap, []PickupSnap) {
 			ID: i, Pos: t.Pos, HullYaw: t.HullYaw, TurretYaw: t.TurretYaw, TurretPitch: t.TurretPitch,
 			HP: t.HP, Color: t.Color, Name: t.Name, Dead: t.Dead, Bot: t.Bot,
 			Shield: t.guard > 0 || t.shieldT > 0, Hit: t.hitFlash > 0,
-			Cloak: t.cloakT > 0, Rapid: t.rapidT > 0,
-			Vehicle: t.Vehicle, Body: t.body, Lives: t.lives, Team: t.Team, Carrying: t.Carrying >= 0,
+			Cloak: t.cloakT > 0, Rapid: t.rapidT > 0, Shell: t.shellT > 0,
+			Burning:  t.dotT > 0 && t.dotCause == CauseFire,
+			Poisoned: t.dotT > 0 && t.dotCause == CausePoison,
+			Bleeding: t.dotT > 0 && t.dotCause == CauseBleed,
+			Healing:  t.healFlash > 0,
+			ShieldUp: t.shieldUp, ShieldFrac: shieldFracOf(t),
+			Vehicle: t.Vehicle, Body: t.body, ShotsFired: t.shotsFired, ShotsHit: t.shotsHit, Pickups: t.pickups,
+			DmgDealt: t.dmgDealt, HealDone: t.healDone,
+			Lives: t.lives, Team: t.Team, Carrying: t.Carrying >= 0,
 			Kills: t.Kills, Deaths: t.Deaths, RespawnIn: t.respawn, Reload: reload, Ammo: ammoFrac, HoldScore: t.holdScore,
 		})
 	}
 	sh := make([]ShotSnap, len(w.Shots))
 	for i := range w.Shots {
-		sh[i] = ShotSnap{Pos: w.Shots[i].Pos, Vis: w.Shots[i].vis}
+		sh[i] = ShotSnap{Pos: w.Shots[i].Pos, Vis: w.Shots[i].vis, Owner: w.Shots[i].owner}
 	}
 	var fl []FlagSnap
 	for i := range w.flags {
