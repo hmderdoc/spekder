@@ -116,7 +116,7 @@ func syncPartyFromStatus(pres []proto.Presence, mySession string) {
 
 // connectArena dials the configured arena server and joins as a client with the
 // chosen vehicle.
-func connectArena(dropfile string, vehicle, body int, color [3]float64, custom *gm.CustomStats) (*netSession, error) {
+func connectArena(dropfile string, vehicle, body int, color [3]float64) (*netSession, error) {
 	ini := loadINI(defaultINIPath())
 	host := ini["server"]
 	if host == "" {
@@ -127,7 +127,7 @@ func connectArena(dropfile string, vehicle, body int, color [3]float64, custom *
 		port = "7700"
 	}
 	bbsid, handle := door32Identity(dropfile) // the real dropfile, not a cwd guess
-	ns, err := dialServer(host, port, ini["token"], bbsid, handle, vehicle, color, custom, body)
+	ns, err := dialServer(host, port, ini["token"], bbsid, handle, vehicle, color, body)
 	if err != nil {
 		return nil, err
 	}
@@ -312,16 +312,14 @@ type netSession struct {
 	predPitch float64
 	predVy    float64
 	predInit  bool
-
-	predVeh *gm.Vehicle // our effective stats for client prediction (custom build, if any)
 }
 
-func dialServer(host, port, token, bbsid, handle string, vehicle int, color [3]float64, custom *gm.CustomStats, body int) (*netSession, error) {
+func dialServer(host, port, token, bbsid, handle string, vehicle int, color [3]float64, body int) (*netSession, error) {
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 3*time.Second)
 	if err != nil {
 		return nil, err
 	}
-	if err := proto.WriteMsg(conn, proto.EncodeHello(token, bbsid, handle, vehicle, color, custom, body, proto.ProtocolVersion, version, getParty())); err != nil {
+	if err := proto.WriteMsg(conn, proto.EncodeHello(token, bbsid, handle, vehicle, color, nil, body, proto.ProtocolVersion, version, getParty())); err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -342,10 +340,6 @@ func dialServer(host, port, token, bbsid, handle string, vehicle int, color [3]f
 	}
 	conn.SetReadDeadline(time.Time{})
 	ns := &netSession{conn: conn, me: me, previews: map[int]gm.Map{}, reqPrev: map[int]bool{}}
-	if custom != nil { // predict our own movement with the custom build's stats
-		v := gm.MakeCustom(vehicle, *custom)
-		ns.predVeh = &v
-	}
 	go ns.readLoop()
 	go ns.prefetchLoop()
 	return ns, nil
@@ -477,11 +471,11 @@ func (s *netSession) readLoop() {
 
 // sendChangeChar tells the arena to swap our character; it takes effect on our
 // next respawn. Best-effort on the live game connection (serialized with step).
-func (s *netSession) sendChangeChar(vehicle, body int, color [3]float64, custom *gm.CustomStats) {
+func (s *netSession) sendChangeChar(vehicle, body int, color [3]float64) {
 	token := loadINI(defaultINIPath())["token"]
 	s.wmu.Lock()
 	s.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-	_ = proto.WriteMsg(s.conn, proto.EncodeChangeChar(token, vehicle, color, custom, body))
+	_ = proto.WriteMsg(s.conn, proto.EncodeChangeChar(token, vehicle, color, nil, body))
 	s.wmu.Unlock()
 }
 
@@ -521,9 +515,6 @@ func (s *netSession) step(dt float64, in gm.Input) viewState {
 	} else {
 		solids := gm.SolidBoxes(cmap, latestEnts) // block on alive solid entities, matching the server
 		pveh := gm.VehBody(self.Body)
-		if s.predVeh != nil { // custom build: predict with our tuned stats, not the chassis
-			pveh = *s.predVeh
-		}
 		pveh.Speed *= gm.BodySpeedMul(self.Body) // match the sim's per-body speed (e.g. the fast insect)
 		s.predPos, s.predHull, s.predTur, s.predPitch, s.predVy = gm.Predict(s.predPos, s.predHull, s.predTur, s.predPitch, s.predVy, in, dt, pveh, cmap, solids)
 		dx, dz := self.Pos.X-s.predPos.X, self.Pos.Z-s.predPos.Z

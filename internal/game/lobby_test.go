@@ -10,7 +10,7 @@ func TestLobbyVoteFastForwardAndLog(t *testing.T) {
 	}
 	w := NewWorld(0, ModeDeathmatch)
 	w.Lobby = true
-	me := w.AddPlayer([3]float64{}, 0, "DERDOK")
+	me := w.AddPlayer([3]float64{}, 0, "DERDOK", BodyTank)
 	w.Tanks[me].vote = -1 // as the real lobby entry resets it
 	w.Phase, w.Timer = PhaseLobby, lobbyTime
 

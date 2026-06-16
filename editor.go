@@ -459,7 +459,7 @@ func runEditor(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 								// Temporarily add the working map, play it, then remove it.
 								idx := len(gm.Maps)
 								gm.Maps = append(gm.Maps, m)
-								sess := newOfflineOnMap(idx, offlineBots, gm.EffectiveMode(m), 1, s.difficulty, s.aimAssist, playerName, gm.SelectColors[0], nil, gm.BodyTank)
+								sess := newOfflineOnMap(idx, offlineBots, gm.EffectiveMode(m), 1, s.difficulty, s.aimAssist, playerName, gm.SelectColors[0], gm.BodyTank)
 								quit, _ := playMatch(w, cols, rows, rows3d, rnd, ip, sess, dropfile, "playtest", m.Name, false, nil)
 								sess.close()
 								gm.Maps = gm.Maps[:idx]

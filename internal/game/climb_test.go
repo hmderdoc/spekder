@@ -14,7 +14,7 @@ func driveInto(t *testing.T, body int) float64 {
 	defer func() { Maps = Maps[:len(Maps)-1] }()
 	w := NewWorld(0, ModeDeathmatch)
 	w.PinMap(len(Maps) - 1)
-	me := w.AddPlayer([3]float64{}, ChassisFor(body), "P")
+	me := w.AddPlayer([3]float64{}, ChassisFor(body), "P", BodyTank)
 	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{}) // start the match
 	w.Tanks[me].body, w.Tanks[me].Vehicle = body, ChassisFor(body)
 	w.Tanks[me].Pos = V3{X: 0, Z: 2}

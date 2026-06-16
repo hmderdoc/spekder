@@ -158,7 +158,7 @@ func (s *server) handle(conn net.Conn) {
 		_ = proto.WriteMsg(conn, proto.EncodePlayers(s.playerRows()))
 		return
 	}
-	token, bbsid, handle, vehicle, color, custom, body, clientProto, clientVer, party, ok := proto.DecodeHello(hello)
+	token, bbsid, handle, vehicle, color, _, body, clientProto, clientVer, party, ok := proto.DecodeHello(hello)
 	if !ok || token != s.token {
 		log.Printf("rejected %v (bad hello/token)", conn.RemoteAddr())
 		return
@@ -187,17 +187,12 @@ func (s *server) handle(conn net.Conn) {
 	}
 	conn.SetReadDeadline(time.Time{})
 
-	var customVeh *gm.Vehicle // custom build: chassis renders, these stats sim
-	if custom != nil {
-		v := gm.MakeCustom(vehicle, *custom)
-		customVeh = &v
-	}
 	s.mu.Lock()
 	if s.isKickedLocked(party, handle) {
 		party = "" // booted from that party: they join solo, not on the owner's side
 	}
-	tank := s.world.AddPlayerCustom(color, vehicle, handle, customVeh, body) // dedups to a free color
-	s.world.SetPlayerParty(tank, party)                                      // team-grouping hint
+	tank := s.world.AddPlayer(color, vehicle, handle, body) // dedups to a free color
+	s.world.SetPlayerParty(tank, party)                     // team-grouping hint
 	id := s.nextID
 	s.nextID++
 	c := &client{id: id, tank: tank, conn: conn}
@@ -230,14 +225,9 @@ func (s *server) handle(conn net.Conn) {
 			c.mu.Unlock()
 			continue
 		}
-		if tok, veh, col, cust, bod, ok := proto.DecodeChangeChar(msg); ok && tok == s.token {
-			var cv *gm.Vehicle
-			if cust != nil {
-				v := gm.MakeCustom(veh, *cust)
-				cv = &v
-			}
+		if tok, veh, col, _, bod, ok := proto.DecodeChangeChar(msg); ok && tok == s.token {
 			s.mu.Lock()
-			s.world.SetPlayerLoadout(c.tank, col, veh, cv, bod)
+			s.world.SetPlayerLoadout(c.tank, col, veh, bod)
 			s.mu.Unlock()
 			continue
 		}

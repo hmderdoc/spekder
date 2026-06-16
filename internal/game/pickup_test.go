@@ -11,7 +11,7 @@ func startDM(t *testing.T, bots int) (*World, int) {
 			break
 		}
 	}
-	me := w.AddPlayer([3]float64{}, 1, "P")
+	me := w.AddPlayer([3]float64{}, 1, "P", BodyTank)
 	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{me: {}})
 	if w.Phase != PhaseActive {
 		t.Fatalf("expected active phase, got %v", w.Phase)

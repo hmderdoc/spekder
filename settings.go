@@ -19,21 +19,13 @@ type userSettings struct {
 	colorMode    int // colorTrue/color256/color16 (see color.go)
 	campaignBest int // highest campaign level cleared (0 = never)
 
-	// Custom point-buy vehicle (see VEHICLES.md). hasCustom gates the CUSTOM entry
-	// in the selector; chassis is the builtin body it renders as; levels are the
-	// per-stat pips (see pbStats) the build was tuned to.
-	hasCustom     bool
-	customChassis int
-	customBody    int // render silhouette for the custom build (BodyTank or a creature)
-	customLevels  [pbStatCount]int
-
 	// Custom controls (see controls.go). keyBinds maps a game action -> its key
 	// (0 = explicitly unbound); absent = the default key.
 	keyBinds map[int]byte
 }
 
 func defaultSettings() userSettings {
-	return userSettings{difficulty: gm.DiffNormal, aimAssist: true, colorMode: colorTrue, customChassis: 1, customBody: gm.BodyTank, customLevels: defaultCustomLevels(), keyBinds: map[int]byte{}}
+	return userSettings{difficulty: gm.DiffNormal, aimAssist: true, colorMode: colorTrue, keyBinds: map[int]byte{}}
 }
 
 // sanitizeKey reduces a handle to a safe, stable filename fragment.
@@ -99,16 +91,6 @@ func loadUserSettings(dropfile string) userSettings {
 	case "on", "true", "1", "yes":
 		s.aimAssist = true
 	}
-	if c, ok := atoiOK(ini["customchassis"]); ok && c >= 0 && c < gm.BuiltinVehicles() {
-		s.customChassis = c
-	}
-	if b, ok := atoiOK(ini["custombody"]); ok && b >= 0 && b < gm.BodyKinds {
-		s.customBody = b
-	}
-	if lv, ok := parseLevels(ini["customlevels"]); ok {
-		s.customLevels = lv
-		s.hasCustom = true
-	}
 	if bs := ini["binds"]; bs != "" {
 		s.keyBinds = map[int]byte{}
 		for _, entry := range strings.Split(bs, ",") {
@@ -127,23 +109,6 @@ func loadUserSettings(dropfile string) userSettings {
 		}
 	}
 	return s
-}
-
-// parseLevels reads a comma-separated pip list ("4,4,3,4,3,4") into a level array.
-func parseLevels(s string) ([pbStatCount]int, bool) {
-	var lv [pbStatCount]int
-	parts := strings.Split(s, ",")
-	if len(parts) != pbStatCount {
-		return lv, false
-	}
-	for i, p := range parts {
-		n, ok := atoiOK(strings.TrimSpace(p))
-		if !ok {
-			return lv, false
-		}
-		lv[i] = clampLevel(i, n)
-	}
-	return lv, true
 }
 
 func atoiOK(s string) (int, bool) {
@@ -171,13 +136,6 @@ func saveUserSettings(dropfile string, s userSettings) {
 	body := fmt.Sprintf("difficulty = %s\naimassist = %s\ncolormode = %s\n", s.difficulty.String(), aa, colorModeSlug(s.colorMode))
 	if s.campaignBest > 0 {
 		body += fmt.Sprintf("campaignbest = %d\n", s.campaignBest)
-	}
-	if s.hasCustom {
-		parts := make([]string, pbStatCount)
-		for i, v := range s.customLevels {
-			parts[i] = fmt.Sprintf("%d", v)
-		}
-		body += fmt.Sprintf("customchassis = %d\ncustombody = %d\ncustomlevels = %s\n", s.customChassis, s.customBody, strings.Join(parts, ","))
 	}
 	if len(s.keyBinds) > 0 {
 		var parts []string

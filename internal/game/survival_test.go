@@ -11,7 +11,7 @@ func drive(w *World, secs, dt float64, in map[int]Input) {
 
 func TestSurvivalWavesAndLives(t *testing.T) {
 	w := NewWorld(0, ModeSurvival)
-	me := w.AddPlayer([3]float64{}, 0, "P")
+	me := w.AddPlayer([3]float64{}, 0, "P", BodyTank)
 	in := map[int]Input{me: {}}
 
 	// Count in past the countdown so the match goes active and wave 1 spawns.

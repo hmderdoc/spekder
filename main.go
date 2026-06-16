@@ -2981,14 +2981,13 @@ func runDifficulty(w *bufio.Writer, cols, rows int, ip *input, cur gm.Difficulty
 
 // runVehicleMenu lets the player pick a vehicle class (with stats), returning
 // the index, or quit=true if they bailed.
-// vehEntry is one selectable row: a builtin chassis, a creature (a body style on a
-// thematic chassis for stats/scale), or the CUSTOM point-buy editor.
+// vehEntry is one selectable row: a builtin chassis or a creature (a body style on
+// a thematic chassis for stats/scale).
 type vehEntry struct {
 	name    string
 	vehicle int    // chassis index (stats + preview scale)
 	body    int    // gm.BodyTank for builtins; a creature body otherwise
 	desc    string // blurb (creatures); builtins use the vehicle's own Desc
-	custom  bool   // the CUSTOM editor entry
 }
 
 // playerBodies are the creatures a player can pilot. Each rides the chassis
@@ -3026,21 +3025,20 @@ func init() {
 // creatures ride on - the playstyles survive, the tank sprawl doesn't.
 var selectableTanks = []int{1} // TANK
 
-// vehicleEntries is the full selector list: builtins, then creatures, then CUSTOM.
+// vehicleEntries is the full selector list: builtins, then creatures.
 func vehicleEntries() []vehEntry {
-	e := make([]vehEntry, 0, len(selectableTanks)+len(playerBodies)+1)
+	e := make([]vehEntry, 0, len(selectableTanks)+len(playerBodies))
 	for _, i := range selectableTanks {
 		e = append(e, vehEntry{name: gm.Vehicles[i].Name, vehicle: i, body: gm.BodyTank, desc: gm.Vehicles[i].Desc})
 	}
 	e = append(e, playerBodies...)
-	e = append(e, vehEntry{name: "CUSTOM", custom: true})
 	return e
 }
 
 // runVehicleMenu: pick a vehicle. Wide terminals get a two-pane screen (lightbar
 // list on the left, a rotating 3D preview on the right); narrow ones fall back to
-// a simple centered list. Returns the chosen (chassis, body, color, custom).
-func runVehicleMenu(w *bufio.Writer, cols, rows int, ip *input, s *userSettings, dropfile string) (vehicle, body int, color [3]float64, custom *gm.CustomStats, back, quit bool) {
+// a simple centered list. Returns the chosen (chassis, body, color).
+func runVehicleMenu(w *bufio.Writer, cols, rows int, ip *input, s *userSettings, dropfile string) (vehicle, body int, color [3]float64, back, quit bool) {
 	entries := vehicleEntries()
 	N := len(entries)
 	sel := 0 // TANK (the one tank) leads the list
@@ -3109,7 +3107,7 @@ func runVehicleMenu(w *bufio.Writer, cols, rows int, ip *input, s *userSettings,
 	for {
 		select {
 		case <-ip.quitCh:
-			return 0, 0, [3]float64{}, nil, false, true
+			return 0, 0, [3]float64{}, false, true
 		default:
 		}
 		nc := len(gm.SelectColors)
@@ -3128,18 +3126,9 @@ func runVehicleMenu(w *bufio.Writer, cols, rows int, ip *input, s *userSettings,
 					colorIdx, listDirty = (colorIdx+1)%nc, true
 				case mkEnter:
 					e := entries[sel]
-					if !e.custom {
-						return e.vehicle, e.body, gm.SelectColors[colorIdx], nil, false, false
-					}
-					// CUSTOM: route through the point-buy editor (pre-filled).
-					cs, chassis, cbody, saved := runCustomEditor(w, cols, rows, ip, s, dropfile, gm.SelectColors[colorIdx])
-					if saved {
-						return chassis, cbody, gm.SelectColors[colorIdx], &cs, false, false
-					}
-					header() // editor cleared the screen
-					panelPrev, listDirty = nil, true
+					return e.vehicle, e.body, gm.SelectColors[colorIdx], false, false
 				case mkBack:
-					return 0, 0, [3]float64{}, nil, true, false // back to the main menu
+					return 0, 0, [3]float64{}, true, false // back to the main menu
 				}
 			case r := <-ip.runes:
 				// Shift+S cycles the sort criterion (lowercase s stays wasd-down).
@@ -3172,9 +3161,6 @@ func runVehicleMenu(w *bufio.Writer, cols, rows int, ip *input, s *userSettings,
 		angle += 0.7 * dt
 		e := entries[sel]
 		chassis, body := e.vehicle, e.body
-		if e.custom {
-			chassis, body = s.customChassis, gm.BodyTank
-		}
 		tank := gm.TankSnap{Vehicle: chassis, Body: body, Color: gm.SelectColors[colorIdx]}
 		tris := appendTank(nil, &tank, now.Sub(start).Seconds())
 		pr.renderModel(fitCam(tris, pr.W, pr.H, angle, previewPad(body)), tris)
@@ -3232,12 +3218,6 @@ func drawVehicleList(w *bufio.Writer, leftW, startRow, listH int, entries []vehE
 // entryBlurb is the selected entry's one-line summary (no chassis/"frame" tag:
 // the chassis is an internal stat profile, not a class the player picks).
 func entryBlurb(e vehEntry, s *userSettings) string {
-	if e.custom {
-		if s.hasCustom {
-			return "Your saved build on a " + gm.Veh(s.customChassis).Name + " chassis. ENTER to tune."
-		}
-		return "Your point-buy build. ENTER to configure stats and chassis."
-	}
 	return e.desc
 }
 
@@ -3287,16 +3267,8 @@ var charSortKeys = []struct {
 	{"FIRE RATE", 3}, {"AMMO", 4}, {"REGEN", 5}, {"JUMP", 6},
 }
 
-// charVehicle resolves an entry to the Vehicle whose stats it shows (the saved
-// build for CUSTOM, else its chassis).
+// charVehicle resolves an entry to the Vehicle whose stats it shows.
 func charVehicle(e vehEntry, s *userSettings) gm.Vehicle {
-	if e.custom {
-		lv := s.customLevels
-		if !s.hasCustom {
-			lv = defaultCustomLevels()
-		}
-		return gm.MakeCustom(s.customChassis, customFromLevels(lv))
-	}
 	return gm.VehBody(e.body)
 }
 
@@ -3321,9 +3293,6 @@ func charBarFracs(e vehEntry, s *userSettings) [7]float64 {
 		f[i] = statFrac(i, vals[i])
 	}
 	body, chassis := e.body, e.vehicle
-	if e.custom {
-		body, chassis = gm.BodyTank, s.customChassis
-	}
 	f[6] = jumpFrac(gm.EffectiveJump(body, chassis))
 	return f
 }
@@ -3354,9 +3323,6 @@ func drawStatBars(w *bufio.Writer, rightEdge, bottomRow int, e vehEntry, s *user
 // through, and fields are width-padded so a shorter name leaves no stale tail.
 func drawWeaponsBlock(w *bufio.Writer, col0, bottomRow int, e vehEntry, s *userSettings) {
 	body := e.body
-	if e.custom {
-		body = gm.BodyTank
-	}
 	passive := "none"
 	if r := gm.HPRegen(body); r > 0 {
 		passive = fmt.Sprintf("+%.1f HP/s", r)
@@ -3388,13 +3354,10 @@ func indexOfEntryName(entries []vehEntry, name string) int {
 }
 
 // sortEntries orders the roster by the criterion (stat fracs high-to-low so the
-// strongest reads first; name ascending). CUSTOM always sinks to the bottom.
+// strongest reads first; name ascending).
 func sortEntries(entries []vehEntry, s *userSettings, statIdx int) {
 	sort.SliceStable(entries, func(a, b int) bool {
 		ea, eb := entries[a], entries[b]
-		if ea.custom != eb.custom {
-			return eb.custom
-		}
 		if statIdx >= 0 {
 			if fa, fb := charBarFracs(ea, s)[statIdx], charBarFracs(eb, s)[statIdx]; fa != fb {
 				return fa > fb
@@ -3404,10 +3367,24 @@ func sortEntries(entries []vehEntry, s *userSettings, statIdx int) {
 	})
 }
 
-// statFrac normalizes a stat value to 0..1 over its point-buy range (FireDelay's
+// statBarRange is the value span each stat bar normalizes against (base..base+
+// step*pbMaxLevel). Display-only: it sets where a roster stat reads as an empty vs
+// a full bar; FireDelay's step is negative so a lower delay reads as a fuller bar.
+const pbMaxLevel = 8
+
+var statBarRange = [6]struct{ base, step float64 }{
+	{50, 12.5},   // HP:    50..150
+	{3.5, 0.6},   // SPEED: 3.5..8.3
+	{1.0, 0.2},   // TURN:  1.0..2.6
+	{0.9, -0.06}, // FIRE:  0.9..0.42 (lower = better)
+	{5, 1.25},    // AMMO:  5..15
+	{1.0, 0.2},   // REGEN: 1.0..2.6
+}
+
+// statFrac normalizes a stat value to 0..1 over its display range (FireDelay's
 // range is inverted, so a lower delay reads as a fuller bar).
 func statFrac(i int, val float64) float64 {
-	f := (val - pbStats[i].base) / (pbStats[i].step * pbMaxLevel)
+	f := (val - statBarRange[i].base) / (statBarRange[i].step * pbMaxLevel)
 	if f < 0 {
 		f = 0
 	} else if f > 1 {
@@ -3535,9 +3512,9 @@ func blitPanelMasked(w *bufio.Writer, r *Renderer, prev []byte, col0, row0 int, 
 	return cur
 }
 
-// runVehicleMenuSimple is the static centered list for narrow terminals (builtins,
-// creatures, and a CUSTOM entry that opens the point-buy editor).
-func runVehicleMenuSimple(w *bufio.Writer, cols, rows int, ip *input, s *userSettings, dropfile string) (vehicle, body int, color [3]float64, custom *gm.CustomStats, back, quit bool) {
+// runVehicleMenuSimple is the static centered list for narrow terminals (builtins
+// and creatures).
+func runVehicleMenuSimple(w *bufio.Writer, cols, rows int, ip *input, s *userSettings, dropfile string) (vehicle, body int, color [3]float64, back, quit bool) {
 	entries := vehicleEntries()
 	N := len(entries)
 	sel, colorIdx := 0, 0
@@ -3568,7 +3545,7 @@ func runVehicleMenuSimple(w *bufio.Writer, cols, rows int, ip *input, s *userSet
 	for {
 		select {
 		case <-ip.quitCh:
-			return 0, 0, [3]float64{}, nil, false, true
+			return 0, 0, [3]float64{}, false, true
 		case <-resizeTick.C:
 			w.WriteString("\x1b[18t")
 			w.Flush()
@@ -3592,16 +3569,9 @@ func runVehicleMenuSimple(w *bufio.Writer, cols, rows int, ip *input, s *userSet
 				draw()
 			case mkEnter:
 				e := entries[sel]
-				if !e.custom {
-					return e.vehicle, e.body, gm.SelectColors[colorIdx], nil, false, false
-				}
-				cs, chassis, cbody, saved := runCustomEditor(w, cols, rows, ip, s, dropfile, gm.SelectColors[colorIdx])
-				if saved {
-					return chassis, cbody, gm.SelectColors[colorIdx], &cs, false, false
-				}
-				draw()
+				return e.vehicle, e.body, gm.SelectColors[colorIdx], false, false
 			case mkBack:
-				return 0, 0, [3]float64{}, nil, true, false // back to the main menu
+				return 0, 0, [3]float64{}, true, false // back to the main menu
 			}
 		}
 	}
@@ -4681,7 +4651,6 @@ func main() {
 		}
 		var vehicle, vbody int
 		var vcolor [3]float64
-		var vcustom *gm.CustomStats
 		if choice.autoJoin {
 			// Following the party into the arena: skip the picker, drop in as the
 			// default TANK (you can hot-swap with V once inside), after a brief
@@ -4692,7 +4661,7 @@ func main() {
 		} else {
 			updatePresence(dropfile, "vehicle select", "")
 			var vback, vquit bool
-			vehicle, vbody, vcolor, vcustom, vback, vquit = runVehicleMenu(w, cols, rows, ip, &settings, dropfile)
+			vehicle, vbody, vcolor, vback, vquit = runVehicleMenu(w, cols, rows, ip, &settings, dropfile)
 			if vquit {
 				cleanup()
 				return
@@ -4703,7 +4672,7 @@ func main() {
 			}
 		}
 		if choice.campaign {
-			if runCampaign(w, cols, rows, rows3d, rnd, ip, dropfile, &settings, vehicle, vbody, vcolor, vcustom, playerName) {
+			if runCampaign(w, cols, rows, rows3d, rnd, ip, dropfile, &settings, vehicle, vbody, vcolor, playerName) {
 				cleanup()
 				return
 			}
@@ -4713,7 +4682,7 @@ func main() {
 		var sess session
 		state, detail := "single-player", choice.mode.String()
 		if choice.online || choice.autoJoin {
-			ns, err := connectArena(dropfile, vehicle, vbody, vcolor, vcustom)
+			ns, err := connectArena(dropfile, vehicle, vbody, vcolor)
 			if err != nil {
 				if re, ok := err.(*rejectErr); ok { // version mismatch etc.: actionable, show as-is
 					note = re.Error()
@@ -4741,17 +4710,17 @@ func main() {
 					mode = gm.Mode(r.Mode)
 				}
 				detail = mode.String() + " on " + gm.Maps[mapIdx].Name
-				sess = newOfflineOnMap(mapIdx, botCountFor(mode, false), mode, vehicle, settings.difficulty, settings.aimAssist, playerName, vcolor, vcustom, vbody)
+				sess = newOfflineOnMap(mapIdx, botCountFor(mode, false), mode, vehicle, settings.difficulty, settings.aimAssist, playerName, vcolor, vbody)
 			} else {
-				sess = newOfflineSession(botCountFor(choice.mode, false), choice.mode, vehicle, settings.difficulty, settings.aimAssist, playerName, vcolor, vcustom, vbody)
+				sess = newOfflineSession(botCountFor(choice.mode, false), choice.mode, vehicle, settings.difficulty, settings.aimAssist, playerName, vcolor, vbody)
 			}
 		}
 		note = ""
 		// pickChar opens the character picker mid-match (used by the in-arena
 		// change-character key); ok=false if the caller backed out.
-		pickChar := func() (int, int, [3]float64, *gm.CustomStats, bool) {
-			veh, bod, col, cust, back, quit := runVehicleMenuSimple(w, cols, rows, ip, &settings, dropfile)
-			return veh, bod, col, cust, !back && !quit
+		pickChar := func() (int, int, [3]float64, bool) {
+			veh, bod, col, back, quit := runVehicleMenuSimple(w, cols, rows, ip, &settings, dropfile)
+			return veh, bod, col, !back && !quit
 		}
 		quit, joinArena := playMatch(w, cols, rows, rows3d, rnd, ip, sess, dropfile, state, detail, false, pickChar)
 		sess.close()
@@ -4776,7 +4745,7 @@ func main() {
 // reaches its Ended phase). Both false = backed out to the menu (Backspace).
 // Shared by the main game and the editor's playtest. oneShot (the campaign runner)
 // makes it return after a single match.
-func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, sess session, dropfile, presenceState, presenceDetail string, oneShot bool, pickChar func() (int, int, [3]float64, *gm.CustomStats, bool)) (bool, bool) {
+func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, sess session, dropfile, presenceState, presenceDetail string, oneShot bool, pickChar func() (int, int, [3]float64, bool)) (bool, bool) {
 	ip.setEscMenu(true) // in-game Esc = exit confirm, not instant quit
 	defer ip.setEscMenu(false)
 	netSess, _ := sess.(*netSession)     // non-nil only for an online arena match
@@ -4990,11 +4959,11 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 					// it so the next step doesn't get a multi-second dt (which produced
 					// garbage prediction and could crash the renderer).
 					if pickChar != nil && (netSess != nil || offSess != nil) && (lastSelfDead || lastPhase == gm.PhaseLobby) {
-						if veh, bod, col, cust, ok := pickChar(); ok {
+						if veh, bod, col, ok := pickChar(); ok {
 							if netSess != nil {
-								netSess.sendChangeChar(veh, bod, col, cust)
+								netSess.sendChangeChar(veh, bod, col)
 							} else {
-								offSess.changeChar(veh, bod, col, cust)
+								offSess.changeChar(veh, bod, col)
 							}
 						}
 						prev, lastSig = nil, "" // picker took the screen: force a full repaint

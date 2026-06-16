@@ -971,20 +971,6 @@ type CustomStats struct {
 	Speed, HullTurn, FireDelay, AmmoMax, AmmoRegen float64
 }
 
-// MakeCustom builds a Vehicle from a chassis plus tuned stats. AimTurn scales with
-// hull turn; Jump/Scale/Name/Desc are inherited from the chassis (render + feel).
-func MakeCustom(chassis int, cs CustomStats) Vehicle {
-	v := veh(chassis)
-	v.MaxHP = cs.MaxHP
-	v.Speed = cs.Speed
-	v.HullTurn = cs.HullTurn
-	v.AimTurn = cs.HullTurn * 0.75
-	v.FireDelay = cs.FireDelay
-	v.AmmoMax = cs.AmmoMax
-	v.AmmoRegen = cs.AmmoRegen
-	return v
-}
-
 // Difficulty indexes the BotProfile table. See DIFFICULTY.md.
 type Difficulty int
 
@@ -2341,25 +2327,17 @@ func botName(i int) string {
 }
 
 // AddPlayer inserts a human tank (reusing a vacated slot if any) and returns its
-// index. color may be the zero value to auto-pick from PlayerPalette.
-func (w *World) AddPlayer(color [3]float64, vehicle int, name string) int {
-	return w.AddPlayerCustom(color, vehicle, name, nil, BodyTank)
-}
-
-// AddPlayerCustom adds a player whose sim stats come from a custom build; the
-// vehicle arg is still the chassis (body/scale/render), and body is the render
-// silhouette (BodyTank or a creature). custom == nil is a builtin.
-func (w *World) AddPlayerCustom(color [3]float64, vehicle int, name string, custom *Vehicle, body int) int {
+// index. color may be the zero value to auto-pick from PlayerPalette. The vehicle
+// arg sets the vestigial wire id; body is the render silhouette and the source of
+// the tank's sim stats (VehBody).
+func (w *World) AddPlayer(color [3]float64, vehicle int, name string, body int) int {
 	color = w.freeColor(color) // honor the pick unless another player already wears it
 	if name == "" {
 		name = "PLAYER"
 	}
 	mk := func(i int) Tank {
 		eff := VehBody(body)
-		if custom != nil {
-			eff = *custom
-		}
-		t := Tank{HP: eff.MaxHP, ammo: eff.AmmoMax, Color: color, Name: name, guard: spawnGuardTime, vote: -1, Vehicle: vehicle, custom: custom, body: body, lives: survivalLives, Team: -1, Carrying: -1, weapon2: defaultSecondary(body)}
+		t := Tank{HP: eff.MaxHP, ammo: eff.AmmoMax, Color: color, Name: name, guard: spawnGuardTime, vote: -1, Vehicle: vehicle, body: body, lives: survivalLives, Team: -1, Carrying: -1, weapon2: defaultSecondary(body)}
 		if body == BodyMinotaur {
 			t.shieldHP = minoShieldMax // join with a full barrier
 		}
@@ -2386,7 +2364,7 @@ func (w *World) AddPlayerCustom(color [3]float64, vehicle int, name string, cust
 // The body-derived fields take effect on the next respawn (respawns() refreshes
 // HP/ammo from the new chassis), so the natural use is to change while dead. It
 // never touches live HP, so it can't be abused as a mid-fight heal.
-func (w *World) SetPlayerLoadout(i int, color [3]float64, vehicle int, custom *Vehicle, body int) {
+func (w *World) SetPlayerLoadout(i int, color [3]float64, vehicle int, body int) {
 	if i < 0 || i >= len(w.Tanks) {
 		return
 	}
@@ -2396,7 +2374,7 @@ func (w *World) SetPlayerLoadout(i int, color [3]float64, vehicle int, custom *V
 	}
 	t.body = body
 	t.Vehicle = vehicle
-	t.custom = custom
+	t.custom = nil
 	t.Color = w.freeColor(color)
 	t.weapon2 = defaultSecondary(body)
 	switch body {
