@@ -123,7 +123,7 @@ type bodyShape struct {
 	barR    float64 // barrel half-radius
 }
 
-// bodyFor returns the tank silhouette. There is one tank now (HUNTER): bots and
+// bodyFor returns the tank silhouette. There is one tank now (TANK): bots and
 // legacy builds on retired chassis keep those chassis' STATS and Scale, but all
 // of them render these proportions - the per-class silhouettes (the artillery's
 // comedy barrel chief among them) are retired with the roster trim.

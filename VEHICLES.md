@@ -8,7 +8,7 @@ by another player). The ammo knobs (`AmmoMax`/`AmmoRegen`) are already on the
 
 ## What exists today
 
-- `Vehicles []Vehicle` (SCOUT/HUNTER/HEAVY), each: HP, Speed, HullTurn, AimTurn,
+- `Vehicles []Vehicle` (SCOUT/TANK/HEAVY), each: HP, Speed, HullTurn, AimTurn,
   FireDelay, Jump, Scale, AmmoMax, AmmoRegen.
 - `runVehicleMenu` is a static draw + key-wait (centered list, stat line).
 - Color: `AddPlayer(color, vehicle, name)` already accepts a color and auto-picks

@@ -83,7 +83,7 @@ light-touch; we can promote characters to fully self-contained stat blocks later
 **Jump** is currently uniform; make it a real axis - heavy beasts barely hop, agile
 ones bound, the butterfly *flies* (sustained hover, see below).
 
-Open: trim the **tank** roster? Proposed: keep **SCOUT / HUNTER / HEAVY** (+ maybe
+Open: trim the **tank** roster? Proposed: keep **SCOUT / TANK / HEAVY** (+ maybe
 ARTILLERY for siege flavor), cut **RANGER** (redundant with SCOUT). Your call.
 
 ## 3 & 4. Replace weak beasts; add a support class
@@ -128,7 +128,7 @@ creature fires from the *right place*:
 
 ## Decisions for you
 
-1. **Tanks** - trim to SCOUT/HUNTER/HEAVY(+ARTILLERY) and cut RANGER, or keep all 5?
+1. **Tanks** - trim to SCOUT/TANK/HEAVY(+ARTILLERY) and cut RANGER, or keep all 5?
 2. **Beasts** - cut DRONE+TRIPOD confirmed? Add BUTTERFLY healer (flight + heal beam)?
    Want MANTIS / TURTLE too, or hold?
 3. **Flight** - butterfly holds altitude (true flight: floats, dodgy, over hazards)

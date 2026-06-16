@@ -441,6 +441,13 @@ func (s *netSession) readLoop() {
 			}
 			continue
 		}
+		if len(msg) > 0 && msg[0] == proto.MsgBalance {
+			if bal, ok := proto.DecodeBalance(msg); ok {
+				gm.ApplyBalance(bal) // adopt the arena's authoritative tuning over our compiled defaults
+				logf("received roster balance (%d chassis, %d bodies)", len(bal.Chassis), len(bal.Bodies))
+			}
+			continue
+		}
 		_, match, tanks, shots, flags, pickups, ents, zones, ok := proto.DecodeState(msg)
 		if !ok {
 			continue

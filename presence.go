@@ -21,6 +21,27 @@ var (
 func getParty() string  { partyMu.Lock(); defer partyMu.Unlock(); return currentParty }
 func setParty(p string) { partyMu.Lock(); currentParty = p; partyMu.Unlock() }
 
+// autoJoinArmed gates "follow my party into the arena": true by default, cleared
+// when you leave an arena match (so a mate still lingering there can't instantly
+// yank you back), re-armed by the menu once no party-mate is in the arena. Main
+// goroutine only (menu / match loops run sequentially), so no lock needed.
+var autoJoinArmed = true
+
+// partyMateInArena reports whether another member of our party is currently in
+// the online arena (presence State "online arena") - the cue to follow them in.
+func partyMateInArena(pres []proto.Presence, mySession string) bool {
+	mine := getParty()
+	if mine == "" {
+		return false
+	}
+	for _, p := range pres {
+		if p.Session != mySession && p.Party == mine && p.State == "online arena" {
+			return true
+		}
+	}
+	return false
+}
+
 func presenceSession(dropfile string) string {
 	bbsid, handle := door32Identity(dropfile)
 	return bbsid + ":" + handle + ":" + strconv.Itoa(os.Getpid())

@@ -42,7 +42,7 @@ func runCampaign(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *inp
 		gm.Maps = append(gm.Maps, m)
 		sess := newOfflineOnMap(idx, 0, gm.EffectiveMode(m), vehicle, s.difficulty, s.aimAssist, playerName, vcolor, vcustom, vbody)
 		sess.w.SetCampaignLives(lives)
-		quit := playMatch(w, cols, rows, rows3d, rnd, ip, sess, dropfile, "campaign", m.Name, true, nil)
+		quit, _ := playMatch(w, cols, rows, rows3d, rnd, ip, sess, dropfile, "campaign", m.Name, true, nil)
 		snap := sess.w.Match()
 		left := livesOf(sess)
 		sess.close()

@@ -1390,6 +1390,7 @@ func presenceSummary(pres []proto.Presence, self string) string {
 type menuChoice struct {
 	quit       bool
 	relayout   bool // terminal resized: caller re-syncs size and re-enters the menu
+	autoJoin   bool // a party-mate entered the arena: join it (skip the vehicle picker)
 	online     bool
 	party      bool
 	campaign   bool
@@ -2510,6 +2511,12 @@ func runMenu(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 		chat.setWho(st.Presence)
 		noteArenaVersion(st.ServerVersion, st.LatestClient)
 		syncPartyFromStatus(st.Presence, presenceSession(dropfile))
+		// Party already in the arena when we land on the menu: follow them in.
+		if mate := partyMateInArena(st.Presence, presenceSession(dropfile)); !mate {
+			autoJoinArmed = true
+		} else if autoJoinArmed {
+			return menuChoice{autoJoin: true}
+		}
 	}
 	// Single-player collapses the whole ruleset table into one entry; left/right
 	// cycle the mode (spMode), so adding a mode to gm.Rulesets still just appears.
@@ -2617,6 +2624,8 @@ func runMenu(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 		drawBin(w, splashBin, artCol0, 0)
 		drawOptions()
 	}
+	mySession := presenceSession(dropfile)
+	followParty := false // set when a party-mate is in the arena and we should follow
 	refreshOnline := func() {
 		updatePresence(dropfile, "menu", "")
 		name, blurb, st, ok := arenaMenuText(haveArena, dropfile)
@@ -2624,7 +2633,14 @@ func runMenu(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 			chat.ingest(st.Chat)
 			chat.setWho(st.Presence)
 			noteArenaVersion(st.ServerVersion, st.LatestClient)
-			syncPartyFromStatus(st.Presence, presenceSession(dropfile))
+			syncPartyFromStatus(st.Presence, mySession)
+			// Follow the party into the arena: re-arm once they're not in it, and
+			// fire when armed + a mate is in (so leaving doesn't yank you back).
+			if mate := partyMateInArena(st.Presence, mySession); !mate {
+				autoJoinArmed = true
+			} else if autoJoinArmed {
+				followParty = true
+			}
 		}
 		if items[onlineIdx].name == name && items[onlineIdx].blurb == blurb {
 			drawOptions()
@@ -2665,6 +2681,9 @@ func runMenu(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 				continue
 			}
 			refreshOnline()
+			if followParty {
+				return menuChoice{autoJoin: true}
+			}
 		case <-chatTick.C:
 			if chat.prune() {
 				draw()
@@ -3001,11 +3020,11 @@ func init() {
 }
 
 // selectableTanks curates which built-in chassis appear in the picker. The roster
-// is creatures-first now: HUNTER is the one true tank (balanced, true-to-scale).
+// is creatures-first now: TANK is the one true tank (balanced, true-to-scale).
 // The retired chassis (SCOUT/HEAVY/RANGER/ARTILLERY) stay in gm.Vehicles so wire
 // ids and saved builds don't shift, and they live on as the stat profiles the
 // creatures ride on - the playstyles survive, the tank sprawl doesn't.
-var selectableTanks = []int{1} // HUNTER
+var selectableTanks = []int{1} // TANK
 
 // vehicleEntries is the full selector list: builtins, then creatures, then CUSTOM.
 func vehicleEntries() []vehEntry {
@@ -3024,7 +3043,7 @@ func vehicleEntries() []vehEntry {
 func runVehicleMenu(w *bufio.Writer, cols, rows int, ip *input, s *userSettings, dropfile string) (vehicle, body int, color [3]float64, custom *gm.CustomStats, back, quit bool) {
 	entries := vehicleEntries()
 	N := len(entries)
-	sel := 0 // HUNTER (the one tank) leads the list
+	sel := 0 // TANK (the one tank) leads the list
 	colorIdx := 0
 	sortIdx := 0
 	sortEntries(entries, s, charSortKeys[sortIdx].statIdx)
@@ -3914,6 +3933,13 @@ func runMapPicker(w *bufio.Writer, cols, rows int, ip *input) (idx int, back, qu
 	}
 }
 
+// drawCenterNote clears the screen and shows one centered line - a brief
+// transition notice (e.g. following the party into the arena).
+func drawCenterNote(w *bufio.Writer, cols, rows int, s string) {
+	fmt.Fprintf(w, "\x1b[2J\x1b[%d;%dH\x1b[1;96m%s\x1b[0m", rows/2, (cols-len(s))/2+1, s)
+	w.Flush()
+}
+
 // drawCountdown overlays the big count-in number (or GO) plus the mode name.
 func drawCountdown(w *bufio.Writer, cols, rows int, v viewState) {
 	n := int(math.Ceil(v.timer))
@@ -4599,6 +4625,7 @@ func main() {
 		runDemo(w, cols, rows, rows3d, rnd, ip, &chatUI{}, dropfile)
 	}
 	note := ""
+	pendingJoin := false // a single-player match was abandoned to follow the party into the arena
 	for {
 		// Re-sync to the live terminal size at each screen so a resize that happened
 		// in one screen carries into the next (the screens also resize in-loop).
@@ -4607,7 +4634,12 @@ func main() {
 			rows3d = rows
 			rnd.Resize(cols, 2*rows3d)
 		}
-		choice := runMenu(w, cols, rows, rows3d, rnd, ip, note, dropfile)
+		var choice menuChoice
+		if pendingJoin {
+			pendingJoin, choice = false, menuChoice{autoJoin: true} // skip the menu, go straight in
+		} else {
+			choice = runMenu(w, cols, rows, rows3d, rnd, ip, note, dropfile)
+		}
 		if choice.relayout {
 			continue // terminal resized: loop top re-syncs cols/rows and re-enters
 		}
@@ -4647,15 +4679,28 @@ func main() {
 			note = ""
 			continue
 		}
-		updatePresence(dropfile, "vehicle select", "")
-		vehicle, vbody, vcolor, vcustom, vback, vquit := runVehicleMenu(w, cols, rows, ip, &settings, dropfile)
-		if vquit {
-			cleanup()
-			return
-		}
-		if vback { // Backspace from character select: back to the main menu
-			note = ""
-			continue
+		var vehicle, vbody int
+		var vcolor [3]float64
+		var vcustom *gm.CustomStats
+		if choice.autoJoin {
+			// Following the party into the arena: skip the picker, drop in as the
+			// default TANK (you can hot-swap with V once inside), after a brief
+			// heads-up so it isn't a silent yank.
+			vehicle, vbody, vcolor = 1, gm.BodyTank, gm.SelectColors[0]
+			drawCenterNote(w, cols, rows, "Your party is in the arena - joining...")
+			time.Sleep(1200 * time.Millisecond)
+		} else {
+			updatePresence(dropfile, "vehicle select", "")
+			var vback, vquit bool
+			vehicle, vbody, vcolor, vcustom, vback, vquit = runVehicleMenu(w, cols, rows, ip, &settings, dropfile)
+			if vquit {
+				cleanup()
+				return
+			}
+			if vback { // Backspace from character select: back to the main menu
+				note = ""
+				continue
+			}
 		}
 		if choice.campaign {
 			if runCampaign(w, cols, rows, rows3d, rnd, ip, dropfile, &settings, vehicle, vbody, vcolor, vcustom, playerName) {
@@ -4667,7 +4712,7 @@ func main() {
 		}
 		var sess session
 		state, detail := "single-player", choice.mode.String()
-		if choice.online {
+		if choice.online || choice.autoJoin {
 			ns, err := connectArena(dropfile, vehicle, vbody, vcolor, vcustom)
 			if err != nil {
 				if re, ok := err.(*rejectErr); ok { // version mismatch etc.: actionable, show as-is
@@ -4708,22 +4753,30 @@ func main() {
 			veh, bod, col, cust, back, quit := runVehicleMenuSimple(w, cols, rows, ip, &settings, dropfile)
 			return veh, bod, col, cust, !back && !quit
 		}
-		quit := playMatch(w, cols, rows, rows3d, rnd, ip, sess, dropfile, state, detail, false, pickChar)
+		quit, joinArena := playMatch(w, cols, rows, rows3d, rnd, ip, sess, dropfile, state, detail, false, pickChar)
 		sess.close()
 		if quit {
 			cleanup()
 			return
 		}
+		if state == "online arena" {
+			autoJoinArmed = false // you've been in the arena: don't auto-rejoin while a mate lingers
+		}
+		if joinArena { // a party-mate entered the arena mid-single-player: follow them next loop
+			pendingJoin = true
+		}
 		// mkBack: returned from the match to the menu
 	}
 }
 
-// playMatch runs one session (offline or arena) to completion, returning true if
-// the player quit the program (Q / OS signal) or false if they backed out to the
-// menu (Backspace). Shared by the main game and the editor's playtest.
-// oneShot (the campaign runner) makes it return after a single match: ~3s after
-// the match ends, or after the player is permanently out of lives.
-func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, sess session, dropfile, presenceState, presenceDetail string, oneShot bool, pickChar func() (int, int, [3]float64, *gm.CustomStats, bool)) bool {
+// playMatch runs one session (offline or arena) to completion. Returns
+// (quit, joinArena): quit=true if the player quit the program (Q / OS signal);
+// joinArena=true if a party-mate entered the arena during a single-player match
+// and we should follow them in (the abandoned match records no stats - it never
+// reaches its Ended phase). Both false = backed out to the menu (Backspace).
+// Shared by the main game and the editor's playtest. oneShot (the campaign runner)
+// makes it return after a single match.
+func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, sess session, dropfile, presenceState, presenceDetail string, oneShot bool, pickChar func() (int, int, [3]float64, *gm.CustomStats, bool)) (bool, bool) {
 	ip.setEscMenu(true) // in-game Esc = exit confirm, not instant quit
 	defer ip.setEscMenu(false)
 	netSess, _ := sess.(*netSession)     // non-nil only for an online arena match
@@ -4801,10 +4854,10 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 		select {
 		case <-ip.quitCh:
 			logf("match exit: input channel closed")
-			return true
+			return true, false
 		case <-sigCh:
 			logf("match exit: signal")
-			return true
+			return true, false
 		default:
 		}
 		now := time.Now()
@@ -4826,6 +4879,14 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 			if st, err := arenaStatus(); err == nil {
 				chat.ingest(st.Chat)
 				chat.setWho(st.Presence)
+				// Single-player: follow the party if a mate enters the arena. Bailing
+				// here (before the match's Ended phase) means it records no stats.
+				if netSess == nil && presenceState == "single-player" && autoJoinArmed &&
+					partyMateInArena(st.Presence, presenceSession(dropfile)) {
+					drawCenterNote(w, cols, rows, "Your party is in the arena - joining...")
+					time.Sleep(1200 * time.Millisecond)
+					return false, true
+				}
 			} else {
 				logf("chat/status poll unavailable: %v", err)
 			}
@@ -4940,7 +5001,7 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 						last = time.Now()       // don't feed the blocked-picker gap to dt
 					}
 				case k == mkBack:
-					return false // back out of the match to the menu / editor
+					return false, false // back out of the match to the menu / editor
 				case lastPhase == gm.PhaseLobby && k == mkUp:
 					voteMode, voteReady = lobbyMoveVote(lobbyPairings, voteFilter, voteMode, -1), false
 				case lastPhase == gm.PhaseLobby && k == mkDown:
@@ -4980,7 +5041,7 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 				case chat.active:
 					chat.appendRune(r)
 				case escConfirm && (r == 'y' || r == 'Y'):
-					return false // leave the match: same path as Backspace
+					return false, false // leave the match: same path as Backspace
 				case escConfirm && (r == 'n' || r == 'N'):
 					escConfirm = false
 					prev = nil
@@ -5099,12 +5160,12 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 				w.Flush()
 				select { // any key, disconnect, or a generous auto-dismiss
 				case <-ip.quitCh:
-					return true
+					return true, false
 				case <-ip.events:
 				case <-ip.runes:
 				case <-time.After(20 * time.Second):
 				}
-				return false
+				return false, false
 			}
 			fmt.Fprint(w, "\x1b[2J\x1b[H\x1b[0;1;37m  Connecting to arena...\x1b[0m")
 			w.Flush()
@@ -5136,7 +5197,7 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 			}
 		}
 		if !oneShotAt.IsZero() && now.Sub(oneShotAt) > 3*time.Second {
-			return false // back to the campaign runner with the outcome on the world
+			return false, false // back to the campaign runner with the outcome on the world
 		}
 
 		// Hide the border walls during the death-cam AND the count-in establishing

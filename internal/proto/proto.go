@@ -34,6 +34,11 @@ func MapHash(m gm.Map) uint32 {
 //	3: added MsgMapReq/MsgMapPreview for lazy lobby map previews.
 //	4: MsgLobby entries carry a content hash (cache versioning).
 //	5: Input gained the lobby Ready bit; MatchSnap gained the locked-vote count.
+//
+// MsgBalance (0x46) was added WITHOUT bumping this: it is a server->client push
+// an older client silently drops (unknown type -> ignored), so it neither
+// half-talks nor corrupts state. Bumping would hard-reject every deployed client
+// - the opposite of the goal (deploy balance without a client wave).
 const ProtocolVersion = 5
 
 const (
@@ -59,6 +64,7 @@ const (
 	MsgPlayersQ   = 0x43 // client->server: request the aggregated career-stats board
 	MsgPlayers    = 0x44 // server->client: aggregated per-player career rows
 	MsgChangeChar = 0x45 // client->server: swap the caller's character (applied on next respawn)
+	MsgBalance    = 0x46 // server->client: authoritative roster tuning (additive; older clients ignore it)
 )
 
 // ScoreSubmit is one finished-match score sent to the arena for the global board.
@@ -434,6 +440,59 @@ func DecodeWelcome(p []byte) (id int, ok bool) {
 		return 0, false
 	}
 	return int(binary.BigEndian.Uint16(p[1:])), true
+}
+
+// EncodeBalance carries the server's authoritative roster tuning (chassis +
+// per-body scalar overrides) to the client. It is sent once, right after the
+// welcome. The message is additive: a client that doesn't recognize MsgBalance
+// drops it and keeps its compiled-in numbers, so this does NOT bump
+// ProtocolVersion or force a client update - the whole point is that future
+// balance tweaks deploy by restarting the server, not by re-shipping the door.
+func EncodeBalance(bal gm.Balance) []byte {
+	c := cursor{b: []byte{MsgBalance}}
+	c.u8(byte(len(bal.Chassis)))
+	for _, s := range bal.Chassis {
+		c.u16(s.MaxHP)
+		c.f32(s.Speed)
+		c.f32(s.HullTurn)
+		c.f32(s.AimTurn)
+		c.f32(s.FireDelay)
+		c.f32(s.Jump)
+		c.f32(s.Scale)
+		c.f32(s.AmmoMax)
+		c.f32(s.AmmoRegen)
+	}
+	c.u8(byte(len(bal.Bodies)))
+	for _, s := range bal.Bodies {
+		c.f32(s.Jump)
+		c.f32(s.HPRegen)
+		c.f32(s.SpeedMul)
+	}
+	return c.b
+}
+
+func DecodeBalance(p []byte) (gm.Balance, bool) {
+	if len(p) == 0 || p[0] != MsgBalance {
+		return gm.Balance{}, false
+	}
+	c := cursor{b: p, i: 1}
+	nc := int(c.ru8())
+	chassis := make([]gm.ChassisStats, 0, nc)
+	for i := 0; i < nc; i++ {
+		chassis = append(chassis, gm.ChassisStats{
+			MaxHP: c.ru16(), Speed: c.rf32(), HullTurn: c.rf32(), AimTurn: c.rf32(),
+			FireDelay: c.rf32(), Jump: c.rf32(), Scale: c.rf32(), AmmoMax: c.rf32(), AmmoRegen: c.rf32(),
+		})
+	}
+	nb := int(c.ru8())
+	bodies := make([]gm.BodyStats, 0, nb)
+	for i := 0; i < nb; i++ {
+		bodies = append(bodies, gm.BodyStats{Jump: c.rf32(), HPRegen: c.rf32(), SpeedMul: c.rf32()})
+	}
+	if c.err {
+		return gm.Balance{}, false
+	}
+	return gm.Balance{Chassis: chassis, Bodies: bodies}, true
 }
 
 // ---- INPUT ----

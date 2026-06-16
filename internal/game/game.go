@@ -939,7 +939,7 @@ var Vehicles = []Vehicle{
 
 func veh(i int) Vehicle {
 	if i < 0 || i >= len(Vehicles) {
-		i = 1 // HUNTER default
+		i = 1 // TANK default
 	}
 	return Vehicles[i]
 }
@@ -1466,13 +1466,16 @@ const (
 	wepHammer  // heavy two-handed melee swing (minotaur; B raises the barrier)
 	wepScratch // fast claw swipe that leaves a bleeding wound (tiger)
 	wepHook    // trunk hook: a ranged grab that reels a foe in to melee (elephant)
+	wepGun     // humanoid sidearm: fast, accurate bolt (the cannon was a tank-era artifact)
+	wepSlash   // mantis lunge-strike: melee slash that pairs with a forward leap
+	wepSpit    // insect acid spray: rapid cheap bolts + light poison (uses the deep magazine)
 )
 
 // Weapons is the built-in weapon palette. Referenced by index. CANNON preserves
 // today's bolt; the rest carry effect payloads (resolved in applyShotHit) and/or
 // delivery kinds (resolved in fireWeapon / stepProjectiles).
 var Weapons = []WeaponDef{
-	{Name: "CANNON", Delivery: DeliverBolt, Cost: 1, Effect: Effect{Kind: EffDamage}, Affects: TargetFoes, Glyph: 'o'},
+	{Name: "CANNON", Delivery: DeliverBolt, Damage: 24, Cost: 1, Effect: Effect{Kind: EffDamage}, Affects: TargetFoes, Glyph: 'o'}, // tank-only now; nerfed from the implicit projDmg (34) that made every cannon body top-tier
 	{Name: "SLOWER", Delivery: DeliverBolt, Cooldown: 1.0, Cost: 2, Effect: Effect{Kind: EffSlow, Mag: 0.55, Dur: 2.5}, Affects: TargetFoes, Glyph: '~'},
 	{Name: "MEDIC", Delivery: DeliverBolt, Damage: 8, Cooldown: 1.2, Cost: 2, Effect: Effect{Kind: EffHeal, Mag: 25}, Affects: TargetAllies, Glyph: '+'},
 	{Name: "KNOCKER", Delivery: DeliverBolt, Cooldown: 1.1, Cost: 2, Effect: Effect{Kind: EffKnockback, Mag: 4}, Affects: TargetFoes, Glyph: '*'},
@@ -1498,6 +1501,12 @@ var Weapons = []WeaponDef{
 	// HOOK: a hitscan grab. Low cooldown here (the real gate is hookRecharge, a
 	// separate timer) so reeling a foe in doesn't lock out the follow-up gore.
 	{Name: "HOOK", Delivery: DeliverBeam, Damage: 8, Life: 22, Cooldown: 0.3, Cost: 1, Effect: Effect{Kind: EffPull, Mag: hookPullDist}, Affects: TargetFoes, Glyph: '=', Cause: CauseMelee},
+	// Cannon-replacement kit (prototype): the humanoid carries a proper firearm,
+	// the mantis lunges in for a melee slash, and the insect sprays its deep
+	// magazine. Numbers are first-pass and meant to be tuned against balancesim.
+	{Name: "GUN", Delivery: DeliverBolt, Damage: 18, Speed: 28, Cooldown: 0.40, Cost: 1, Effect: Effect{Kind: EffDamage}, Affects: TargetFoes, Glyph: 'o'},
+	{Name: "SLASH", Delivery: DeliverMelee, Damage: 24, Blast: 3.0, Cooldown: 0.5, Cost: 1, Effect: Effect{Kind: EffDamage}, Affects: TargetFoes, Glyph: '*', Cause: CauseMelee},
+	{Name: "SPIT", Delivery: DeliverBolt, Damage: 7, Speed: 26, Cooldown: 0.22, Cost: 1, Effect: Effect{Kind: EffPoison, Mag: 3, Dur: 2}, Affects: TargetFoes, Glyph: ':', Cause: CausePoison},
 }
 
 // Flag is a Flag Run pickup, or (in CTF) a team flag that can be carried,
@@ -1733,6 +1742,31 @@ func (w *World) rollBotLook(i int) {
 	t.Vehicle = ChassisFor(t.body)                // ... its chassis comes with it
 	t.custom = nil
 	t.weapon2 = defaultSecondary(t.body)
+}
+
+// SetBotBody locks bot i to a specific character (body + its paired chassis),
+// overriding the random roll, and resets HP/ammo/secondary plus any body-specific
+// join state to the new character. For the balance simulator's controlled rosters:
+// startMatch re-rolls bot looks, so call this AFTER SkipCountdown/startMatch.
+// respawns() preserves t.body, so the override holds for the whole match.
+func (w *World) SetBotBody(i, body int) {
+	if i < 0 || i >= len(w.Tanks) || !w.Tanks[i].Bot {
+		return
+	}
+	t := &w.Tanks[i]
+	t.body = body
+	t.Vehicle = ChassisFor(body)
+	t.custom = nil
+	t.weapon2 = defaultSecondary(body)
+	t.HP = t.veh().MaxHP
+	t.ammo = t.veh().AmmoMax
+	t.shieldHP, t.bufferHP = 0, 0
+	if body == BodyMinotaur {
+		t.shieldHP = minoShieldMax // join with a full barrier
+	}
+	if body == BodyElephant {
+		t.bufferHP = elephantBufferMax // join with a full shield buffer
+	}
 }
 
 // assignHealers gives each team exactly one butterfly healer (a strong team pick that
@@ -4095,8 +4129,15 @@ func (w *World) fireEntity(e *Entity) {
 	d := aimDir(e.Yaw, e.Pitch)
 	muzzleY := e.Pos.Y + e.Half.Y + 0.3
 	muzzle := V3{e.Pos.X + d.X*1.2, muzzleY + d.Y*1.2, e.Pos.Z + d.Z*1.2}
-	dmg := def.Damage
-	if dmg == 0 && e.Turret != nil { // fall back to the turret's authored damage
+	// Damage: an explicit weapon brings its own number; the default cannon is only
+	// a delivery template here (its own Damage - the tank-cannon nerf - is not a
+	// turret's), so a default emplacement uses the trait's authored damage. Either
+	// way the trait fills in when the weapon carries none, and 0 -> projDmg later.
+	dmg := 0
+	if e.Weapon > 0 && e.Weapon < len(Weapons) {
+		dmg = def.Damage
+	}
+	if dmg == 0 && e.Turret != nil {
 		dmg = e.Turret.Dmg
 	}
 	speed, life := def.Speed, def.Life
@@ -4850,7 +4891,7 @@ var botBodies = []int{
 
 // ChassisFor maps a body to the chassis whose stats fit that character. The
 // roster is body-first: picking a character implies its chassis (BodyTank is
-// the HUNTER, the one true tank). Bots and the player roster share this map,
+// the TANK, the one true tank). Bots and the player roster share this map,
 // so nobody fields a mutant - artillery innards only ever wear the bodies
 // built for them, never a tank shell.
 func ChassisFor(body int) int {
@@ -4931,7 +4972,22 @@ func EffectiveJump(body, chassis int) float64 {
 	return veh(chassis).Jump
 }
 
+// bodyDefFor returns a body's definition with any server-pushed numeric balance
+// override applied (see ApplyBalance). The structural fields (signature weapon,
+// muzzle, fly/leap/climb) come straight from the builtin def and are NOT pushable
+// - they are kit identity, not tuning, so changing them is a client-update-worthy
+// redesign. Only the scalar knobs (jump, hpRegen, speedMul) ride the wire.
 func bodyDefFor(body int) bodyDef {
+	d := bodyDefBuiltin(body)
+	if body >= 0 && body < len(bodyBal) {
+		d.jump = bodyBal[body].Jump
+		d.hpRegen = bodyBal[body].HPRegen
+		d.speedMul = bodyBal[body].SpeedMul
+	}
+	return d
+}
+
+func bodyDefBuiltin(body int) bodyDef {
 	switch body {
 	case BodyScorpion:
 		return bodyDef{weapon: wepLaser, muzzle: V3{0, 2.2, 0.2}, hpRegen: 1.5} // arched tail
@@ -4944,15 +5000,15 @@ func bodyDefFor(body int) bodyDef {
 	case BodyOctopod:
 		return bodyDef{weapon: wepSlower, muzzle: V3{0, 1.0, 0.8}, hpRegen: 2} // ink
 	case BodyInsect:
-		return bodyDef{weapon: wepCannon, muzzle: V3{0, 0.8, 1.0}, climb: true, hpRegen: 2, speedMul: 1.45} // scuttles fast and scales walls despite the deep artillery magazine
+		return bodyDef{weapon: wepSpit, muzzle: V3{0, 0.8, 1.0}, climb: true, hpRegen: 2, speedMul: 1.45} // scuttles fast and scales walls; sprays its deep artillery magazine
 	case BodyHumanoid:
-		return bodyDef{weapon: wepCannon, muzzle: V3{0.4, 1.6, 0.4}, hpRegen: 1.5} // hand
+		return bodyDef{weapon: wepGun, muzzle: V3{0.4, 1.6, 0.4}, hpRegen: 1.5} // fires a sidearm from the hand
 	case BodyQuad: // the tiger: pounce in (leap), scratch for a bleed, lick wounds (regen)
 		return bodyDef{weapon: wepScratch, jump: 12, leap: true, muzzle: V3{0, 0.9, 1.0}, hpRegen: 3.5, speedMul: 1.2}
 	case BodyButterfly:
 		return bodyDef{weapon: wepMedic, secondary: wepHealBomb, fly: true, muzzle: V3{0, 1.6, 0.6}, hpRegen: 2.5} // heal beam + heal bombs, flies
 	case BodyMantis:
-		return bodyDef{weapon: wepCannon, jump: 12, muzzle: V3{0.3, 1.4, 0.7}, hpRegen: 2} // raptorial forearm
+		return bodyDef{weapon: wepSlash, jump: 12, leap: true, muzzle: V3{0.3, 1.4, 0.7}, hpRegen: 2} // raptorial forearm: leaps in and slashes
 	case BodyTurtle:
 		return bodyDef{weapon: wepSnap, jump: 4, muzzle: V3{0, 0.7, 1.1}} // bunker: snapping bite up close, B = shell up
 	case BodyTrex:
@@ -4969,6 +5025,80 @@ func bodyDefFor(body int) bodyDef {
 		return bodyDef{weapon: wepHammer, secondary: -1, jump: 8, leap: true, muzzle: V3{0, 1.7, 0.9}} // hammer + a B-toggled barrier; a gore-charge on jump
 	}
 	return bodyDef{weapon: -1, muzzle: V3{0, EyeHeight, 1.7}} // tank default
+}
+
+// --- pushable balance (server-authoritative roster tuning) ------------------
+//
+// The arena server owns the authoritative numbers; combat (HP/damage) is already
+// resolved server-side, but a stale client mispredicts movement and shows wrong
+// stat bars. ApplyBalance lets the server push its tuning to clients so a tweak
+// deploys without a client rebuild: the server sends CurrentBalance() once after
+// the welcome, and the client applies it over its compiled-in defaults. An older
+// client that doesn't understand the message simply keeps its built-in numbers
+// (the server's combat math still governs the fight), so the push is additive
+// and never forces a client update.
+
+// ChassisStats are the pushable numeric stats of one chassis (Vehicles entry).
+// Name/Desc are intentionally omitted - identity, not tuning.
+type ChassisStats struct {
+	MaxHP                                                                int
+	Speed, HullTurn, AimTurn, FireDelay, Jump, Scale, AmmoMax, AmmoRegen float64
+}
+
+// BodyStats are the pushable numeric overrides of one character body. The kit
+// (weapon, muzzle, fly/leap/climb) stays compiled in; only these scalars travel.
+type BodyStats struct {
+	Jump, HPRegen, SpeedMul float64
+}
+
+// Balance is the full pushable tuning table: chassis by index, bodies by index.
+type Balance struct {
+	Chassis []ChassisStats
+	Bodies  []BodyStats
+}
+
+// bodyBal is the live numeric layer for bodies, seeded from the builtin defs so
+// the resolved values are byte-identical until a push overrides them.
+var bodyBal []BodyStats
+
+func init() {
+	bodyBal = make([]BodyStats, BodyKinds)
+	for b := 0; b < BodyKinds; b++ {
+		d := bodyDefBuiltin(b)
+		bodyBal[b] = BodyStats{Jump: d.jump, HPRegen: d.hpRegen, SpeedMul: d.speedMul}
+	}
+}
+
+// CurrentBalance snapshots the live tables - what the server sends to clients.
+func CurrentBalance() Balance {
+	bal := Balance{
+		Chassis: make([]ChassisStats, len(Vehicles)),
+		Bodies:  make([]BodyStats, len(bodyBal)),
+	}
+	for i, v := range Vehicles {
+		bal.Chassis[i] = ChassisStats{
+			MaxHP: v.MaxHP, Speed: v.Speed, HullTurn: v.HullTurn, AimTurn: v.AimTurn,
+			FireDelay: v.FireDelay, Jump: v.Jump, Scale: v.Scale, AmmoMax: v.AmmoMax, AmmoRegen: v.AmmoRegen,
+		}
+	}
+	copy(bal.Bodies, bodyBal)
+	return bal
+}
+
+// ApplyBalance overwrites the live tables with a pushed (or file-loaded) tuning.
+// It is bounds-safe and index-aligned: entries past the local table length are
+// ignored, and a shorter push leaves the rest at their built-in values, so a
+// client and server with different roster sizes still interoperate.
+func ApplyBalance(bal Balance) {
+	for i := 0; i < len(bal.Chassis) && i < len(Vehicles); i++ {
+		c := bal.Chassis[i]
+		v := &Vehicles[i]
+		v.MaxHP, v.Speed, v.HullTurn, v.AimTurn = c.MaxHP, c.Speed, c.HullTurn, c.AimTurn
+		v.FireDelay, v.Jump, v.Scale, v.AmmoMax, v.AmmoRegen = c.FireDelay, c.Jump, c.Scale, c.AmmoMax, c.AmmoRegen
+	}
+	for i := 0; i < len(bal.Bodies) && i < len(bodyBal); i++ {
+		bodyBal[i] = bal.Bodies[i]
+	}
 }
 
 // HPRegen is a body's passive HP/sec recharge (0 for the armored bruisers).

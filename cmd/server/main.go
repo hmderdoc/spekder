@@ -6,6 +6,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -19,6 +20,44 @@ import (
 	gm "spekder/internal/game"
 	"spekder/internal/proto"
 )
+
+// loadBalance applies a roster-tuning override file, if present, to the live
+// stat tables - which CurrentBalance() then pushes to every joining client. A
+// missing file is fine (use the built-in numbers). The file is a complete
+// Balance dump (generate a template with -dumpbalance); editing its numbers and
+// restarting the server retunes the roster with no rebuild and no client update.
+func loadBalance(path string) error {
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil // optional
+	}
+	if err != nil {
+		return err
+	}
+	var bal gm.Balance
+	if err := json.Unmarshal(data, &bal); err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	if len(bal.Chassis) == 0 && len(bal.Bodies) == 0 {
+		return fmt.Errorf("%s has no chassis or body entries", path)
+	}
+	gm.ApplyBalance(bal)
+	log.Printf("balance: applied tuning from %s (%d chassis, %d bodies)", path, len(bal.Chassis), len(bal.Bodies))
+	return nil
+}
+
+// dumpBalance writes the current (built-in) tuning to path as a JSON template a
+// sysop can edit. It reflects the compiled numbers verbatim - no opinion baked in.
+func dumpBalance(path string) error {
+	data, err := json.MarshalIndent(gm.CurrentBalance(), "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
 
 // version is stamped at build time by the release workflow (-X main.version).
 var version = "dev"
@@ -174,8 +213,9 @@ func (s *server) handle(conn net.Conn) {
 		s.drop(id, tank)
 		return
 	}
-	proto.WriteMsg(conn, proto.EncodeMap(curMap)) // so the client can render/collide it
-	proto.WriteMsg(conn, lobby)                   // votable map+mode pairings
+	proto.WriteMsg(conn, proto.EncodeBalance(gm.CurrentBalance())) // authoritative roster tuning (additive; old clients ignore)
+	proto.WriteMsg(conn, proto.EncodeMap(curMap))                  // so the client can render/collide it
+	proto.WriteMsg(conn, lobby)                                    // votable map+mode pairings
 	log.Printf("join: %q@%q -> tank %d (%d online)", handle, bbsid, tank, len(s.clients))
 
 	for {
@@ -494,10 +534,22 @@ func main() {
 	mapsDir := flag.String("maps", "maps", "directory of extra author maps (*.json), sent to clients over the wire")
 	scoresFile := flag.String("scores", "scores.json", "global high-score board file")
 	playersFile := flag.String("players", "players.json", "per-player career aggregate file")
+	balanceFile := flag.String("balance", "balance.json", "optional roster tuning overrides (JSON); pushed to clients. Missing = use built-in numbers")
+	dumpBal := flag.Bool("dumpbalance", false, "write the current tuning to -balance as an editable template, then exit")
 	flag.Parse()
 
+	if *dumpBal {
+		if err := dumpBalance(*balanceFile); err != nil {
+			log.Fatalf("dumpbalance: %v", err)
+		}
+		log.Printf("wrote balance template to %s", *balanceFile)
+		return
+	}
 	if n := gm.LoadMapDir(*mapsDir); n > 0 {
 		log.Printf("loaded %d author map(s) from %s", n, *mapsDir)
+	}
+	if err := loadBalance(*balanceFile); err != nil {
+		log.Printf("balance: %v (using built-in numbers)", err)
 	}
 	mode := parseMode(*modeName)
 	world := gm.NewWorld(*bots, mode)

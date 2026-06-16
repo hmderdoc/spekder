@@ -4,6 +4,7 @@
 /spekder.exe
 /spekder-server
 /spekder-server.exe
+/balancesim
 /dist/
 
 # Legacy binary names (kept on disk for an in-place install, never committed).
