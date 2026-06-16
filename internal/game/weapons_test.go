@@ -13,8 +13,8 @@ func twoTanks(t *testing.T) *World {
 	Maps = []Map{{Name: "T", Size: 30}}
 	w := &World{Mode: ModeDeathmatch}
 	w.Tanks = []Tank{
-		{HP: 100, Vehicle: 1, Team: -1, Carrying: -1},
-		{HP: 60, Vehicle: 1, Team: -1, Carrying: -1, Pos: V3{X: 0, Z: 5}},
+		{HP: 100, Team: -1, Carrying: -1},
+		{HP: 60, Team: -1, Carrying: -1, Pos: V3{X: 0, Z: 5}},
 	}
 	return w
 }
@@ -70,7 +70,7 @@ func TestEffectDamageStillWorks(t *testing.T) {
 // A blast weapon splashes every foe inside its radius, not just one.
 func TestBlastAoE(t *testing.T) {
 	w := twoTanks(t)
-	w.Tanks = append(w.Tanks, Tank{HP: 100, Vehicle: 1, Team: -1, Carrying: -1, Pos: V3{X: 1, Z: 5}})
+	w.Tanks = append(w.Tanks, Tank{HP: 100, Team: -1, Carrying: -1, Pos: V3{X: 1, Z: 5}})
 	s := &Projectile{owner: 0, eff: EffDamage, dmg: 30, blast: 3, affects: TargetFoes}
 	w.detonate(s, V3{X: 0, Z: 5}) // both tanks 1 and 2 are within 3 units
 	if w.Tanks[1].HP != 30 || w.Tanks[2].HP != 70 {
@@ -110,9 +110,9 @@ func TestShotCanAffectTargeting(t *testing.T) {
 	Maps = []Map{{Name: "CTF", Size: 30}}
 	w := &World{Mode: ModeCTF} // a team mode so teammates exist
 	w.Tanks = []Tank{
-		{HP: 100, Team: 0, Vehicle: 1, Carrying: -1},                // shooter
-		{HP: 100, Team: 0, Vehicle: 1, Carrying: -1, Pos: V3{X: 2}}, // teammate
-		{HP: 100, Team: 1, Vehicle: 1, Carrying: -1, Pos: V3{X: 4}}, // enemy
+		{HP: 100, Team: 0, Carrying: -1},                // shooter
+		{HP: 100, Team: 0, Carrying: -1, Pos: V3{X: 2}}, // teammate
+		{HP: 100, Team: 1, Carrying: -1, Pos: V3{X: 4}}, // enemy
 	}
 	foe := &Projectile{owner: 0, affects: TargetFoes}
 	if w.shotCanAffect(foe, 1) {

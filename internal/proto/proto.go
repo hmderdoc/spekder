@@ -34,12 +34,13 @@ func MapHash(m gm.Map) uint32 {
 //	3: added MsgMapReq/MsgMapPreview for lazy lobby map previews.
 //	4: MsgLobby entries carry a content hash (cache versioning).
 //	5: Input gained the lobby Ready bit; MatchSnap gained the locked-vote count.
+//	6: removed the wire vehicle byte and the CustomStats tail; HELLO/CHANGECHAR carry body + a publish flag (the chassis system retired).
 //
 // MsgBalance (0x46) was added WITHOUT bumping this: it is a server->client push
 // an older client silently drops (unknown type -> ignored), so it neither
 // half-talks nor corrupts state. Bumping would hard-reject every deployed client
 // - the opposite of the goal (deploy balance without a client wave).
-const ProtocolVersion = 5
+const ProtocolVersion = 6
 
 const (
 	MsgHello      = 0x01 // client->server: token, bbsid, handle, client version
@@ -258,52 +259,29 @@ func DecodeScores(p []byte) ([]ScoreRow, bool) {
 }
 
 // EncodeChangeChar carries a mid-session character swap on the live game
-// connection: the new loadout (same wire shape as the HELLO loadout tail). The
-// server applies it to the caller's tank so the next respawn comes up as it.
-func EncodeChangeChar(token string, vehicle int, color [3]float64, custom *gm.CustomStats, body int) []byte {
+// connection: the new character (body) + color. The server applies it to the
+// caller's tank so the next respawn comes up as it.
+func EncodeChangeChar(token string, color [3]float64, body int) []byte {
 	c := cursor{b: []byte{MsgChangeChar}}
 	c.str(token)
-	c.u8(byte(vehicle))
 	c.col3(color)
-	if custom != nil {
-		c.u8(1)
-		c.u16(custom.MaxHP)
-		c.f32(custom.Speed)
-		c.f32(custom.HullTurn)
-		c.f32(custom.FireDelay)
-		c.f32(custom.AmmoMax)
-		c.f32(custom.AmmoRegen)
-	} else {
-		c.u8(0)
-	}
 	c.u8(byte(body))
 	return c.b
 }
 
-func DecodeChangeChar(p []byte) (token string, vehicle int, color [3]float64, custom *gm.CustomStats, body int, ok bool) {
+func DecodeChangeChar(p []byte) (token string, color [3]float64, body int, ok bool) {
 	if len(p) == 0 || p[0] != MsgChangeChar {
-		return "", 0, [3]float64{}, nil, 0, false
+		return "", [3]float64{}, 0, false
 	}
 	c := cursor{b: p, i: 1}
 	token = c.rstr()
-	vehicle = int(c.ru8())
 	color = c.rcol3()
-	if c.ru8() == 1 {
-		cs := gm.CustomStats{MaxHP: c.ru16(), Speed: c.rf32(), HullTurn: c.rf32(), FireDelay: c.rf32(), AmmoMax: c.rf32(), AmmoRegen: c.rf32()}
-		if !c.err {
-			custom = &cs
-		}
-	}
 	body = int(c.ru8())
 	if c.err {
-		return "", 0, [3]float64{}, nil, 0, false
+		return "", [3]float64{}, 0, false
 	}
-	return token, vehicle, color, custom, body, true
+	return token, color, body, true
 }
-
-// PublishVehicle is the HELLO vehicle sentinel marking a publish-only connection
-// (no tank is spawned; the server reads one MsgPublish and replies MsgPubAck).
-const PublishVehicle = 0xFF
 
 const maxMsg = 1 << 20
 
@@ -337,25 +315,18 @@ func ReadMsg(r io.Reader) ([]byte, error) {
 
 // ---- HELLO ----
 
-func EncodeHello(token, bbsid, handle string, vehicle int, color [3]float64, custom *gm.CustomStats, body int, clientProto int, clientVer, party string) []byte {
+func EncodeHello(token, bbsid, handle string, color [3]float64, body int, publish bool, clientProto int, clientVer, party string) []byte {
 	c := cursor{b: []byte{MsgHello}}
 	c.str(token)
 	c.str(bbsid)
 	c.str(handle)
-	c.u8(byte(vehicle))
 	c.col3(color)
-	if custom != nil { // chassis (vehicle) renders; these stats override the sim
-		c.u8(1)
-		c.u16(custom.MaxHP)
-		c.f32(custom.Speed)
-		c.f32(custom.HullTurn)
-		c.f32(custom.FireDelay)
-		c.f32(custom.AmmoMax)
-		c.f32(custom.AmmoRegen)
-	} else {
-		c.u8(0)
+	c.u8(byte(body)) // render silhouette + stat row (BodyTank or a creature)
+	var pub byte
+	if publish { // publish-only connection: no tank is spawned
+		pub = 1
 	}
-	c.u8(byte(body)) // render silhouette (BodyTank or a creature)
+	c.u8(pub)
 	// Version tail: the wire-compat number (for the join guard) + the human
 	// release string (so the server can name a target version in a reject) + the
 	// party name to team up with ("" = solo).
@@ -365,34 +336,28 @@ func EncodeHello(token, bbsid, handle string, vehicle int, color [3]float64, cus
 	return c.b
 }
 
-func DecodeHello(p []byte) (token, bbsid, handle string, vehicle int, color [3]float64, custom *gm.CustomStats, body int, clientProto int, clientVer, party string, ok bool) {
+func DecodeHello(p []byte) (token, bbsid, handle string, color [3]float64, body int, publish bool, clientProto int, clientVer, party string, ok bool) {
 	if len(p) == 0 || p[0] != MsgHello {
-		return "", "", "", 0, [3]float64{}, nil, 0, 0, "", "", false
+		return "", "", "", [3]float64{}, 0, false, 0, "", "", false
 	}
 	c := cursor{b: p, i: 1}
 	token = c.rstr()
 	bbsid = c.rstr()
 	handle = c.rstr()
 	if c.err {
-		return "", "", "", 0, [3]float64{}, nil, 0, 0, "", "", false
+		return "", "", "", [3]float64{}, 0, false, 0, "", "", false
 	}
-	// vehicle/color/custom/body/version are an optional tail (an older client may
-	// omit them); guard with explicit length checks so a short HELLO still decodes
-	// (clientProto stays 0 for a pre-versioning client, which the guard rejects).
-	if len(p)-c.i >= 1 {
-		vehicle = int(c.ru8())
-	}
+	// color/body/publish/version are an optional tail; guard with explicit length
+	// checks so a short HELLO still decodes (clientProto stays 0 for a pre-versioning
+	// client, which the join guard rejects).
 	if len(p)-c.i >= 3 {
 		color = c.rcol3()
 	}
-	if len(p)-c.i >= 1 && c.ru8() == 1 {
-		cs := gm.CustomStats{MaxHP: c.ru16(), Speed: c.rf32(), HullTurn: c.rf32(), FireDelay: c.rf32(), AmmoMax: c.rf32(), AmmoRegen: c.rf32()}
-		if !c.err {
-			custom = &cs
-		}
-	}
 	if len(p)-c.i >= 1 {
 		body = int(c.ru8())
+	}
+	if len(p)-c.i >= 1 {
+		publish = c.ru8() != 0
 	}
 	if len(p)-c.i >= 2 {
 		clientProto = c.ru16()
@@ -1220,7 +1185,6 @@ func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.Sh
 		w.u16(t.Kills)
 		w.u16(t.Deaths)
 		w.f32(t.RespawnIn)
-		w.u8(byte(t.Vehicle))
 		w.u8(byte(t.Body))
 		w.i16(t.Lives)
 		w.i16(t.Team)
@@ -1342,7 +1306,6 @@ func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, sh
 		t.Kills = r.ru16()
 		t.Deaths = r.ru16()
 		t.RespawnIn = r.rf32()
-		t.Vehicle = int(r.ru8())
 		t.Body = int(r.ru8())
 		t.Lives = r.ri16()
 		t.Team = r.ri16()

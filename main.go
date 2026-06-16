@@ -2981,18 +2981,15 @@ func runDifficulty(w *bufio.Writer, cols, rows int, ip *input, cur gm.Difficulty
 
 // runVehicleMenu lets the player pick a vehicle class (with stats), returning
 // the index, or quit=true if they bailed.
-// vehEntry is one selectable row: a builtin chassis or a creature (a body style on
-// a thematic chassis for stats/scale).
+// vehEntry is one selectable row: a body style (each character owns its stats).
 type vehEntry struct {
-	name    string
-	vehicle int    // chassis index (stats + preview scale)
-	body    int    // gm.BodyTank for builtins; a creature body otherwise
-	desc    string // blurb (creatures); builtins use the vehicle's own Desc
+	name string
+	body int    // gm.BodyTank for the tank; a creature body otherwise
+	desc string // blurb (creatures); the tank uses the builtin's own Desc
 }
 
-// playerBodies are the creatures a player can pilot. Each rides the chassis
-// gm.ChassisFor assigns its body (filled in init below), so the player roster
-// and bot rolls can never disagree about a character's stats.
+// playerBodies are the creatures a player can pilot. Each character owns its
+// stat row (gm.VehBody), so the player roster and bot rolls never disagree.
 var playerBodies = []vehEntry{
 	{name: "HUMANOID", body: gm.BodyHumanoid, desc: "Upright fighter, balanced frame. Fires from the hand."},
 	{name: "GORILLA", body: gm.BodyGorilla, desc: "Knuckle-walking bruiser; bounds high, pounds (knockback)."},
@@ -3012,12 +3009,6 @@ var playerBodies = []vehEntry{
 	{name: "MINOTAUR", body: gm.BodyMinotaur, desc: "Bruiser: heavy hammer; tap B to raise/lower a frontal barrier (it breaks, then recharges)."},
 }
 
-func init() {
-	for i := range playerBodies {
-		playerBodies[i].vehicle = gm.ChassisFor(playerBodies[i].body)
-	}
-}
-
 // selectableTanks curates which built-in chassis appear in the picker. The roster
 // is creatures-first now: TANK is the one true tank (balanced, true-to-scale).
 // The retired chassis (SCOUT/HEAVY/RANGER/ARTILLERY) stay in gm.Vehicles so wire
@@ -3029,16 +3020,28 @@ var selectableTanks = []int{1} // TANK
 func vehicleEntries() []vehEntry {
 	e := make([]vehEntry, 0, len(selectableTanks)+len(playerBodies))
 	for _, i := range selectableTanks {
-		e = append(e, vehEntry{name: gm.Vehicles[i].Name, vehicle: i, body: gm.BodyTank, desc: gm.Vehicles[i].Desc})
+		_ = i // the curated builtin is always TANK (gm.Vehicles[1])
+		e = append(e, vehEntry{name: gm.Vehicles[1].Name, body: gm.BodyTank, desc: gm.Vehicles[1].Desc})
 	}
 	e = append(e, playerBodies...)
 	return e
 }
 
+// charName is the display name of a character body (the selector entry whose
+// .body matches), used for stats. Falls back to "TANK" for an unknown body.
+func charName(body int) string {
+	for _, e := range vehicleEntries() {
+		if e.body == body {
+			return e.name
+		}
+	}
+	return "TANK"
+}
+
 // runVehicleMenu: pick a vehicle. Wide terminals get a two-pane screen (lightbar
 // list on the left, a rotating 3D preview on the right); narrow ones fall back to
 // a simple centered list. Returns the chosen (chassis, body, color).
-func runVehicleMenu(w *bufio.Writer, cols, rows int, ip *input, s *userSettings, dropfile string) (vehicle, body int, color [3]float64, back, quit bool) {
+func runVehicleMenu(w *bufio.Writer, cols, rows int, ip *input, s *userSettings, dropfile string) (body int, color [3]float64, back, quit bool) {
 	entries := vehicleEntries()
 	N := len(entries)
 	sel := 0 // TANK (the one tank) leads the list
@@ -3107,7 +3110,7 @@ func runVehicleMenu(w *bufio.Writer, cols, rows int, ip *input, s *userSettings,
 	for {
 		select {
 		case <-ip.quitCh:
-			return 0, 0, [3]float64{}, false, true
+			return 0, [3]float64{}, false, true
 		default:
 		}
 		nc := len(gm.SelectColors)
@@ -3126,9 +3129,9 @@ func runVehicleMenu(w *bufio.Writer, cols, rows int, ip *input, s *userSettings,
 					colorIdx, listDirty = (colorIdx+1)%nc, true
 				case mkEnter:
 					e := entries[sel]
-					return e.vehicle, e.body, gm.SelectColors[colorIdx], false, false
+					return e.body, gm.SelectColors[colorIdx], false, false
 				case mkBack:
-					return 0, 0, [3]float64{}, true, false // back to the main menu
+					return 0, [3]float64{}, true, false // back to the main menu
 				}
 			case r := <-ip.runes:
 				// Shift+S cycles the sort criterion (lowercase s stays wasd-down).
@@ -3160,8 +3163,8 @@ func runVehicleMenu(w *bufio.Writer, cols, rows int, ip *input, s *userSettings,
 		last = now
 		angle += 0.7 * dt
 		e := entries[sel]
-		chassis, body := e.vehicle, e.body
-		tank := gm.TankSnap{Vehicle: chassis, Body: body, Color: gm.SelectColors[colorIdx]}
+		body := e.body
+		tank := gm.TankSnap{Body: body, Color: gm.SelectColors[colorIdx]}
 		tris := appendTank(nil, &tank, now.Sub(start).Seconds())
 		pr.renderModel(fitCam(tris, pr.W, pr.H, angle, previewPad(body)), tris)
 		panelPrev = blitPanel(w, pr, panelPrev, panelCol0, panelRow0)
@@ -3292,8 +3295,7 @@ func charBarFracs(e vehEntry, s *userSettings) [7]float64 {
 	for i := 0; i < 6; i++ {
 		f[i] = statFrac(i, vals[i])
 	}
-	body, chassis := e.body, e.vehicle
-	f[6] = jumpFrac(gm.EffectiveJump(body, chassis))
+	f[6] = jumpFrac(gm.EffectiveJump(e.body))
 	return f
 }
 
@@ -3514,7 +3516,7 @@ func blitPanelMasked(w *bufio.Writer, r *Renderer, prev []byte, col0, row0 int, 
 
 // runVehicleMenuSimple is the static centered list for narrow terminals (builtins
 // and creatures).
-func runVehicleMenuSimple(w *bufio.Writer, cols, rows int, ip *input, s *userSettings, dropfile string) (vehicle, body int, color [3]float64, back, quit bool) {
+func runVehicleMenuSimple(w *bufio.Writer, cols, rows int, ip *input, s *userSettings, dropfile string) (body int, color [3]float64, back, quit bool) {
 	entries := vehicleEntries()
 	N := len(entries)
 	sel, colorIdx := 0, 0
@@ -3545,7 +3547,7 @@ func runVehicleMenuSimple(w *bufio.Writer, cols, rows int, ip *input, s *userSet
 	for {
 		select {
 		case <-ip.quitCh:
-			return 0, 0, [3]float64{}, false, true
+			return 0, [3]float64{}, false, true
 		case <-resizeTick.C:
 			w.WriteString("\x1b[18t")
 			w.Flush()
@@ -3569,9 +3571,9 @@ func runVehicleMenuSimple(w *bufio.Writer, cols, rows int, ip *input, s *userSet
 				draw()
 			case mkEnter:
 				e := entries[sel]
-				return e.vehicle, e.body, gm.SelectColors[colorIdx], false, false
+				return e.body, gm.SelectColors[colorIdx], false, false
 			case mkBack:
-				return 0, 0, [3]float64{}, true, false // back to the main menu
+				return 0, [3]float64{}, true, false // back to the main menu
 			}
 		}
 	}
@@ -4649,19 +4651,19 @@ func main() {
 			note = ""
 			continue
 		}
-		var vehicle, vbody int
+		var vbody int
 		var vcolor [3]float64
 		if choice.autoJoin {
 			// Following the party into the arena: skip the picker, drop in as the
 			// default TANK (you can hot-swap with V once inside), after a brief
 			// heads-up so it isn't a silent yank.
-			vehicle, vbody, vcolor = 1, gm.BodyTank, gm.SelectColors[0]
+			vbody, vcolor = gm.BodyTank, gm.SelectColors[0]
 			drawCenterNote(w, cols, rows, "Your party is in the arena - joining...")
 			time.Sleep(1200 * time.Millisecond)
 		} else {
 			updatePresence(dropfile, "vehicle select", "")
 			var vback, vquit bool
-			vehicle, vbody, vcolor, vback, vquit = runVehicleMenu(w, cols, rows, ip, &settings, dropfile)
+			vbody, vcolor, vback, vquit = runVehicleMenu(w, cols, rows, ip, &settings, dropfile)
 			if vquit {
 				cleanup()
 				return
@@ -4672,7 +4674,7 @@ func main() {
 			}
 		}
 		if choice.campaign {
-			if runCampaign(w, cols, rows, rows3d, rnd, ip, dropfile, &settings, vehicle, vbody, vcolor, playerName) {
+			if runCampaign(w, cols, rows, rows3d, rnd, ip, dropfile, &settings, vbody, vcolor, playerName) {
 				cleanup()
 				return
 			}
@@ -4682,7 +4684,7 @@ func main() {
 		var sess session
 		state, detail := "single-player", choice.mode.String()
 		if choice.online || choice.autoJoin {
-			ns, err := connectArena(dropfile, vehicle, vbody, vcolor)
+			ns, err := connectArena(dropfile, vbody, vcolor)
 			if err != nil {
 				if re, ok := err.(*rejectErr); ok { // version mismatch etc.: actionable, show as-is
 					note = re.Error()
@@ -4710,17 +4712,17 @@ func main() {
 					mode = gm.Mode(r.Mode)
 				}
 				detail = mode.String() + " on " + gm.Maps[mapIdx].Name
-				sess = newOfflineOnMap(mapIdx, botCountFor(mode, false), mode, vehicle, settings.difficulty, settings.aimAssist, playerName, vcolor, vbody)
+				sess = newOfflineOnMap(mapIdx, botCountFor(mode, false), mode, settings.difficulty, settings.aimAssist, playerName, vcolor, vbody)
 			} else {
-				sess = newOfflineSession(botCountFor(choice.mode, false), choice.mode, vehicle, settings.difficulty, settings.aimAssist, playerName, vcolor, vbody)
+				sess = newOfflineSession(botCountFor(choice.mode, false), choice.mode, settings.difficulty, settings.aimAssist, playerName, vcolor, vbody)
 			}
 		}
 		note = ""
 		// pickChar opens the character picker mid-match (used by the in-arena
 		// change-character key); ok=false if the caller backed out.
-		pickChar := func() (int, int, [3]float64, bool) {
-			veh, bod, col, back, quit := runVehicleMenuSimple(w, cols, rows, ip, &settings, dropfile)
-			return veh, bod, col, !back && !quit
+		pickChar := func() (int, [3]float64, bool) {
+			bod, col, back, quit := runVehicleMenuSimple(w, cols, rows, ip, &settings, dropfile)
+			return bod, col, !back && !quit
 		}
 		quit, joinArena := playMatch(w, cols, rows, rows3d, rnd, ip, sess, dropfile, state, detail, false, pickChar)
 		sess.close()
@@ -4745,7 +4747,7 @@ func main() {
 // reaches its Ended phase). Both false = backed out to the menu (Backspace).
 // Shared by the main game and the editor's playtest. oneShot (the campaign runner)
 // makes it return after a single match.
-func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, sess session, dropfile, presenceState, presenceDetail string, oneShot bool, pickChar func() (int, int, [3]float64, bool)) (bool, bool) {
+func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, sess session, dropfile, presenceState, presenceDetail string, oneShot bool, pickChar func() (int, [3]float64, bool)) (bool, bool) {
 	ip.setEscMenu(true) // in-game Esc = exit confirm, not instant quit
 	defer ip.setEscMenu(false)
 	netSess, _ := sess.(*netSession)     // non-nil only for an online arena match
@@ -4959,11 +4961,11 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 					// it so the next step doesn't get a multi-second dt (which produced
 					// garbage prediction and could crash the renderer).
 					if pickChar != nil && (netSess != nil || offSess != nil) && (lastSelfDead || lastPhase == gm.PhaseLobby) {
-						if veh, bod, col, ok := pickChar(); ok {
+						if bod, col, ok := pickChar(); ok {
 							if netSess != nil {
-								netSess.sendChangeChar(veh, bod, col)
+								netSess.sendChangeChar(bod, col)
 							} else {
-								offSess.changeChar(veh, bod, col)
+								offSess.changeChar(bod, col)
 							}
 						}
 						prev, lastSig = nil, "" // picker took the screen: force a full repaint

@@ -30,7 +30,7 @@ func matchResultFrom(v viewState, player string, dur float64) matchResult {
 	}
 	return matchResult{
 		Mode: v.mode, ModeName: v.mode.String(), MapName: v.gmap.Name,
-		Vehicle: gm.Veh(v.self.Vehicle).Name, Player: player,
+		Vehicle: charName(v.self.Body), Player: player,
 		Won: won, Duration: dur,
 		Kills: v.self.Kills, Deaths: v.self.Deaths,
 		ShotsFired: v.self.ShotsFired, ShotsHit: v.self.ShotsHit,

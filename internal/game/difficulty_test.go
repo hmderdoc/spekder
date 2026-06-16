@@ -56,7 +56,7 @@ func TestSightLimitsAcquisition(t *testing.T) {
 	mk := func(d Difficulty) (*World, int, int) {
 		w := NewWorld(1, ModeDeathmatch)
 		w.SetDifficulty(d)
-		me := w.AddPlayer([3]float64{}, 1, "P", BodyTank)
+		me := w.AddPlayer([3]float64{}, "P", BodyTank)
 		drive(w, countdownTime+0.2, 1.0/30, map[int]Input{me: {}})
 		return w, me, firstBot(w)
 	}

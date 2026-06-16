@@ -158,12 +158,12 @@ func (s *server) handle(conn net.Conn) {
 		_ = proto.WriteMsg(conn, proto.EncodePlayers(s.playerRows()))
 		return
 	}
-	token, bbsid, handle, vehicle, color, _, body, clientProto, clientVer, party, ok := proto.DecodeHello(hello)
+	token, bbsid, handle, color, body, publish, clientProto, clientVer, party, ok := proto.DecodeHello(hello)
 	if !ok || token != s.token {
 		log.Printf("rejected %v (bad hello/token)", conn.RemoteAddr())
 		return
 	}
-	if vehicle == proto.PublishVehicle { // publish-only connection: no tank
+	if publish { // publish-only connection: no tank
 		s.handlePublish(conn, bbsid, handle)
 		return
 	}
@@ -191,8 +191,8 @@ func (s *server) handle(conn net.Conn) {
 	if s.isKickedLocked(party, handle) {
 		party = "" // booted from that party: they join solo, not on the owner's side
 	}
-	tank := s.world.AddPlayer(color, vehicle, handle, body) // dedups to a free color
-	s.world.SetPlayerParty(tank, party)                     // team-grouping hint
+	tank := s.world.AddPlayer(color, handle, body) // dedups to a free color
+	s.world.SetPlayerParty(tank, party)            // team-grouping hint
 	id := s.nextID
 	s.nextID++
 	c := &client{id: id, tank: tank, conn: conn}
@@ -225,9 +225,9 @@ func (s *server) handle(conn net.Conn) {
 			c.mu.Unlock()
 			continue
 		}
-		if tok, veh, col, _, bod, ok := proto.DecodeChangeChar(msg); ok && tok == s.token {
+		if tok, col, bod, ok := proto.DecodeChangeChar(msg); ok && tok == s.token {
 			s.mu.Lock()
-			s.world.SetPlayerLoadout(c.tank, col, veh, bod)
+			s.world.SetPlayerLoadout(c.tank, col, bod)
 			s.mu.Unlock()
 			continue
 		}

@@ -22,7 +22,7 @@ func TestBotsReachElevatedHills(t *testing.T) {
 		w.PinMap(mi)
 		drive(w, countdownTime+0.2, 1.0/30, map[int]Input{})
 		for i := range w.Tanks {
-			w.Tanks[i].body, w.Tanks[i].Vehicle = BodyTank, ChassisFor(BodyTank)
+			w.Tanks[i].body = BodyTank
 		}
 		z := &w.zones[0]
 		reached, when := false, 0

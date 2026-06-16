@@ -963,14 +963,6 @@ func (t *Tank) veh() Vehicle {
 	return v
 }
 
-// CustomStats are the point-buy tunable sim stats; the rest (AimTurn, Jump, Scale,
-// body silhouette) come from the chosen chassis. Travels in HELLO so the server
-// sims a custom build correctly while everyone renders the chassis by index.
-type CustomStats struct {
-	MaxHP                                          int
-	Speed, HullTurn, FireDelay, AmmoMax, AmmoRegen float64
-}
-
 // Difficulty indexes the BotProfile table. See DIFFICULTY.md.
 type Difficulty int
 
@@ -1132,8 +1124,7 @@ type Tank struct {
 	HP          int
 	Color       [3]float64
 	Name        string   // display name: human handle, or a bot callsign
-	Vehicle     int      // chassis index (body/scale/render); shared builtin table
-	custom      *Vehicle // per-tank stat override (custom point-buy build); nil = use Vehicle
+	custom      *Vehicle // per-tank stat override (authored actors/bosses); nil = use the body's row
 	body        int      // render body style (BodyTank/BodySpider/...); 0 = tank
 	Bot         bool
 	Dead        bool
@@ -1249,7 +1240,6 @@ type TankSnap struct {
 	Name                   string
 	Dead, Bot, Shield, Hit bool
 	Kills, Deaths          int
-	Vehicle                int
 	Body                   int // render body style (BodyTank/BodySpider/...)
 	ShotsFired             int // per-match tallies (stats: accuracy, pickups, damage, support)
 	ShotsHit               int
@@ -1731,13 +1721,12 @@ func (w *World) SetDifficulty(d Difficulty) { w.bots = ProfileFor(d) }
 func (w *World) rollBotLook(i int) {
 	t := &w.Tanks[i]
 	if i == w.demoHero { // the demo's player stand-in looks like the player default
-		t.body, t.Vehicle = BodyTank, ChassisFor(BodyTank)
+		t.body = BodyTank
 		t.custom = nil
 		t.weapon2 = defaultSecondary(BodyTank)
 		return
 	}
-	t.body = botBodies[rand.Intn(len(botBodies))] // character first ...
-	t.Vehicle = ChassisFor(t.body)                // ... its chassis comes with it
+	t.body = botBodies[rand.Intn(len(botBodies))] // each character owns its stats
 	t.custom = nil
 	t.weapon2 = defaultSecondary(t.body)
 }
@@ -1753,7 +1742,6 @@ func (w *World) SetBotBody(i, body int) {
 	}
 	t := &w.Tanks[i]
 	t.body = body
-	t.Vehicle = ChassisFor(body)
 	t.custom = nil
 	t.weapon2 = defaultSecondary(body)
 	t.HP = t.veh().MaxHP
@@ -1789,7 +1777,6 @@ func (w *World) assignHealers() {
 		}
 		t := &w.Tanks[bots[rand.Intn(len(bots))]]
 		t.body = BodyButterfly
-		t.Vehicle = ChassisFor(t.body) // SCOUT chassis: fragile flyer
 		t.custom, t.weapon2 = nil, wepHealBomb
 		t.HP, t.ammo = VehBody(t.body).MaxHP, VehBody(t.body).AmmoMax
 	}
@@ -2298,10 +2285,9 @@ func NewWorld(numBots int, mode Mode) *World {
 		w.MapIdx = randomMapIdx(mode, numBots+1) // a map suited to the mode and session size
 	}
 	for b := 0; b < numBots; b++ {
-		body := botBodies[rand.Intn(len(botBodies))] // character first; chassis follows
-		vi := ChassisFor(body)
+		body := botBodies[rand.Intn(len(botBodies))] // each character owns its stats
 		w.Tanks = append(w.Tanks, Tank{
-			Bot: true, HP: VehBody(body).MaxHP, ammo: VehBody(body).AmmoMax, guard: spawnGuardTime, vote: -1, Vehicle: vi,
+			Bot: true, HP: VehBody(body).MaxHP, ammo: VehBody(body).AmmoMax, guard: spawnGuardTime, vote: -1,
 			body:  body,
 			Color: BotPalette[b%len(BotPalette)], Name: botName(b), Team: -1, Carrying: -1, weapon2: wepGrenade,
 		})
@@ -2327,17 +2313,16 @@ func botName(i int) string {
 }
 
 // AddPlayer inserts a human tank (reusing a vacated slot if any) and returns its
-// index. color may be the zero value to auto-pick from PlayerPalette. The vehicle
-// arg sets the vestigial wire id; body is the render silhouette and the source of
-// the tank's sim stats (VehBody).
-func (w *World) AddPlayer(color [3]float64, vehicle int, name string, body int) int {
+// index. color may be the zero value to auto-pick from PlayerPalette. body is the
+// render silhouette and the source of the tank's sim stats (VehBody).
+func (w *World) AddPlayer(color [3]float64, name string, body int) int {
 	color = w.freeColor(color) // honor the pick unless another player already wears it
 	if name == "" {
 		name = "PLAYER"
 	}
 	mk := func(i int) Tank {
 		eff := VehBody(body)
-		t := Tank{HP: eff.MaxHP, ammo: eff.AmmoMax, Color: color, Name: name, guard: spawnGuardTime, vote: -1, Vehicle: vehicle, body: body, lives: survivalLives, Team: -1, Carrying: -1, weapon2: defaultSecondary(body)}
+		t := Tank{HP: eff.MaxHP, ammo: eff.AmmoMax, Color: color, Name: name, guard: spawnGuardTime, vote: -1, body: body, lives: survivalLives, Team: -1, Carrying: -1, weapon2: defaultSecondary(body)}
 		if body == BodyMinotaur {
 			t.shieldHP = minoShieldMax // join with a full barrier
 		}
@@ -2360,11 +2345,11 @@ func (w *World) AddPlayer(color [3]float64, vehicle int, name string, body int) 
 	return i
 }
 
-// SetPlayerLoadout swaps a human tank's character (body/chassis/color/secondary).
+// SetPlayerLoadout swaps a human tank's character (body/color/secondary).
 // The body-derived fields take effect on the next respawn (respawns() refreshes
-// HP/ammo from the new chassis), so the natural use is to change while dead. It
+// HP/ammo from the new body), so the natural use is to change while dead. It
 // never touches live HP, so it can't be abused as a mid-fight heal.
-func (w *World) SetPlayerLoadout(i int, color [3]float64, vehicle int, body int) {
+func (w *World) SetPlayerLoadout(i int, color [3]float64, body int) {
 	if i < 0 || i >= len(w.Tanks) {
 		return
 	}
@@ -2373,7 +2358,6 @@ func (w *World) SetPlayerLoadout(i int, color [3]float64, vehicle int, body int)
 		return
 	}
 	t.body = body
-	t.Vehicle = vehicle
 	t.custom = nil
 	t.Color = w.freeColor(color)
 	t.weapon2 = defaultSecondary(body)
@@ -3550,7 +3534,7 @@ func (w *World) setupSurvival() {
 		}
 	}
 	for bots < survivalPool {
-		w.Tanks = append(w.Tanks, Tank{Bot: true, gone: true, Dead: true, vote: -1, Vehicle: 1, HP: VehBody(BodyTank).MaxHP, ammo: VehBody(BodyTank).AmmoMax, Name: botName(len(w.Tanks)), Team: -1, Carrying: -1, weapon2: wepGrenade})
+		w.Tanks = append(w.Tanks, Tank{Bot: true, gone: true, Dead: true, vote: -1, HP: VehBody(BodyTank).MaxHP, ammo: VehBody(BodyTank).AmmoMax, Name: botName(len(w.Tanks)), Team: -1, Carrying: -1, weapon2: wepGrenade})
 		bots++
 	}
 	for i := range w.Tanks {
@@ -3593,7 +3577,6 @@ func (w *World) spawnWave() {
 		if act < n {
 			t.gone, t.Dead = false, false
 			t.body = survivalBodies[(w.wave-1+act)%len(survivalBodies)] // bestiary: a shifting mix per wave
-			t.Vehicle = ChassisFor(t.body)                              // vestigial wire id, kept consistent with the body
 			t.hpScale = hpScale
 			t.HP = t.veh().MaxHP // per-character HP, scaled by the wave multiplier
 			t.guard, t.cooldown, t.vy, t.TurretYaw = spawnGuardTime, 0, 0, 0
@@ -4885,27 +4868,6 @@ var botBodies = []int{
 	BodyElephant, BodyFalcon, BodyStag, BodyMinotaur,
 }
 
-// ChassisFor maps a body to the chassis whose stats fit that character. The
-// roster is body-first: picking a character implies its chassis (BodyTank is
-// the TANK, the one true tank). Bots and the player roster share this map,
-// so nobody fields a mutant - artillery innards only ever wear the bodies
-// built for them, never a tank shell.
-func ChassisFor(body int) int {
-	switch body {
-	case BodySerpent, BodySpider, BodyButterfly, BodyFalcon:
-		return 0 // SCOUT: fast, fragile
-	case BodyTrex, BodyCrab, BodyTurtle, BodyElephant, BodyMinotaur:
-		return 2 // HEAVY: slow, armored
-	case BodyQuad, BodyStag:
-		return 3 // RANGER: quick skirmisher
-	case BodyInsect, BodyOctopod, BodyScorpion:
-		return 4 // ARTILLERY: deep magazine, glass (the scorpion's hitscan laser
-		//            is a sniper's gun - it belongs on a fragile, low-mobility
-		//            body, not the durable all-rounder it used to ride)
-	}
-	return 1 // TANK, and the balanced bipeds
-}
-
 // bodyDef gives each character a distinct identity beyond the chassis: a signature
 // primary weapon, a jump override, a muzzle origin (body-local: x lateral, y up, z
 // forward; rotated by facing) so shots leave from the right place, and a flight
@@ -4959,9 +4921,9 @@ func PrimaryWeapon(body int) int {
 // SecondaryWeapon is a body's default B-weapon (pickups can change it in play).
 func SecondaryWeapon(body int) int { return defaultSecondary(body) }
 
-// EffectiveJump is a body's jump impulse on a chassis: its bodyDef override if
-// set, else the chassis default. Used for the character-select jump stat.
-func EffectiveJump(body, chassis int) float64 {
+// EffectiveJump is a body's jump impulse: its bodyDef override if set, else the
+// body's own row default. Used for the character-select jump stat.
+func EffectiveJump(body int) float64 {
 	if j := bodyDefFor(body).jump; j > 0 {
 		return j
 	}
@@ -5056,20 +5018,38 @@ type Balance struct {
 	Bodies []BodyStats
 }
 
-// bodyVeh is the per-character stat table (the runtime source of truth, replacing
-// the chassis indirection). bodyBal is the live scalar layer. Both are seeded so
-// resolved stats are byte-identical to the old chassis system until a push (or a
-// per-character edit) changes them.
-var (
-	bodyVeh []Vehicle
-	bodyBal []BodyStats
-)
+// bodyVeh is the per-character stat table - each character owns its row (the
+// shared chassis is retired; Vehicles[] survives only as an authoring palette).
+var bodyVeh = []Vehicle{
+	BodyTank:      {MaxHP: 100, Speed: 6, HullTurn: 1.9, AimTurn: 1.3, FireDelay: 0.55, Jump: 8.5, Scale: 1, AmmoMax: 8, AmmoRegen: 1.8},
+	BodySpider:    {MaxHP: 70, Speed: 8.2, HullTurn: 2.4, AimTurn: 1.7, FireDelay: 0.42, Jump: 10, Scale: 0.82, AmmoMax: 6, AmmoRegen: 2.4},
+	BodyQuad:      {MaxHP: 85, Speed: 7, HullTurn: 2.1, AimTurn: 1.5, FireDelay: 0.48, Jump: 9, Scale: 0.9, AmmoMax: 7, AmmoRegen: 2},
+	BodyInsect:    {MaxHP: 60, Speed: 3.8, HullTurn: 1.1, AimTurn: 1.4, FireDelay: 0.5, Jump: 5, Scale: 1.12, AmmoMax: 14, AmmoRegen: 2.2},
+	BodyHumanoid:  {MaxHP: 100, Speed: 6, HullTurn: 1.9, AimTurn: 1.3, FireDelay: 0.55, Jump: 8.5, Scale: 1, AmmoMax: 8, AmmoRegen: 1.8},
+	BodyScorpion:  {MaxHP: 60, Speed: 3.8, HullTurn: 1.1, AimTurn: 1.4, FireDelay: 0.5, Jump: 5, Scale: 1.12, AmmoMax: 14, AmmoRegen: 2.2},
+	BodySerpent:   {MaxHP: 70, Speed: 8.2, HullTurn: 2.4, AimTurn: 1.7, FireDelay: 0.42, Jump: 10, Scale: 0.82, AmmoMax: 6, AmmoRegen: 2.4},
+	BodyTripod:    {MaxHP: 100, Speed: 6, HullTurn: 1.9, AimTurn: 1.3, FireDelay: 0.55, Jump: 8.5, Scale: 1, AmmoMax: 8, AmmoRegen: 1.8},
+	BodyDrone:     {MaxHP: 100, Speed: 6, HullTurn: 1.9, AimTurn: 1.3, FireDelay: 0.55, Jump: 8.5, Scale: 1, AmmoMax: 8, AmmoRegen: 1.8},
+	BodyCrab:      {MaxHP: 150, Speed: 4.3, HullTurn: 1.3, AimTurn: 1, FireDelay: 0.85, Jump: 6.5, Scale: 1.22, AmmoMax: 12, AmmoRegen: 1.2},
+	BodyOctopod:   {MaxHP: 60, Speed: 3.8, HullTurn: 1.1, AimTurn: 1.4, FireDelay: 0.5, Jump: 5, Scale: 1.12, AmmoMax: 14, AmmoRegen: 2.2},
+	BodyButterfly: {MaxHP: 70, Speed: 8.2, HullTurn: 2.4, AimTurn: 1.7, FireDelay: 0.42, Jump: 10, Scale: 0.82, AmmoMax: 6, AmmoRegen: 2.4},
+	BodyMantis:    {MaxHP: 100, Speed: 6, HullTurn: 1.9, AimTurn: 1.3, FireDelay: 0.55, Jump: 8.5, Scale: 1, AmmoMax: 8, AmmoRegen: 1.8},
+	BodyTurtle:    {MaxHP: 150, Speed: 4.3, HullTurn: 1.3, AimTurn: 1, FireDelay: 0.85, Jump: 6.5, Scale: 1.22, AmmoMax: 12, AmmoRegen: 1.2},
+	BodyTrex:      {MaxHP: 150, Speed: 4.3, HullTurn: 1.3, AimTurn: 1, FireDelay: 0.85, Jump: 6.5, Scale: 1.22, AmmoMax: 12, AmmoRegen: 1.2},
+	BodyGorilla:   {MaxHP: 100, Speed: 6, HullTurn: 1.9, AimTurn: 1.3, FireDelay: 0.55, Jump: 8.5, Scale: 1, AmmoMax: 8, AmmoRegen: 1.8},
+	BodyElephant:  {MaxHP: 150, Speed: 4.3, HullTurn: 1.3, AimTurn: 1, FireDelay: 0.85, Jump: 6.5, Scale: 1.22, AmmoMax: 12, AmmoRegen: 1.2},
+	BodyFalcon:    {MaxHP: 70, Speed: 8.2, HullTurn: 2.4, AimTurn: 1.7, FireDelay: 0.42, Jump: 10, Scale: 0.82, AmmoMax: 6, AmmoRegen: 2.4},
+	BodyStag:      {MaxHP: 85, Speed: 7, HullTurn: 2.1, AimTurn: 1.5, FireDelay: 0.48, Jump: 9, Scale: 0.9, AmmoMax: 7, AmmoRegen: 2},
+	BodyMinotaur:  {MaxHP: 150, Speed: 4.3, HullTurn: 1.3, AimTurn: 1, FireDelay: 0.85, Jump: 6.5, Scale: 1.22, AmmoMax: 12, AmmoRegen: 1.2},
+}
+
+// bodyBal is the live scalar layer (jump/hpRegen/speedMul), seeded from each
+// body's builtin def so resolved stats match the builtins until a push changes them.
+var bodyBal []BodyStats
 
 func init() {
-	bodyVeh = make([]Vehicle, BodyKinds)
 	bodyBal = make([]BodyStats, BodyKinds)
 	for b := 0; b < BodyKinds; b++ {
-		bodyVeh[b] = veh(ChassisFor(b)) // seed each character from the chassis it used to ride
 		d := bodyDefBuiltin(b)
 		bodyBal[b] = BodyStats{Jump: d.jump, HPRegen: d.hpRegen, SpeedMul: d.speedMul}
 	}
@@ -6383,7 +6363,7 @@ func (w *World) Snapshot() ([]TankSnap, []ShotSnap, []FlagSnap, []PickupSnap) {
 			Bleeding: t.dotT > 0 && t.dotCause == CauseBleed,
 			Healing:  t.healFlash > 0,
 			ShieldUp: t.shieldUp, ShieldFrac: shieldFracOf(t),
-			Vehicle: t.Vehicle, Body: t.body, ShotsFired: t.shotsFired, ShotsHit: t.shotsHit, Pickups: t.pickups,
+			Body: t.body, ShotsFired: t.shotsFired, ShotsHit: t.shotsHit, Pickups: t.pickups,
 			DmgDealt: t.dmgDealt, HealDone: t.healDone,
 			Lives: t.lives, Team: t.Team, Carrying: t.Carrying >= 0,
 			Kills: t.Kills, Deaths: t.Deaths, RespawnIn: t.respawn, Reload: reload, Ammo: ammoFrac, HoldScore: t.holdScore,

@@ -11,7 +11,7 @@ func startDM(t *testing.T, bots int) (*World, int) {
 			break
 		}
 	}
-	me := w.AddPlayer([3]float64{}, 1, "P", BodyTank)
+	me := w.AddPlayer([3]float64{}, "P", BodyTank)
 	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{me: {}})
 	if w.Phase != PhaseActive {
 		t.Fatalf("expected active phase, got %v", w.Phase)
@@ -25,7 +25,7 @@ func TestPickupRepairHeals(t *testing.T) {
 	w.Tanks[me].Pos = V3{X: 5, Z: 5}
 	w.pickups = []Pickup{{Pos: V3{X: 5, Z: 5}, Kind: PickRepair}}
 	w.stepPickups(1.0 / 30)
-	if w.Tanks[me].HP != veh(w.Tanks[me].Vehicle).MaxHP {
+	if w.Tanks[me].HP != VehBody(w.Tanks[me].body).MaxHP {
 		t.Fatalf("repair should heal to full, got %d", w.Tanks[me].HP)
 	}
 	if len(w.pickups) != 0 {
@@ -52,7 +52,7 @@ func TestPickupShieldBlocksDamage(t *testing.T) {
 
 func TestPickupRapidShortensReload(t *testing.T) {
 	w, me := startDM(t, 1)
-	base := veh(w.Tanks[me].Vehicle).FireDelay
+	base := VehBody(w.Tanks[me].body).FireDelay
 	w.Tanks[me].rapidT = buffRapidTime
 	w.Tanks[me].cooldown = 0
 	w.fire(me)

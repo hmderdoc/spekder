@@ -7,7 +7,7 @@ import "testing"
 func elevatedKothWorld(t *testing.T, bots int) *World {
 	t.Helper()
 	Maps = append(Maps, Map{Name: "TEST-MESA", Size: 18,
-		Spawns: []V3{{X: -14, Z: -14}, {X: 14, Z: 14}, {X: -14, Z: 14}, {X: 14, Z: -14}},
+		Spawns:    []V3{{X: -14, Z: -14}, {X: 14, Z: 14}, {X: -14, Z: 14}, {X: 14, Z: -14}},
 		Obstacles: []Box{{Pos: V3{Y: 1.6}, Half: V3{X: 4.5, Y: 1.6, Z: 4.5}}}, // top at 3.2
 		Ramps: []Ramp{
 			{Pos: V3{Z: -7}, Half: V3{X: 3, Z: 2.5}, H: 3.2, Dir: 2},
@@ -49,7 +49,7 @@ func TestBotsClimbElevatedHill(t *testing.T) {
 	defer func() { Maps = Maps[:len(Maps)-1] }()
 	w := elevatedKothWorld(t, 3)
 	for i := range w.Tanks {
-		w.Tanks[i].body, w.Tanks[i].Vehicle = BodyTank, ChassisFor(BodyTank)
+		w.Tanks[i].body = BodyTank
 	}
 	z := &w.zones[0]
 	for s := 0; s < 120; s++ {

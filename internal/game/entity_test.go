@@ -210,7 +210,7 @@ func startDMMap(t *testing.T, bots int, name string) (*World, int) {
 	if idx := FindMap(name); idx >= 0 {
 		w.PinMap(idx)
 	}
-	me := w.AddPlayer([3]float64{}, 1, "P", BodyTank)
+	me := w.AddPlayer([3]float64{}, "P", BodyTank)
 	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{me: {}})
 	return w, me
 }

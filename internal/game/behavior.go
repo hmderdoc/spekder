@@ -528,7 +528,7 @@ func (w *World) spawnActor(name string, pos V3) {
 		}
 		nidx := len(w.Tanks)
 		t := Tank{
-			Bot: true, Vehicle: ac.Vehicle, body: ac.Body,
+			Bot: true, body: ac.Body,
 			guard: spawnGuardTime, vote: -1, Color: BotPalette[nidx%len(BotPalette)], Name: botName(nidx),
 			Team: -1, Carrying: -1, weapon2: wepGrenade, Pos: pos,
 			Behaviors: ac.Behaviors, Watch: ac.Watch,
@@ -616,7 +616,7 @@ func (w *World) spawnBot(pos V3, vehicle, body int) {
 	n := len(w.Tanks)
 	v := veh(vehicle) // authored archetype chassis (stats), pinned as a per-tank override
 	t := Tank{
-		Bot: true, Vehicle: vehicle, body: body, custom: &v, HP: v.MaxHP, ammo: v.AmmoMax,
+		Bot: true, body: body, custom: &v, HP: v.MaxHP, ammo: v.AmmoMax,
 		guard: spawnGuardTime, vote: -1, Color: BotPalette[n%len(BotPalette)], Name: botName(n),
 		Team: -1, Carrying: -1, weapon2: wepGrenade, Pos: pos,
 	}

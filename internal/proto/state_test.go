@@ -22,8 +22,8 @@ func TestStateRoundTripCTF(t *testing.T) {
 		Kills:      []gm.KillEvent{{Killer: 1, Victim: 0, Cause: gm.CauseCannon}, {Killer: -1, Victim: 1, Cause: gm.CauseHazard}},
 	}
 	tanks := []gm.TankSnap{
-		{ID: 0, Pos: gm.V3{X: 1, Y: 0, Z: -3}, HP: 80, Name: "DERDOK", Team: 0, Carrying: true, Lives: 0, Vehicle: 1, Shield: true, TurretPitch: 0.35, HoldScore: 7, Shell: true, Poisoned: true, Bleeding: true, Healing: true},
-		{ID: 1, Pos: gm.V3{X: -2, Y: 0, Z: 4}, HP: 100, Name: "RAZOR", Team: 1, Carrying: false, Bot: true, Vehicle: 2, Body: gm.BodySpider, Cloak: true, Rapid: true, Burning: true, ShieldUp: true, ShieldFrac: 0.5},
+		{ID: 0, Pos: gm.V3{X: 1, Y: 0, Z: -3}, HP: 80, Name: "DERDOK", Team: 0, Carrying: true, Lives: 0, Shield: true, TurretPitch: 0.35, HoldScore: 7, Shell: true, Poisoned: true, Bleeding: true, Healing: true},
+		{ID: 1, Pos: gm.V3{X: -2, Y: 0, Z: 4}, HP: 100, Name: "RAZOR", Team: 1, Carrying: false, Bot: true, Body: gm.BodySpider, Cloak: true, Rapid: true, Burning: true, ShieldUp: true, ShieldFrac: 0.5},
 	}
 	shots := []gm.ShotSnap{{Pos: gm.V3{X: 0, Y: gm.EyeHeight, Z: 0}, Vis: gm.VisGrenade}}
 	flags := []gm.FlagSnap{

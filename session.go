@@ -68,7 +68,7 @@ type offlineSession struct {
 	diff gm.Difficulty // the bot tier this match ran on (for score weighting)
 }
 
-func newOfflineSession(numBots int, mode gm.Mode, vehicle int, diff gm.Difficulty, aimAssist bool, name string, color [3]float64, body int) *offlineSession {
+func newOfflineSession(numBots int, mode gm.Mode, diff gm.Difficulty, aimAssist bool, name string, color [3]float64, body int) *offlineSession {
 	w := gm.NewWorld(numBots, mode)
 	w.SetDifficulty(diff)
 	w.SetAimAssist(aimAssist)
@@ -94,7 +94,7 @@ func newOfflineSession(numBots int, mode gm.Mode, vehicle int, diff gm.Difficult
 			logf("offline: pinned to map %q (index %d)", want, idx)
 		}
 	}
-	return &offlineSession{w: w, me: w.AddPlayer(color, vehicle, name, body), diff: diff}
+	return &offlineSession{w: w, me: w.AddPlayer(color, name, body), diff: diff}
 }
 
 func (s *offlineSession) step(dt float64, in gm.Input) viewState {
@@ -124,13 +124,13 @@ func (s *offlineSession) close() {}
 
 // changeChar swaps the local player's character; like the arena path it takes
 // effect on the next respawn (SetPlayerLoadout leaves live HP alone).
-func (s *offlineSession) changeChar(vehicle, body int, color [3]float64) {
-	s.w.SetPlayerLoadout(s.me, color, vehicle, body)
+func (s *offlineSession) changeChar(body int, color [3]float64) {
+	s.w.SetPlayerLoadout(s.me, color, body)
 }
 
 // newOfflineOnMap builds an offline session pinned to a specific map index (used
 // by the editor's playtest, which temporarily appends the working map to gm.Maps).
-func newOfflineOnMap(mapIdx, numBots int, mode gm.Mode, vehicle int, diff gm.Difficulty, aimAssist bool, name string, color [3]float64, body int) *offlineSession {
+func newOfflineOnMap(mapIdx, numBots int, mode gm.Mode, diff gm.Difficulty, aimAssist bool, name string, color [3]float64, body int) *offlineSession {
 	if mapIdx >= 0 && mapIdx < len(gm.Maps) { // a scripted map can fix its own fill-bot count
 		if r := gm.Maps[mapIdx].Rules; r != nil && r.Bots >= 0 {
 			numBots = r.Bots
@@ -144,5 +144,5 @@ func newOfflineOnMap(mapIdx, numBots int, mode gm.Mode, vehicle int, diff gm.Dif
 	w.PinMap(mapIdx)
 	w.SetDifficulty(diff)
 	w.SetAimAssist(aimAssist)
-	return &offlineSession{w: w, me: w.AddPlayer(color, vehicle, name, body), diff: diff}
+	return &offlineSession{w: w, me: w.AddPlayer(color, name, body), diff: diff}
 }

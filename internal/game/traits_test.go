@@ -70,7 +70,7 @@ func TestDrainLeechesToShooter(t *testing.T) {
 
 func TestPassiveRegen(t *testing.T) {
 	w := twoTanks(t)
-	w.Tanks[0].body, w.Tanks[0].Vehicle = BodySerpent, ChassisFor(BodySerpent)
+	w.Tanks[0].body = BodySerpent
 	w.Tanks[0].HP = 40
 	for i := 0; i < 20; i++ { // 2 sim-seconds at 3 HP/sec
 		w.stepRegen(&w.Tanks[0], 0.1)
@@ -122,7 +122,7 @@ func TestTurtleShellMode(t *testing.T) {
 
 func TestTurtleBotShellsUp(t *testing.T) {
 	w := twoTanks(t)
-	w.Tanks[0].body, w.Tanks[0].Vehicle, w.Tanks[0].Bot = BodyTurtle, ChassisFor(BodyTurtle), true
+	w.Tanks[0].body, w.Tanks[0].Bot = BodyTurtle, true
 	w.Tanks[0].HP = 40 // well under half of the HEAVY chassis's 150
 	w.botSpecial(0)    // enemy 5 units away (twoTanks): cornered
 	if w.Tanks[0].shellT <= 0 {
@@ -133,7 +133,7 @@ func TestTurtleBotShellsUp(t *testing.T) {
 func TestElephantBuffer(t *testing.T) {
 	w := twoTanks(t)
 	e := &w.Tanks[0]
-	e.body, e.Vehicle, e.HP = BodyElephant, ChassisFor(BodyElephant), 150
+	e.body, e.HP = BodyElephant, 150
 	e.bufferHP = elephantBufferMax
 
 	// Damage soaks into the buffer first, from any direction (HP untouched).
@@ -165,7 +165,7 @@ func TestMinotaurBarrier(t *testing.T) {
 	// re-initialize the barrier state we set up below.
 	drive(w, countdownTime+0.5, 1.0/30, map[int]Input{})
 	m := &w.Tanks[0]
-	m.body, m.Vehicle = BodyMinotaur, ChassisFor(BodyMinotaur)
+	m.body = BodyMinotaur
 	m.HP, m.Pos, m.HullYaw = 150, V3{}, 0 // at origin, facing +Z
 	m.shieldHP, m.shieldUp = minoShieldMax, true
 
@@ -213,7 +213,7 @@ func TestAegisConeShieldsAllies(t *testing.T) {
 	Maps = []Map{{Name: "T", Size: 30}}
 	w := &World{Mode: ModeCTF} // a team mode, so allies exist
 	w.Tanks = []Tank{
-		{HP: 150, Team: 0, Carrying: -1, body: BodyElephant, Vehicle: ChassisFor(BodyElephant)},
+		{HP: 150, Team: 0, Carrying: -1, body: BodyElephant},
 		{HP: 80, Team: 0, Carrying: -1, Pos: V3{X: 0, Z: 4}}, // ally dead ahead
 		{HP: 80, Team: 1, Carrying: -1, Pos: V3{X: 0, Z: 6}}, // foe behind the ally
 	}

@@ -19,7 +19,7 @@ func TestBotsContestTheHill(t *testing.T) {
 	w.PinMap(len(Maps) - 1)
 	drive(w, countdownTime+0.2, 1.0/30, map[int]Input{})
 	for i := range w.Tanks {
-		w.Tanks[i].body, w.Tanks[i].Vehicle = BodyTank, ChassisFor(BodyTank)
+		w.Tanks[i].body = BodyTank
 	}
 	for s := 0; s < 120; s++ { // sample each sim-second; bot rolls are random
 		drive(w, 1, 1.0/30, map[int]Input{})

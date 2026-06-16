@@ -30,7 +30,7 @@ func livesOf(sess *offlineSession) int {
 
 // runCampaign plays the campaign from level 1. Returns true only if the
 // player quit the program entirely.
-func runCampaign(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, dropfile string, s *userSettings, vehicle, vbody int, vcolor [3]float64, playerName string) bool {
+func runCampaign(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, dropfile string, s *userSettings, vbody int, vcolor [3]float64, playerName string) bool {
 	if len(gm.CampaignMaps) == 0 {
 		return false
 	}
@@ -40,7 +40,7 @@ func runCampaign(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *inp
 		updatePresence(dropfile, "campaign", fmt.Sprintf("level %d", li+1))
 		idx := len(gm.Maps) // the editor's append-play-truncate pattern
 		gm.Maps = append(gm.Maps, m)
-		sess := newOfflineOnMap(idx, 0, gm.EffectiveMode(m), vehicle, s.difficulty, s.aimAssist, playerName, vcolor, vbody)
+		sess := newOfflineOnMap(idx, 0, gm.EffectiveMode(m), s.difficulty, s.aimAssist, playerName, vcolor, vbody)
 		sess.w.SetCampaignLives(lives)
 		quit, _ := playMatch(w, cols, rows, rows3d, rnd, ip, sess, dropfile, "campaign", m.Name, true, nil)
 		snap := sess.w.Match()

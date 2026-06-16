@@ -116,7 +116,7 @@ func syncPartyFromStatus(pres []proto.Presence, mySession string) {
 
 // connectArena dials the configured arena server and joins as a client with the
 // chosen vehicle.
-func connectArena(dropfile string, vehicle, body int, color [3]float64) (*netSession, error) {
+func connectArena(dropfile string, body int, color [3]float64) (*netSession, error) {
 	ini := loadINI(defaultINIPath())
 	host := ini["server"]
 	if host == "" {
@@ -127,7 +127,7 @@ func connectArena(dropfile string, vehicle, body int, color [3]float64) (*netSes
 		port = "7700"
 	}
 	bbsid, handle := door32Identity(dropfile) // the real dropfile, not a cwd guess
-	ns, err := dialServer(host, port, ini["token"], bbsid, handle, vehicle, color, body)
+	ns, err := dialServer(host, port, ini["token"], bbsid, handle, color, body)
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +154,7 @@ func publishMap(m gm.Map) (string, error) {
 		return "", err
 	}
 	defer conn.Close()
-	if err := proto.WriteMsg(conn, proto.EncodeHello(ini["token"], bbsid, handle, proto.PublishVehicle, [3]float64{}, nil, gm.BodyTank, proto.ProtocolVersion, version, "")); err != nil {
+	if err := proto.WriteMsg(conn, proto.EncodeHello(ini["token"], bbsid, handle, [3]float64{}, gm.BodyTank, true, proto.ProtocolVersion, version, "")); err != nil {
 		return "", err
 	}
 	if err := proto.WriteMsg(conn, proto.EncodePublish(m)); err != nil {
@@ -314,12 +314,12 @@ type netSession struct {
 	predInit  bool
 }
 
-func dialServer(host, port, token, bbsid, handle string, vehicle int, color [3]float64, body int) (*netSession, error) {
+func dialServer(host, port, token, bbsid, handle string, color [3]float64, body int) (*netSession, error) {
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 3*time.Second)
 	if err != nil {
 		return nil, err
 	}
-	if err := proto.WriteMsg(conn, proto.EncodeHello(token, bbsid, handle, vehicle, color, nil, body, proto.ProtocolVersion, version, getParty())); err != nil {
+	if err := proto.WriteMsg(conn, proto.EncodeHello(token, bbsid, handle, color, body, false, proto.ProtocolVersion, version, getParty())); err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -471,11 +471,11 @@ func (s *netSession) readLoop() {
 
 // sendChangeChar tells the arena to swap our character; it takes effect on our
 // next respawn. Best-effort on the live game connection (serialized with step).
-func (s *netSession) sendChangeChar(vehicle, body int, color [3]float64) {
+func (s *netSession) sendChangeChar(body int, color [3]float64) {
 	token := loadINI(defaultINIPath())["token"]
 	s.wmu.Lock()
 	s.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-	_ = proto.WriteMsg(s.conn, proto.EncodeChangeChar(token, vehicle, color, nil, body))
+	_ = proto.WriteMsg(s.conn, proto.EncodeChangeChar(token, color, body))
 	s.wmu.Unlock()
 }
 
