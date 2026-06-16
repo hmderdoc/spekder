@@ -444,7 +444,7 @@ func (s *netSession) readLoop() {
 		if len(msg) > 0 && msg[0] == proto.MsgBalance {
 			if bal, ok := proto.DecodeBalance(msg); ok {
 				gm.ApplyBalance(bal) // adopt the arena's authoritative tuning over our compiled defaults
-				logf("received roster balance (%d chassis, %d bodies)", len(bal.Chassis), len(bal.Bodies))
+				logf("received roster balance (%d rows, %d bodies)", len(bal.Rows), len(bal.Bodies))
 			}
 			continue
 		}
@@ -520,7 +520,7 @@ func (s *netSession) step(dt float64, in gm.Input) viewState {
 		s.predPos, s.predHull, s.predTur, s.predPitch, s.predVy = self.Pos, self.HullYaw, self.TurretYaw, self.TurretPitch, 0
 	} else {
 		solids := gm.SolidBoxes(cmap, latestEnts) // block on alive solid entities, matching the server
-		pveh := gm.Veh(self.Vehicle)
+		pveh := gm.VehBody(self.Body)
 		if s.predVeh != nil { // custom build: predict with our tuned stats, not the chassis
 			pveh = *s.predVeh
 		}

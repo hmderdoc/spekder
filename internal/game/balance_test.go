@@ -21,13 +21,13 @@ func TestApplyBalanceRetunes(t *testing.T) {
 	t.Cleanup(func() { ApplyBalance(saved) })
 
 	bal := CurrentBalance()
-	// nerf chassis 1 (TANK) HP and buff the tiger's (BodyQuad) speed.
-	bal.Chassis[1].MaxHP = 42
+	// nerf the tiger's (BodyQuad) HP and buff its speed - per-character now.
+	bal.Rows[BodyQuad].MaxHP = 42
 	bal.Bodies[BodyQuad].SpeedMul = 2.5
 	ApplyBalance(bal)
 
-	if veh(1).MaxHP != 42 {
-		t.Errorf("chassis MaxHP not applied: got %d, want 42", veh(1).MaxHP)
+	if VehBody(BodyQuad).MaxHP != 42 {
+		t.Errorf("per-body MaxHP not applied: got %d, want 42", VehBody(BodyQuad).MaxHP)
 	}
 	if got := BodySpeedMul(BodyQuad); got != 2.5 {
 		t.Errorf("body speedMul not applied: got %v, want 2.5", got)
@@ -38,7 +38,7 @@ func TestApplyBalanceRetunes(t *testing.T) {
 	}
 
 	// CurrentBalance reflects the live tables.
-	if cur := CurrentBalance(); cur.Chassis[1].MaxHP != 42 || cur.Bodies[BodyQuad].SpeedMul != 2.5 {
-		t.Errorf("CurrentBalance did not reflect applied tuning: %+v", cur.Chassis[1])
+	if cur := CurrentBalance(); cur.Rows[BodyQuad].MaxHP != 42 || cur.Bodies[BodyQuad].SpeedMul != 2.5 {
+		t.Errorf("CurrentBalance did not reflect applied tuning: %+v", cur.Rows[BodyQuad])
 	}
 }

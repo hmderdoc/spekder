@@ -528,19 +528,21 @@ func (w *World) spawnActor(name string, pos V3) {
 		}
 		nidx := len(w.Tanks)
 		t := Tank{
-			Bot: true, Vehicle: ac.Vehicle, body: ac.Body, ammo: veh(ac.Vehicle).AmmoMax,
+			Bot: true, Vehicle: ac.Vehicle, body: ac.Body,
 			guard: spawnGuardTime, vote: -1, Color: BotPalette[nidx%len(BotPalette)], Name: botName(nidx),
 			Team: -1, Carrying: -1, weapon2: wepGrenade, Pos: pos,
 			Behaviors: ac.Behaviors, Watch: ac.Watch,
 			bDone: make([]bool, len(ac.Behaviors)), wHit: make([]bool, len(ac.Watch)),
 		}
+		// A scripted actor carries an authored chassis (stats) that may intentionally
+		// differ from its body, so pin it as a stat override: the 5 chassis live on
+		// as an authoring stat-preset palette even though the player roster is now
+		// per-character.
+		v := veh(ac.Vehicle)
 		if ac.MaxHP > 0 { // a tougher boss: a custom stat block sets its HP
-			v := veh(ac.Vehicle)
 			v.MaxHP = ac.MaxHP
-			t.custom, t.HP = &v, ac.MaxHP
-		} else {
-			t.HP = veh(ac.Vehicle).MaxHP
 		}
+		t.custom, t.HP, t.ammo = &v, v.MaxHP, v.AmmoMax
 		if slot >= 0 {
 			w.Tanks[slot] = t
 			w.rollBotAI(slot)
@@ -612,8 +614,9 @@ func (w *World) spawnBot(pos V3, vehicle, body int) {
 		}
 	}
 	n := len(w.Tanks)
+	v := veh(vehicle) // authored archetype chassis (stats), pinned as a per-tank override
 	t := Tank{
-		Bot: true, Vehicle: vehicle, body: body, HP: veh(vehicle).MaxHP, ammo: veh(vehicle).AmmoMax,
+		Bot: true, Vehicle: vehicle, body: body, custom: &v, HP: v.MaxHP, ammo: v.AmmoMax,
 		guard: spawnGuardTime, vote: -1, Color: BotPalette[n%len(BotPalette)], Name: botName(n),
 		Team: -1, Carrying: -1, weapon2: wepGrenade, Pos: pos,
 	}

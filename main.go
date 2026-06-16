@@ -3297,7 +3297,7 @@ func charVehicle(e vehEntry, s *userSettings) gm.Vehicle {
 		}
 		return gm.MakeCustom(s.customChassis, customFromLevels(lv))
 	}
-	return gm.Veh(e.vehicle)
+	return gm.VehBody(e.body)
 }
 
 // jumpFrac normalizes a jump impulse to 0..1 over the roster's range (~3..14).

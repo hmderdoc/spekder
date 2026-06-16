@@ -12,7 +12,7 @@ import (
 // client takes when it sees the message at all.
 func TestBalanceWireRoundTrip(t *testing.T) {
 	in := gm.CurrentBalance()
-	in.Chassis[0].MaxHP = 123
+	in.Rows[gm.BodyTrex].MaxHP = 123
 	in.Bodies[gm.BodyTrex].HPRegen = 7.5
 
 	enc := EncodeBalance(in)
@@ -23,19 +23,19 @@ func TestBalanceWireRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("DecodeBalance returned not-ok on a valid payload")
 	}
-	if len(out.Chassis) != len(in.Chassis) || len(out.Bodies) != len(in.Bodies) {
-		t.Fatalf("length mismatch: chassis %d/%d bodies %d/%d",
-			len(out.Chassis), len(in.Chassis), len(out.Bodies), len(in.Bodies))
+	if len(out.Rows) != len(in.Rows) || len(out.Bodies) != len(in.Bodies) {
+		t.Fatalf("length mismatch: rows %d/%d bodies %d/%d",
+			len(out.Rows), len(in.Rows), len(out.Bodies), len(in.Bodies))
 	}
-	if out.Chassis[0].MaxHP != 123 {
-		t.Errorf("MaxHP lost: got %d", out.Chassis[0].MaxHP)
+	if out.Rows[gm.BodyTrex].MaxHP != 123 {
+		t.Errorf("MaxHP lost: got %d", out.Rows[gm.BodyTrex].MaxHP)
 	}
 	if !approx(out.Bodies[gm.BodyTrex].HPRegen, 7.5) {
 		t.Errorf("HPRegen lost: got %v", out.Bodies[gm.BodyTrex].HPRegen)
 	}
-	for i := range in.Chassis {
-		if !approx(out.Chassis[i].Speed, in.Chassis[i].Speed) {
-			t.Errorf("chassis %d Speed drift: %v != %v", i, out.Chassis[i].Speed, in.Chassis[i].Speed)
+	for i := range in.Rows {
+		if !approx(out.Rows[i].Speed, in.Rows[i].Speed) {
+			t.Errorf("row %d Speed drift: %v != %v", i, out.Rows[i].Speed, in.Rows[i].Speed)
 		}
 	}
 

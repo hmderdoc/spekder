@@ -92,7 +92,7 @@ func appendTank(dst []Tri, t *gm.TankSnap, clock float64) []Tri {
 	if t.Healing {                   // mend halo: floating green +'s above the tank, color-independent
 		dst = appendHealHalo(dst, t, clock)
 	}
-	v := gm.Veh(t.Vehicle)
+	v := gm.VehBody(t.Body)
 	s := v.Scale // vehicle class sizes the model
 	if t.Body != gm.BodyTank {
 		return appendCreature(dst, t, xfHull, col, bright, s, clock)

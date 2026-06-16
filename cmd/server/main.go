@@ -41,11 +41,11 @@ func loadBalance(path string) error {
 	if err := json.Unmarshal(data, &bal); err != nil {
 		return fmt.Errorf("parse %s: %w", path, err)
 	}
-	if len(bal.Chassis) == 0 && len(bal.Bodies) == 0 {
-		return fmt.Errorf("%s has no chassis or body entries", path)
+	if len(bal.Rows) == 0 && len(bal.Bodies) == 0 {
+		return fmt.Errorf("%s has no character rows or body entries", path)
 	}
 	gm.ApplyBalance(bal)
-	log.Printf("balance: applied tuning from %s (%d chassis, %d bodies)", path, len(bal.Chassis), len(bal.Bodies))
+	log.Printf("balance: applied tuning from %s (%d rows, %d bodies)", path, len(bal.Rows), len(bal.Bodies))
 	return nil
 }
 

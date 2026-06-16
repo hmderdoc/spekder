@@ -450,8 +450,8 @@ func DecodeWelcome(p []byte) (id int, ok bool) {
 // balance tweaks deploy by restarting the server, not by re-shipping the door.
 func EncodeBalance(bal gm.Balance) []byte {
 	c := cursor{b: []byte{MsgBalance}}
-	c.u8(byte(len(bal.Chassis)))
-	for _, s := range bal.Chassis {
+	c.u8(byte(len(bal.Rows)))
+	for _, s := range bal.Rows {
 		c.u16(s.MaxHP)
 		c.f32(s.Speed)
 		c.f32(s.HullTurn)
@@ -476,10 +476,10 @@ func DecodeBalance(p []byte) (gm.Balance, bool) {
 		return gm.Balance{}, false
 	}
 	c := cursor{b: p, i: 1}
-	nc := int(c.ru8())
-	chassis := make([]gm.ChassisStats, 0, nc)
-	for i := 0; i < nc; i++ {
-		chassis = append(chassis, gm.ChassisStats{
+	nr := int(c.ru8())
+	rows := make([]gm.BodyRow, 0, nr)
+	for i := 0; i < nr; i++ {
+		rows = append(rows, gm.BodyRow{
 			MaxHP: c.ru16(), Speed: c.rf32(), HullTurn: c.rf32(), AimTurn: c.rf32(),
 			FireDelay: c.rf32(), Jump: c.rf32(), Scale: c.rf32(), AmmoMax: c.rf32(), AmmoRegen: c.rf32(),
 		})
@@ -492,7 +492,7 @@ func DecodeBalance(p []byte) (gm.Balance, bool) {
 	if c.err {
 		return gm.Balance{}, false
 	}
-	return gm.Balance{Chassis: chassis, Bodies: bodies}, true
+	return gm.Balance{Rows: rows, Bodies: bodies}, true
 }
 
 // ---- INPUT ----

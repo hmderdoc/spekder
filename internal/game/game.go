@@ -887,6 +887,10 @@ const (
 	stepUp        = 0.6   // max ledge/step a tank can mount without jumping
 	survivalLives = 3     // Survival: lives per human
 	survivalPool  = 12    // Survival: bot pool size for waves
+	// Survival per-wave enemy HP multiplier (replaces the old chassis-tier ramp).
+	// FIRST-PASS values - tune against play/balancesim.
+	survivalHPPerWave = 0.12 // +12% enemy HP per wave past the first
+	survivalHPMax     = 2.5  // cap the multiplier so late waves don't become sponges
 
 	ctfCaptureLimit = 3    // CTF: captures to win a match
 	ctfCaptureRad   = 2.6  // CTF: how close to your base to score a capture
@@ -944,12 +948,19 @@ func veh(i int) Vehicle {
 	return Vehicles[i]
 }
 
-// veh returns a tank's effective stats: its custom build if set, else its chassis.
+// veh returns a tank's effective stats: its custom build if set, else its own
+// per-character row (bodyVeh, keyed by body - the chassis indirection is gone).
+// A survival wave HP multiplier (hpScale) rides on top so escalating waves field
+// tougher enemies without borrowing a heavier chassis.
 func (t *Tank) veh() Vehicle {
 	if t.custom != nil {
 		return *t.custom
 	}
-	return veh(t.Vehicle)
+	v := VehBody(t.body)
+	if t.hpScale > 0 && t.hpScale != 1 {
+		v.MaxHP = int(float64(v.MaxHP) * t.hpScale)
+	}
+	return v
 }
 
 // CustomStats are the point-buy tunable sim stats; the rest (AimTurn, Jump, Scale,
@@ -1178,6 +1189,7 @@ type Tank struct {
 
 	regenDebt  float64 // passive HP regen: fractional carry between ticks
 	regenPause float64 // sec until regen resumes after taking damage
+	hpScale    float64 // survival wave HP multiplier (0/1 = none); see spawnWave
 	respawn    float64
 	guard      float64
 	vy         float64 // vertical velocity (jump/gravity)
@@ -1793,7 +1805,7 @@ func (w *World) assignHealers() {
 		t.body = BodyButterfly
 		t.Vehicle = ChassisFor(t.body) // SCOUT chassis: fragile flyer
 		t.custom, t.weapon2 = nil, wepHealBomb
-		t.HP, t.ammo = veh(t.Vehicle).MaxHP, veh(t.Vehicle).AmmoMax
+		t.HP, t.ammo = VehBody(t.body).MaxHP, VehBody(t.body).AmmoMax
 	}
 }
 
@@ -2303,7 +2315,7 @@ func NewWorld(numBots int, mode Mode) *World {
 		body := botBodies[rand.Intn(len(botBodies))] // character first; chassis follows
 		vi := ChassisFor(body)
 		w.Tanks = append(w.Tanks, Tank{
-			Bot: true, HP: veh(vi).MaxHP, ammo: veh(vi).AmmoMax, guard: spawnGuardTime, vote: -1, Vehicle: vi,
+			Bot: true, HP: VehBody(body).MaxHP, ammo: VehBody(body).AmmoMax, guard: spawnGuardTime, vote: -1, Vehicle: vi,
 			body:  body,
 			Color: BotPalette[b%len(BotPalette)], Name: botName(b), Team: -1, Carrying: -1, weapon2: wepGrenade,
 		})
@@ -2343,7 +2355,7 @@ func (w *World) AddPlayerCustom(color [3]float64, vehicle int, name string, cust
 		name = "PLAYER"
 	}
 	mk := func(i int) Tank {
-		eff := veh(vehicle)
+		eff := VehBody(body)
 		if custom != nil {
 			eff = *custom
 		}
@@ -2817,7 +2829,7 @@ func (w *World) fireBeam(p *Projectile, muzzle, d V3, def *WeaponDef) {
 			tk := &w.Tanks[ti]
 			sz := BodySizeScale(tk.body)
 			dx, dz := tk.Pos.X-pt.X, tk.Pos.Z-pt.Z
-			dyLow, dyHigh := tk.Pos.Y-0.3, tk.Pos.Y+tankBodyTop*veh(tk.Vehicle).Scale*sz
+			dyLow, dyHigh := tk.Pos.Y-0.3, tk.Pos.Y+tankBodyTop*VehBody(tk.body).Scale*sz
 			r := hitRadius * sz
 			if dx*dx+dz*dz < r*r && pt.Y >= dyLow && pt.Y <= dyHigh {
 				found = ti
@@ -3560,7 +3572,7 @@ func (w *World) setupSurvival() {
 		}
 	}
 	for bots < survivalPool {
-		w.Tanks = append(w.Tanks, Tank{Bot: true, gone: true, Dead: true, vote: -1, Vehicle: 1, HP: veh(1).MaxHP, ammo: veh(1).AmmoMax, Name: botName(len(w.Tanks)), Team: -1, Carrying: -1, weapon2: wepGrenade})
+		w.Tanks = append(w.Tanks, Tank{Bot: true, gone: true, Dead: true, vote: -1, Vehicle: 1, HP: VehBody(BodyTank).MaxHP, ammo: VehBody(BodyTank).AmmoMax, Name: botName(len(w.Tanks)), Team: -1, Carrying: -1, weapon2: wepGrenade})
 		bots++
 	}
 	for i := range w.Tanks {
@@ -3586,9 +3598,13 @@ func (w *World) spawnWave() {
 	if n > survivalPool {
 		n = survivalPool
 	}
-	vi := w.wave / 2
-	if vi > 2 {
-		vi = 2
+	// Survival escalation: enemies field their own per-character stats, scaled up
+	// each wave (the chassis-tier ramp retired with the chassis system). Tunable -
+	// this curve is a first pass and wants a balancesim/playtest tuning pass, since
+	// the baseline shifted when enemies stopped borrowing a heavier chassis.
+	hpScale := 1.0 + survivalHPPerWave*float64(w.wave-1)
+	if hpScale > survivalHPMax {
+		hpScale = survivalHPMax
 	}
 	act := 0
 	for i := range w.Tanks {
@@ -3598,8 +3614,10 @@ func (w *World) spawnWave() {
 		}
 		if act < n {
 			t.gone, t.Dead = false, false
-			t.Vehicle, t.HP = vi, veh(vi).MaxHP
 			t.body = survivalBodies[(w.wave-1+act)%len(survivalBodies)] // bestiary: a shifting mix per wave
+			t.Vehicle = ChassisFor(t.body)                              // vestigial wire id, kept consistent with the body
+			t.hpScale = hpScale
+			t.HP = t.veh().MaxHP // per-character HP, scaled by the wave multiplier
 			t.guard, t.cooldown, t.vy, t.TurretYaw = spawnGuardTime, 0, 0, 0
 			t.Color = BotPalette[act%len(BotPalette)]
 			t.Pos = w.spawnPoint(i)
@@ -4969,7 +4987,7 @@ func EffectiveJump(body, chassis int) float64 {
 	if j := bodyDefFor(body).jump; j > 0 {
 		return j
 	}
-	return veh(chassis).Jump
+	return VehBody(body).Jump
 }
 
 // bodyDefFor returns a body's definition with any server-pushed numeric balance
@@ -5038,45 +5056,63 @@ func bodyDefBuiltin(body int) bodyDef {
 // (the server's combat math still governs the fight), so the push is additive
 // and never forces a client update.
 
-// ChassisStats are the pushable numeric stats of one chassis (Vehicles entry).
-// Name/Desc are intentionally omitted - identity, not tuning.
-type ChassisStats struct {
+// BodyRow is the pushable numeric stat row of one character (per body now - the
+// shared chassis is gone). Name/Desc are intentionally omitted - identity, not
+// tuning.
+type BodyRow struct {
 	MaxHP                                                                int
 	Speed, HullTurn, AimTurn, FireDelay, Jump, Scale, AmmoMax, AmmoRegen float64
 }
 
-// BodyStats are the pushable numeric overrides of one character body. The kit
-// (weapon, muzzle, fly/leap/climb) stays compiled in; only these scalars travel.
+// BodyStats are the pushable per-body kit-modifier scalars layered over the row.
+// The kit itself (weapon, muzzle, fly/leap/climb) stays compiled in; only these
+// scalars travel.
 type BodyStats struct {
 	Jump, HPRegen, SpeedMul float64
 }
 
-// Balance is the full pushable tuning table: chassis by index, bodies by index.
+// Balance is the full pushable tuning table: a stat row per body, plus the
+// per-body scalar modifiers. Both are indexed by body.
 type Balance struct {
-	Chassis []ChassisStats
-	Bodies  []BodyStats
+	Rows   []BodyRow
+	Bodies []BodyStats
 }
 
-// bodyBal is the live numeric layer for bodies, seeded from the builtin defs so
-// the resolved values are byte-identical until a push overrides them.
-var bodyBal []BodyStats
+// bodyVeh is the per-character stat table (the runtime source of truth, replacing
+// the chassis indirection). bodyBal is the live scalar layer. Both are seeded so
+// resolved stats are byte-identical to the old chassis system until a push (or a
+// per-character edit) changes them.
+var (
+	bodyVeh []Vehicle
+	bodyBal []BodyStats
+)
 
 func init() {
+	bodyVeh = make([]Vehicle, BodyKinds)
 	bodyBal = make([]BodyStats, BodyKinds)
 	for b := 0; b < BodyKinds; b++ {
+		bodyVeh[b] = veh(ChassisFor(b)) // seed each character from the chassis it used to ride
 		d := bodyDefBuiltin(b)
 		bodyBal[b] = BodyStats{Jump: d.jump, HPRegen: d.hpRegen, SpeedMul: d.speedMul}
 	}
 }
 
+// VehBody returns a character's stat row by body (TANK's row if out of range).
+func VehBody(body int) Vehicle {
+	if body < 0 || body >= len(bodyVeh) {
+		body = BodyTank
+	}
+	return bodyVeh[body]
+}
+
 // CurrentBalance snapshots the live tables - what the server sends to clients.
 func CurrentBalance() Balance {
 	bal := Balance{
-		Chassis: make([]ChassisStats, len(Vehicles)),
-		Bodies:  make([]BodyStats, len(bodyBal)),
+		Rows:   make([]BodyRow, len(bodyVeh)),
+		Bodies: make([]BodyStats, len(bodyBal)),
 	}
-	for i, v := range Vehicles {
-		bal.Chassis[i] = ChassisStats{
+	for i, v := range bodyVeh {
+		bal.Rows[i] = BodyRow{
 			MaxHP: v.MaxHP, Speed: v.Speed, HullTurn: v.HullTurn, AimTurn: v.AimTurn,
 			FireDelay: v.FireDelay, Jump: v.Jump, Scale: v.Scale, AmmoMax: v.AmmoMax, AmmoRegen: v.AmmoRegen,
 		}
@@ -5085,14 +5121,15 @@ func CurrentBalance() Balance {
 	return bal
 }
 
-// ApplyBalance overwrites the live tables with a pushed (or file-loaded) tuning.
-// It is bounds-safe and index-aligned: entries past the local table length are
-// ignored, and a shorter push leaves the rest at their built-in values, so a
-// client and server with different roster sizes still interoperate.
+// ApplyBalance overwrites the live per-character tables with a pushed (or
+// file-loaded) tuning. Bounds-safe and index-aligned by body: entries past the
+// local table length are ignored, and a shorter push leaves the rest at their
+// built-in values, so a client and server with different roster sizes still
+// interoperate.
 func ApplyBalance(bal Balance) {
-	for i := 0; i < len(bal.Chassis) && i < len(Vehicles); i++ {
-		c := bal.Chassis[i]
-		v := &Vehicles[i]
+	for i := 0; i < len(bal.Rows) && i < len(bodyVeh); i++ {
+		c := bal.Rows[i]
+		v := &bodyVeh[i]
 		v.MaxHP, v.Speed, v.HullTurn, v.AimTurn = c.MaxHP, c.Speed, c.HullTurn, c.AimTurn
 		v.FireDelay, v.Jump, v.Scale, v.AmmoMax, v.AmmoRegen = c.FireDelay, c.Jump, c.Scale, c.AmmoMax, c.AmmoRegen
 	}
