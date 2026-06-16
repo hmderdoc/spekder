@@ -1134,6 +1134,9 @@ type Tank struct {
 	cooldown   float64
 	cooldown2  float64 // secondary-weapon recharge
 	weapon2    int     // secondary weapon index (into Weapons); fired with the B key
+	wp2Used    int     // charge-stock secondaries: charges consumed (0 = full); regens via wp2RegenT
+	wp2RegenT  float64 // time until the next consumed charge regenerates
+	pounceT    float64 // tiger POUNCE active window: a kill during it refunds the dash
 	ammo       float64 // regenerating ammo pool (soft fire limit); max/regen per vehicle
 	slowT      float64 // EffSlow remaining (sec)
 	slowMag    float64 // EffSlow magnitude (fraction of speed removed)
@@ -1421,6 +1424,11 @@ type WeaponDef struct {
 	Affects  Target
 	Glyph    byte      // wire-cheap render hint                   [W4]
 	Cause    KillCause // kill-feed label (zero = CauseCannon)
+
+	// Charge-stock secondaries (crab claw): the B-weapon holds a small stock of
+	// charges that regenerate over time, instead of a single shared cooldown.
+	Charges     int     // >0 = charge-stock weapon (max charges; 0 = plain cooldown)
+	ChargeRegen float64 // sec to regenerate one consumed charge
 }
 
 // W4 delivery tuning.
@@ -1524,8 +1532,8 @@ var Weapons = []WeaponDef{
 	// Phase 2 adds its special mechanic (INK self-cloak / POUNCE dash+kill-reset / CLAW 2-charge stock); for now it behaves as a plain cone/melee.
 	{Name: "POUNCE", Delivery: DeliverMelee, Damage: 18, Blast: 2.6, Cooldown: 1.5, Cost: 2, Effect: Effect{Kind: EffDamage}, Affects: TargetFoes, Glyph: '*', Cause: CauseMelee},
 	// Phase 2 adds its special mechanic (INK self-cloak / POUNCE dash+kill-reset / CLAW 2-charge stock); for now it behaves as a plain cone/melee.
-	{Name: "CLAW", Delivery: DeliverMelee, Damage: 34, Blast: 3.0, Cooldown: 0.8, Cost: 2, Effect: Effect{Kind: EffKnockback, Mag: 2}, Affects: TargetFoes, Glyph: '*', Cause: CauseMelee},
-	{Name: "SAND", Delivery: DeliverCone, Damage: 6, Blast: 8, Cooldown: 0.5, Cost: 1, Effect: Effect{Kind: EffSlow, Mag: 0.4, Dur: 1.8}, Affects: TargetFoes, Glyph: ':'},
+	{Name: "CLAW", Delivery: DeliverMelee, Damage: 34, Blast: 3.0, Cooldown: 0.8, Cost: 2, Effect: Effect{Kind: EffKnockback, Mag: 2}, Affects: TargetFoes, Glyph: '*', Cause: CauseMelee, Charges: 2, ChargeRegen: 3.0},
+	{Name: "SAND", Delivery: DeliverCone, Damage: 0, Blast: 8, Cooldown: 0.5, Cost: 1, Effect: Effect{Kind: EffSlow, Mag: 0.4, Dur: 1.8}, Affects: TargetFoes, Glyph: ':'},
 }
 
 // Flag is a Flag Run pickup, or (in CTF) a team flag that can be carried,
@@ -2507,6 +2515,52 @@ func (w *World) foeInRange(i int, r float64) bool {
 }
 
 const lungeSpeed = 16.0 // forward leap speed for melee chargers (decays via stepLunge)
+
+const (
+	pounceWindow = 1.0 // tiger POUNCE: window after the dash in which a kill refunds it
+	inkCloakDur  = 2.0 // octopod INK: self-cloak duration the ink screen grants the caster
+)
+
+// fireSecondary fires tank i's B-weapon, honoring charge-stock weapons and any
+// on-cast self effect. Shared by the player path and the bot AI so both behave
+// identically.
+func (w *World) fireSecondary(i int) {
+	t := &w.Tanks[i]
+	if t.weapon2 <= 0 || t.weapon2 >= len(Weapons) {
+		return
+	}
+	def := &Weapons[t.weapon2]
+	if def.Charges > 0 { // charge-stock (crab claw: one per claw, regenerating)
+		if t.wp2Used >= def.Charges || t.cooldown2 > 0 {
+			return
+		}
+		w.fireWeapon(i, def, true)
+		t.wp2Used++
+		if t.wp2RegenT <= 0 {
+			t.wp2RegenT = def.ChargeRegen
+		}
+	} else {
+		if t.cooldown2 > 0 {
+			return
+		}
+		w.fireWeapon(i, def, true)
+	}
+	w.onSecondaryCast(i, t.weapon2)
+}
+
+// onSecondaryCast applies a secondary's on-cast self effect (dash, cloak).
+func (w *World) onSecondaryCast(i, wpn int) {
+	t := &w.Tanks[i]
+	switch wpn {
+	case wepPounce: // tiger: dash forward; a kill during the window refunds it
+		// TODO(feel): damage along the dash path for a truer Swift-Strike
+		f := fwd(t.HullYaw)
+		t.lungeVX, t.lungeVZ = f.X*lungeSpeed, f.Z*lungeSpeed
+		t.pounceT = pounceWindow
+	case wepInk: // octopod: the ink screen also hides the octopod (escape)
+		t.cloakT = inkCloakDur
+	}
+}
 
 // BodySizeScale enlarges certain characters beyond the normalized size - both the
 // rendered model AND the hit footprint - so e.g. the T-Rex towers and is a
@@ -4417,6 +4471,17 @@ func (w *World) simulate(dt float64, inputs map[int]Input) {
 		if w.Tanks[i].cooldown2 > 0 {
 			w.Tanks[i].cooldown2 -= dt
 		}
+		if w.Tanks[i].pounceT > 0 {
+			w.Tanks[i].pounceT -= dt
+		}
+		if w.Tanks[i].wp2Used > 0 { // charge-stock secondaries regenerate one charge at a time
+			if w.Tanks[i].wp2RegenT -= dt; w.Tanks[i].wp2RegenT <= 0 {
+				w.Tanks[i].wp2Used--
+				if w.Tanks[i].wp2Used > 0 && w.Tanks[i].weapon2 > 0 && w.Tanks[i].weapon2 < len(Weapons) {
+					w.Tanks[i].wp2RegenT = Weapons[w.Tanks[i].weapon2].ChargeRegen
+				}
+			}
+		}
 		if w.Tanks[i].hookT > 0 {
 			w.Tanks[i].hookT -= dt
 		}
@@ -4753,8 +4818,8 @@ func (w *World) applyInput(i int, in Input, dt float64) {
 	}
 	// B is the barrier for the minotaur (handled above), not a weapon; everyone
 	// else fires their secondary.
-	if in.Fire2 && t.cooldown2 <= 0 && t.weapon2 > 0 && t.weapon2 < len(Weapons) && t.body != BodyMinotaur {
-		w.fireWeapon(i, &Weapons[t.weapon2], true) // B: secondary weapon
+	if in.Fire2 && t.body != BodyMinotaur {
+		w.fireSecondary(i) // B: secondary weapon (cooldown/charge/weapon2 gates live here)
 	}
 	if in.Drop {
 		w.dropFlag(i) // CTF: set the carried flag down where we stand
@@ -5357,6 +5422,16 @@ func (w *World) botMeleeRange(b *Tank) float64 {
 		}
 		return 4
 	}
+	// A character whose primary carries no damage (the crab's utility SAND cone)
+	// but whose secondary IS melee (the claw) has to close to strike range to do
+	// anything - treat its melee secondary as the rush distance so the bot commits.
+	if def.Effect.Kind != EffDamage && def.Damage <= 0 &&
+		b.weapon2 > 0 && b.weapon2 < len(Weapons) && Weapons[b.weapon2].Delivery == DeliverMelee {
+		if bl := Weapons[b.weapon2].Blast; bl > 0 {
+			return bl
+		}
+		return 4
+	}
 	return 0
 }
 
@@ -5435,7 +5510,14 @@ func (w *World) botMinotaurAI(i int, dt float64) {
 // too instead of only the cannon.
 func (w *World) botSecondary(i int, dist, angTo float64) {
 	b := &w.Tanks[i]
-	if b.weapon2 <= 0 || b.weapon2 >= len(Weapons) || b.cooldown2 > 0 {
+	if b.weapon2 <= 0 || b.weapon2 >= len(Weapons) {
+		return
+	}
+	if def2 := &Weapons[b.weapon2]; def2.Charges > 0 {
+		if b.wp2Used >= def2.Charges || b.cooldown2 > 0 {
+			return // charge-stock: out of charges or in the inter-snap gap
+		}
+	} else if b.cooldown2 > 0 {
 		return
 	}
 	if b.body == BodyTurtle || Weapons[b.weapon2].Affects == TargetAllies {
@@ -5459,6 +5541,10 @@ func (w *World) botSecondary(i int, dist, angTo float64) {
 		if hi <= lo {
 			hi = lo + 2
 		}
+	} else if def2 := &Weapons[b.weapon2]; def2.Delivery == DeliverMelee {
+		// A melee secondary (crab claw snap, tiger pounce) is a close-range
+		// commit: close the gap and strike, don't wait at lob range.
+		lo, hi = 0, def2.Blast+1.0
 	}
 	if dist < lo || dist > hi {
 		return
@@ -5467,7 +5553,7 @@ func (w *World) botSecondary(i int, dist, angTo float64) {
 		return
 	}
 	if rand.Float64() < p {
-		w.fireWeapon(i, &Weapons[b.weapon2], true)
+		w.fireSecondary(i)
 	}
 }
 
@@ -5821,6 +5907,9 @@ func (w *World) hurt(ti, dmg, owner int, cause KillCause) {
 	if owner >= 0 && owner < len(w.Tanks) && owner != ti {
 		w.Tanks[owner].Kills++
 		killer = owner
+		if w.Tanks[owner].pounceT > 0 {
+			w.Tanks[owner].cooldown2 = 0 // POUNCE kill refunds the dash (Genji-style chain)
+		}
 	}
 	w.kills = append(w.kills, KillEvent{Killer: killer, Victim: ti, Cause: cause})
 }
@@ -6303,6 +6392,7 @@ func (w *World) respawns(dt float64) {
 			t.Dead = false
 			t.HP = t.veh().MaxHP
 			t.ammo = t.veh().AmmoMax
+			t.wp2Used, t.wp2RegenT, t.pounceT = 0, 0, 0
 			t.TurretYaw = 0
 			t.guard = spawnGuardTime
 			t.Pos = w.spawnPoint(i)
