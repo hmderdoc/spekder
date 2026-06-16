@@ -1131,15 +1131,18 @@ type Tank struct {
 	Kills       int
 	Deaths      int
 
-	cooldown  float64
-	cooldown2 float64 // secondary-weapon recharge
-	weapon2   int     // secondary weapon index (into Weapons); fired with the B key
-	ammo      float64 // regenerating ammo pool (soft fire limit); max/regen per vehicle
-	slowT     float64 // EffSlow remaining (sec)
-	slowMag   float64 // EffSlow magnitude (fraction of speed removed)
-	boostT    float64 // EffSpeed remaining (sec)
-	boostMag  float64 // EffSpeed magnitude (fraction of speed added)
-	shellT    float64 // turtle shell mode remaining (sec): immobile + invulnerable
+	cooldown   float64
+	cooldown2  float64 // secondary-weapon recharge
+	weapon2    int     // secondary weapon index (into Weapons); fired with the B key
+	ammo       float64 // regenerating ammo pool (soft fire limit); max/regen per vehicle
+	slowT      float64 // EffSlow remaining (sec)
+	slowMag    float64 // EffSlow magnitude (fraction of speed removed)
+	boostT     float64 // EffSpeed remaining (sec)
+	boostMag   float64 // EffSpeed magnitude (fraction of speed added)
+	slipT      float64 // EffSlip remaining (sec): no steering, helpless slide
+	dmgDownT   float64 // EffDamageDown remaining (sec): outgoing damage cut
+	dmgDownMag float64 // fraction of outgoing damage removed while dmgDownT>0
+	shellT     float64 // turtle shell mode remaining (sec): immobile + invulnerable
 
 	// Minotaur barrier (Reinhardt-style): a held frontal shield with its own HP
 	// that absorbs damage from the front, regenerates while lowered, and shatters
@@ -1385,6 +1388,7 @@ const (
 	EffDrain                        // damage over time that leeches the HP to the shooter
 	EffBleed                        // damage over time from a wound (no leech; red tint)
 	EffPull                         // yank the target in toward the shooter (the elephant's hook)
+	EffSlip                         // no steering, helpless forward slide (timed)  [W2+]
 )
 
 // Target selects who a weapon's effect applies to.
@@ -1457,6 +1461,18 @@ const (
 	wepGun     // humanoid sidearm: fast, accurate bolt (the cannon was a tank-era artifact)
 	wepSlash   // mantis lunge-strike: melee slash that pairs with a forward leap
 	wepSpit    // insect acid spray: rapid cheap bolts + light poison (uses the deep magazine)
+	// Secondary-weapons overhaul (Phase 1): per-character themed B-weapons.
+	wepSpine  // mantis spine: light bolt that leaves a bleed
+	wepSting  // scorpion sting: melee strike with a poison payload
+	wepVSpray // serpent spray: slowing cone
+	wepWeb    // insect web: lobbed heavy-slow glob
+	wepInk    // octopod ink: slowing cone (Phase 2: self-cloak)
+	wepRoar   // t-rex roar: melee debuff that cuts a foe's outgoing damage
+	wepBanana // gorilla banana: lobbed peel that makes a foe slip
+	wepSmoke  // tank smoke: lobbed slowing cloud (default body secondary)
+	wepPounce // tiger pounce: melee leap-strike (Phase 2: dash + kill-reset)
+	wepClaw   // crab claw: heavy melee with knockback (Phase 2: 2-charge stock)
+	wepSand   // crab sand: fast cheap slowing cone (crab primary)
 )
 
 // Weapons is the built-in weapon palette. Referenced by index. CANNON preserves
@@ -1495,6 +1511,21 @@ var Weapons = []WeaponDef{
 	{Name: "GUN", Delivery: DeliverBolt, Damage: 18, Speed: 28, Cooldown: 0.40, Cost: 1, Effect: Effect{Kind: EffDamage}, Affects: TargetFoes, Glyph: 'o'},
 	{Name: "SLASH", Delivery: DeliverMelee, Damage: 24, Blast: 3.0, Cooldown: 0.5, Cost: 1, Effect: Effect{Kind: EffDamage}, Affects: TargetFoes, Glyph: '*', Cause: CauseMelee},
 	{Name: "SPIT", Delivery: DeliverBolt, Damage: 7, Speed: 26, Cooldown: 0.22, Cost: 1, Effect: Effect{Kind: EffPoison, Mag: 3, Dur: 2}, Affects: TargetFoes, Glyph: ':', Cause: CausePoison},
+	// Secondary-weapons overhaul (Phase 1): first-pass stats, tuned later via balancesim.
+	{Name: "SPINE", Delivery: DeliverBolt, Damage: 8, Speed: 28, Cooldown: 1.0, Cost: 2, Effect: Effect{Kind: EffBleed, Mag: 4, Dur: 3}, Affects: TargetFoes, Glyph: '\'', Cause: CauseBleed},
+	{Name: "STING", Delivery: DeliverMelee, Damage: 12, Blast: 2.6, Cooldown: 1.3, Cost: 2, Effect: Effect{Kind: EffPoison, Mag: 6, Dur: 4}, Affects: TargetFoes, Glyph: '*', Cause: CausePoison},
+	{Name: "SPRAY", Delivery: DeliverCone, Damage: 6, Blast: 7, Cooldown: 2.2, Cost: 2, Effect: Effect{Kind: EffSlow, Mag: 0.45, Dur: 2.5}, Affects: TargetFoes, Glyph: '~', Cause: CausePoison},
+	{Name: "WEB", Delivery: DeliverLob, Speed: 20, Arc: lobGravity, Blast: 4, Cooldown: 2.5, Cost: 3, Effect: Effect{Kind: EffSlow, Mag: 0.7, Dur: 3}, Affects: TargetFoes, Glyph: '#'},
+	// Phase 2 adds its special mechanic (INK self-cloak / POUNCE dash+kill-reset / CLAW 2-charge stock); for now it behaves as a plain cone/melee.
+	{Name: "INK", Delivery: DeliverCone, Blast: 8, Cooldown: 3.0, Cost: 3, Effect: Effect{Kind: EffSlow, Mag: 0.5, Dur: 2.5}, Affects: TargetFoes, Glyph: '~'},
+	{Name: "ROAR", Delivery: DeliverMelee, Blast: 6, Cooldown: 6.0, Cost: 3, Effect: Effect{Kind: EffDamageDown, Mag: 0.35, Dur: 4}, Affects: TargetFoes, Glyph: '!', Cause: CauseMelee},
+	{Name: "BANANA", Delivery: DeliverLob, Damage: 4, Speed: 18, Arc: lobGravity, Blast: 3.5, Cooldown: 2.5, Cost: 2, Effect: Effect{Kind: EffSlip, Dur: 1.2}, Affects: TargetFoes, Glyph: '('},
+	{Name: "SMOKE", Delivery: DeliverLob, Speed: 16, Arc: lobGravity, Blast: 6, Cooldown: 4.0, Cost: 2, Effect: Effect{Kind: EffSlow, Mag: 0.4, Dur: 3}, Affects: TargetFoes, Glyph: '%'},
+	// Phase 2 adds its special mechanic (INK self-cloak / POUNCE dash+kill-reset / CLAW 2-charge stock); for now it behaves as a plain cone/melee.
+	{Name: "POUNCE", Delivery: DeliverMelee, Damage: 18, Blast: 2.6, Cooldown: 1.5, Cost: 2, Effect: Effect{Kind: EffDamage}, Affects: TargetFoes, Glyph: '*', Cause: CauseMelee},
+	// Phase 2 adds its special mechanic (INK self-cloak / POUNCE dash+kill-reset / CLAW 2-charge stock); for now it behaves as a plain cone/melee.
+	{Name: "CLAW", Delivery: DeliverMelee, Damage: 34, Blast: 3.0, Cooldown: 0.8, Cost: 2, Effect: Effect{Kind: EffKnockback, Mag: 2}, Affects: TargetFoes, Glyph: '*', Cause: CauseMelee},
+	{Name: "SAND", Delivery: DeliverCone, Damage: 6, Blast: 8, Cooldown: 0.5, Cost: 1, Effect: Effect{Kind: EffSlow, Mag: 0.4, Dur: 1.8}, Affects: TargetFoes, Glyph: ':'},
 }
 
 // Flag is a Flag Run pickup, or (in CTF) a team flag that can be carried,
@@ -4400,6 +4431,12 @@ func (w *World) simulate(dt float64, inputs map[int]Input) {
 		if w.Tanks[i].slowT > 0 {
 			w.Tanks[i].slowT -= dt
 		}
+		if w.Tanks[i].slipT > 0 {
+			w.Tanks[i].slipT -= dt
+		}
+		if w.Tanks[i].dmgDownT > 0 {
+			w.Tanks[i].dmgDownT -= dt
+		}
 		if w.Tanks[i].guard > 0 {
 			w.Tanks[i].guard -= dt
 		}
@@ -4626,26 +4663,34 @@ func (w *World) applyInput(i int, in Input, dt float64) {
 	if t.shieldUp { // a braced barrier slows the advance
 		spd *= minoShieldMoveMul
 	}
-	if in.Throttle {
-		t.Pos = t.Pos.Add(V3{f.X * spd * dt, 0, f.Z * spd * dt})
-	}
-	if in.Reverse {
-		t.Pos = t.Pos.Sub(V3{f.X * spd * dt, 0, f.Z * spd * dt})
-	}
-	if in.StrafeL || in.StrafeR { // sidestep along the right vector (f rotated -90)
-		rt := V3{f.Z, 0, -f.X}
-		if in.StrafeR {
-			t.Pos = t.Pos.Add(V3{rt.X * spd * dt, 0, rt.Z * spd * dt})
+	// EffSlip (banana): no driver control - the tank slides helplessly forward at
+	// 60% speed in its current facing and can't steer the hull. Turret aim below
+	// still works. Server-authoritative; client reconciles to it.
+	// TODO(phase2): slip needs a wire bit so client prediction respects it.
+	if t.slipT > 0 {
+		t.Pos = t.Pos.Add(V3{f.X * spd * 0.6 * dt, 0, f.Z * spd * 0.6 * dt})
+	} else {
+		if in.Throttle {
+			t.Pos = t.Pos.Add(V3{f.X * spd * dt, 0, f.Z * spd * dt})
 		}
-		if in.StrafeL {
-			t.Pos = t.Pos.Sub(V3{rt.X * spd * dt, 0, rt.Z * spd * dt})
+		if in.Reverse {
+			t.Pos = t.Pos.Sub(V3{f.X * spd * dt, 0, f.Z * spd * dt})
 		}
-	}
-	if in.HullL {
-		t.HullYaw -= v.HullTurn * dt
-	}
-	if in.HullR {
-		t.HullYaw += v.HullTurn * dt
+		if in.StrafeL || in.StrafeR { // sidestep along the right vector (f rotated -90)
+			rt := V3{f.Z, 0, -f.X}
+			if in.StrafeR {
+				t.Pos = t.Pos.Add(V3{rt.X * spd * dt, 0, rt.Z * spd * dt})
+			}
+			if in.StrafeL {
+				t.Pos = t.Pos.Sub(V3{rt.X * spd * dt, 0, rt.Z * spd * dt})
+			}
+		}
+		if in.HullL {
+			t.HullYaw -= v.HullTurn * dt
+		}
+		if in.HullR {
+			t.HullYaw += v.HullTurn * dt
+		}
 	}
 	if in.TurretL {
 		t.TurretYaw -= v.AimTurn * dt
@@ -4948,31 +4993,31 @@ func bodyDefFor(body int) bodyDef {
 func bodyDefBuiltin(body int) bodyDef {
 	switch body {
 	case BodyScorpion:
-		return bodyDef{weapon: wepLaser, muzzle: V3{0, 2.2, 0.2}, hpRegen: 1.5} // arched tail
+		return bodyDef{weapon: wepLaser, secondary: wepSting, muzzle: V3{0, 2.2, 0.2}, hpRegen: 1.5} // arched tail
 	case BodySerpent:
-		return bodyDef{weapon: wepVenom, muzzle: V3{0, 1.0, 1.6}, hpRegen: 3} // poison spit from the raised head
+		return bodyDef{weapon: wepVenom, secondary: wepVSpray, muzzle: V3{0, 1.0, 1.6}, hpRegen: 3} // poison spit from the raised head
 	case BodySpider: // retired from the roster
 		return bodyDef{weapon: wepSlower, muzzle: V3{0, 0.8, 1.3}} // web from the fangs
 	case BodyCrab:
-		return bodyDef{weapon: wepGrenade, secondary: wepMine, muzzle: V3{0.6, 0.8, 0.9}} // claw lob; drops mines behind
+		return bodyDef{weapon: wepSand, secondary: wepClaw, muzzle: V3{0.6, 0.8, 0.9}} // sand spray; heavy claw melee
 	case BodyOctopod:
-		return bodyDef{weapon: wepSlower, muzzle: V3{0, 1.0, 0.8}, hpRegen: 2} // ink
+		return bodyDef{weapon: wepSlower, secondary: wepInk, muzzle: V3{0, 1.0, 0.8}, hpRegen: 2} // ink
 	case BodyInsect:
-		return bodyDef{weapon: wepSpit, muzzle: V3{0, 0.8, 1.0}, climb: true, hpRegen: 2, speedMul: 1.45} // scuttles fast and scales walls; sprays its deep artillery magazine
+		return bodyDef{weapon: wepSpit, secondary: wepWeb, muzzle: V3{0, 0.8, 1.0}, climb: true, hpRegen: 2, speedMul: 1.45} // scuttles fast and scales walls; sprays its deep artillery magazine
 	case BodyHumanoid:
-		return bodyDef{weapon: wepGun, muzzle: V3{0.4, 1.6, 0.4}, hpRegen: 1.5} // fires a sidearm from the hand
+		return bodyDef{weapon: wepGun, secondary: wepGrenade, muzzle: V3{0.4, 1.6, 0.4}, hpRegen: 1.5} // fires a sidearm from the hand
 	case BodyQuad: // the tiger: pounce in (leap), scratch for a bleed, lick wounds (regen)
-		return bodyDef{weapon: wepScratch, jump: 12, leap: true, muzzle: V3{0, 0.9, 1.0}, hpRegen: 3.5, speedMul: 1.2}
+		return bodyDef{weapon: wepScratch, secondary: wepPounce, jump: 12, leap: true, muzzle: V3{0, 0.9, 1.0}, hpRegen: 3.5, speedMul: 1.2}
 	case BodyButterfly:
 		return bodyDef{weapon: wepMedic, secondary: wepHealBomb, fly: true, muzzle: V3{0, 1.6, 0.6}, hpRegen: 2.5} // heal beam + heal bombs, flies
 	case BodyMantis:
-		return bodyDef{weapon: wepSlash, jump: 12, leap: true, muzzle: V3{0.3, 1.4, 0.7}, hpRegen: 2} // raptorial forearm: leaps in and slashes
+		return bodyDef{weapon: wepSlash, secondary: wepSpine, jump: 12, leap: true, muzzle: V3{0.3, 1.4, 0.7}, hpRegen: 2} // raptorial forearm: leaps in and slashes
 	case BodyTurtle:
 		return bodyDef{weapon: wepSnap, jump: 4, muzzle: V3{0, 0.7, 1.1}} // bunker: snapping bite up close, B = shell up
 	case BodyTrex:
-		return bodyDef{weapon: wepFlame, jump: 7, muzzle: V3{0, 2.4, 1.6}} // towering fire-breather (jaws)
+		return bodyDef{weapon: wepFlame, secondary: wepRoar, jump: 7, muzzle: V3{0, 2.4, 1.6}} // towering fire-breather (jaws)
 	case BodyGorilla:
-		return bodyDef{weapon: wepPound, jump: 13, leap: true, muzzle: V3{0, 1.2, 0.6}, hpRegen: 1} // melee bruiser: leaps in, pounds everyone in range
+		return bodyDef{weapon: wepPound, secondary: wepBanana, jump: 13, leap: true, muzzle: V3{0, 1.2, 0.6}, hpRegen: 1} // melee bruiser: leaps in, pounds everyone in range
 	case BodyElephant:
 		return bodyDef{weapon: wepTusks, secondary: wepAegis, jump: 5, muzzle: V3{0, 1.6, 1.4}} // support tank: gores up close, trunk-sprays shields
 	case BodyFalcon:
@@ -4982,7 +5027,7 @@ func bodyDefBuiltin(body int) bodyDef {
 	case BodyMinotaur:
 		return bodyDef{weapon: wepHammer, secondary: -1, jump: 8, leap: true, muzzle: V3{0, 1.7, 0.9}} // hammer + a B-toggled barrier; a gore-charge on jump
 	}
-	return bodyDef{weapon: -1, muzzle: V3{0, EyeHeight, 1.7}} // tank default
+	return bodyDef{weapon: -1, secondary: wepSmoke, muzzle: V3{0, EyeHeight, 1.7}} // tank default
 }
 
 // --- pushable balance (server-authoritative roster tuning) ------------------
@@ -5714,6 +5759,11 @@ func shieldFracOf(t *Tank) float64 {
 
 func (w *World) hurt(ti, dmg, owner int, cause KillCause) {
 	t := &w.Tanks[ti]
+	// EffDamageDown: the shooter is weakened, so trim everything it deals (direct
+	// hits and DoT ticks alike, since DoT routes through hurt too).
+	if owner >= 0 && owner < len(w.Tanks) && w.Tanks[owner].dmgDownT > 0 {
+		dmg = int(float64(dmg) * (1 - w.Tanks[owner].dmgDownMag))
+	}
 	// A regenerating shield buffer (elephant) soaks damage from any direction
 	// first; only the overflow reaches HP, and the hit pauses the buffer's regen.
 	if t.bufferHP > 0 && dmg > 0 {
@@ -6102,6 +6152,12 @@ func (w *World) applyShotHit(s *Projectile, ti int) {
 		t.hitFlash = tankHitFlash // brief blink as feedback
 	case EffSlow:
 		t.slowT, t.slowMag = s.dur, clampF01(s.mag)
+		t.hitFlash = tankHitFlash
+	case EffDamageDown:
+		t.dmgDownT, t.dmgDownMag = s.dur, clampF01(s.mag)
+		t.hitFlash = tankHitFlash
+	case EffSlip:
+		t.slipT = s.dur
 		t.hitFlash = tankHitFlash
 	case EffSpeed:
 		teammate := w.rules().Teams == 2 && s.owner >= 0 && s.owner < len(w.Tanks) && w.Tanks[s.owner].Team == t.Team

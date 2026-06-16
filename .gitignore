@@ -26,3 +26,6 @@
 # Server's live boards (built per-install from play, not source).
 /scores.json
 /players.json
+
+# Generated balancesim run (regenerable; not a committed doc)
+/BALANCE_CURRENT.txt
