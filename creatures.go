@@ -591,9 +591,9 @@ func appendSpider(dst []Tri, base func(V3) V3, col, bright [3]float64, s, clock 
 // so it reads as an animal, with a bob in the trot so it moves like one.
 func appendQuad(dst []Tri, base func(V3) V3, col, bright [3]float64, s, clock float64) []Tri {
 	legc := tint(col, 0.6)
-	bob := 0.03 * s * math.Sin(clock*10)                                                               // body rides the trot
-	hx := aimAt(base, curAim, V3{0, 0.7*s + bob, 0.5 * s})                                             // head tracks the aim
-	dst = box(dst, V3{0, 0.62*s + bob, 0}, V3{0.34 * s, 0.26 * s, 0.62 * s}, col, base)                // body
+	bob := 0.03 * s * math.Sin(clock*10)                                                // body rides the trot
+	hx := aimAt(base, curAim, V3{0, 0.7*s + bob, 0.5 * s})                              // head tracks the aim
+	dst = box(dst, V3{0, 0.62*s + bob, 0}, V3{0.34 * s, 0.26 * s, 0.62 * s}, col, base) // body
 	// Tiger stripes: dark bands ringing the torso (slightly proud of the body so
 	// they read on any chosen color), so it actually looks like a tiger.
 	stripe := tint(col, 0.2)

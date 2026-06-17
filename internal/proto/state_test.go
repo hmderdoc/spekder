@@ -22,8 +22,8 @@ func TestStateRoundTripCTF(t *testing.T) {
 		Kills:      []gm.KillEvent{{Killer: 1, Victim: 0, Cause: gm.CauseCannon}, {Killer: -1, Victim: 1, Cause: gm.CauseHazard}},
 	}
 	tanks := []gm.TankSnap{
-		{ID: 0, Pos: gm.V3{X: 1, Y: 0, Z: -3}, HP: 80, Name: "DERDOK", Team: 0, Carrying: true, Lives: 0, Shield: true, TurretPitch: 0.35, HoldScore: 7, Shell: true, Poisoned: true, Bleeding: true, Healing: true},
-		{ID: 1, Pos: gm.V3{X: -2, Y: 0, Z: 4}, HP: 100, Name: "RAZOR", Team: 1, Carrying: false, Bot: true, Body: gm.BodySpider, Cloak: true, Rapid: true, Burning: true, ShieldUp: true, ShieldFrac: 0.5},
+		{ID: 0, Pos: gm.V3{X: 1, Y: 0, Z: -3}, HP: 80, Name: "DERDOK", Team: 0, Carrying: true, Lives: 0, Shield: true, TurretPitch: 0.35, HoldScore: 7, Shell: true, Poisoned: true, Bleeding: true, Healing: true, Reload2: 0.5, Slip: true},
+		{ID: 1, Pos: gm.V3{X: -2, Y: 0, Z: 4}, HP: 100, Name: "RAZOR", Team: 1, Carrying: false, Bot: true, Body: gm.BodySpider, Cloak: true, Rapid: true, Burning: true, ShieldUp: true, ShieldFrac: 0.5, Charges: 1, MaxCharges: 2},
 	}
 	shots := []gm.ShotSnap{{Pos: gm.V3{X: 0, Y: gm.EyeHeight, Z: 0}, Vis: gm.VisGrenade}}
 	flags := []gm.FlagSnap{
@@ -126,6 +126,16 @@ func TestStateRoundTripCTF(t *testing.T) {
 	}
 	if !dt[0].Healing || dt[1].Healing {
 		t.Fatalf("healing bit wrong: t0=%v t1=%v", dt[0].Healing, dt[1].Healing)
+	}
+	// Secondary gauge + slip flag (protocol 7).
+	if !dt[0].Slip || dt[1].Slip {
+		t.Fatalf("slip flag wrong: t0=%v t1=%v", dt[0].Slip, dt[1].Slip)
+	}
+	if d := dt[0].Reload2 - 0.5; d > 1.0/255+1e-6 || d < -(1.0/255+1e-6) {
+		t.Fatalf("secondary reload2 lost over wire: got %v want ~0.5", dt[0].Reload2)
+	}
+	if dt[1].Charges != 1 || dt[1].MaxCharges != 2 {
+		t.Fatalf("secondary charges lost over wire: charges=%d max=%d", dt[1].Charges, dt[1].MaxCharges)
 	}
 	if len(ds) != 1 || ds[0].Vis != gm.VisGrenade {
 		t.Fatalf("shot lost over wire (incl. vis): %+v", ds)

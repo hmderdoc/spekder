@@ -35,12 +35,13 @@ func MapHash(m gm.Map) uint32 {
 //	4: MsgLobby entries carry a content hash (cache versioning).
 //	5: Input gained the lobby Ready bit; MatchSnap gained the locked-vote count.
 //	6: removed the wire vehicle byte and the CustomStats tail; HELLO/CHANGECHAR carry body + a publish flag (the chassis system retired).
+//	7: TankSnap gained the secondary gauge (reload2 + charge count) and a slip flag.
 //
 // MsgBalance (0x46) was added WITHOUT bumping this: it is a server->client push
 // an older client silently drops (unknown type -> ignored), so it neither
 // half-talks nor corrupts state. Bumping would hard-reject every deployed client
 // - the opposite of the goal (deploy balance without a client wave).
-const ProtocolVersion = 6
+const ProtocolVersion = 7
 
 const (
 	MsgHello      = 0x01 // client->server: token, bbsid, handle, client version
@@ -1180,6 +1181,9 @@ func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.Sh
 		if t.Healing {
 			fl2 |= 16
 		}
+		if t.Slip {
+			fl2 |= 32
+		}
 		w.u8(fl2)
 		w.u8(c255(t.ShieldFrac)) // minotaur barrier charge 0..1 (HUD gauge + fade)
 		w.u16(t.Kills)
@@ -1190,7 +1194,10 @@ func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.Sh
 		w.i16(t.Team)
 		w.u16(t.HoldScore)
 		w.u8(byte(t.Ammo * 255))
-		w.u16(t.ShotsFired) // per-match stat tallies
+		w.u8(byte(t.Reload2 * 255)) // secondary recharge 0..1 (0=ready)
+		w.u8(byte(t.Charges))       // remaining charge-weapon stock
+		w.u8(byte(t.MaxCharges))    // charge-weapon capacity (0 = cooldown weapon)
+		w.u16(t.ShotsFired)         // per-match stat tallies
 		w.u16(t.ShotsHit)
 		w.u16(t.Pickups)
 		w.u16(t.DmgDealt)
@@ -1302,6 +1309,7 @@ func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, sh
 		t.ShieldUp = fl2&4 != 0
 		t.Bleeding = fl2&8 != 0
 		t.Healing = fl2&16 != 0
+		t.Slip = fl2&32 != 0
 		t.ShieldFrac = float64(r.ru8()) / 255
 		t.Kills = r.ru16()
 		t.Deaths = r.ru16()
@@ -1311,6 +1319,9 @@ func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, sh
 		t.Team = r.ri16()
 		t.HoldScore = r.ru16()
 		t.Ammo = float64(r.ru8()) / 255
+		t.Reload2 = float64(r.ru8()) / 255
+		t.Charges = int(r.ru8())
+		t.MaxCharges = int(r.ru8())
 		t.ShotsFired = r.ru16()
 		t.ShotsHit = r.ru16()
 		t.Pickups = r.ru16()

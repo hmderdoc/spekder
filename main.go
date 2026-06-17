@@ -1118,6 +1118,41 @@ func drawHPBar(w *bufio.Writer, p *gm.TankSnap) {
 			b.WriteByte(0xB1)
 		}
 	}
+	// Secondary (B-key) gauge: the turtle SHELL and minotaur SHIELD already have
+	// their own dedicated readouts above, so only draw this for palette-weapon
+	// secondaries. Charge weapons (crab CLAW) show pips - one per stocked charge;
+	// cooldown weapons show a short recharge bar (full = ready).
+	if p.Body != gm.BodyTurtle && p.Body != gm.BodyMinotaur {
+		name := gm.SecondaryWeaponName(p.Body)
+		b.WriteString(fgEsc(170, 150, 220) + " \xb3" + name + " ")
+		if p.MaxCharges > 0 { // charge-stock: pips, filled = available
+			for i := 0; i < p.MaxCharges; i++ {
+				if i < p.Charges {
+					b.WriteString(fgEsc(180, 160, 235))
+					b.WriteByte(0xDB) // full block = a ready charge
+				} else {
+					b.WriteString(fgEsc(70, 70, 70))
+					b.WriteByte(0xB1) // shaded = spent/recharging
+				}
+			}
+		} else { // cooldown: a short bar, full when ready (Reload2 0 = ready, 1 = just fired)
+			const secLen = 6
+			ready := int((1-p.Reload2)*secLen + 0.5)
+			if ready > secLen {
+				ready = secLen
+			} else if ready < 0 {
+				ready = 0
+			}
+			b.WriteString(fgEsc(150, 130, 215))
+			for i := 0; i < ready; i++ {
+				b.WriteByte(0xDB)
+			}
+			b.WriteString(fgEsc(70, 70, 70))
+			for i := ready; i < secLen; i++ {
+				b.WriteByte(0xB1)
+			}
+		}
+	}
 	b.WriteString("\x1b[0m")
 	w.WriteString(b.String())
 }

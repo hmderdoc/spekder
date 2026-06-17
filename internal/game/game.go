@@ -1267,6 +1267,10 @@ type TankSnap struct {
 	RespawnIn              float64
 	Reload                 float64 // 0 = ready to fire, ->1 = just fired
 	Ammo                   float64 // regenerating ammo, 0..1 of capacity (HUD gauge)
+	Reload2                float64 // secondary recharge 0..1 (0=ready); cooldown weapons only
+	Charges                int     // charge-weapon: remaining stock
+	MaxCharges             int     // charge-weapon: capacity (0 = cooldown weapon)
+	Slip                   bool    // EffSlip: no steering, helpless slide (client predicts it)
 	HoldScore              int     // King of the Hill (FFA): hold-points
 }
 
@@ -1487,8 +1491,8 @@ const (
 // today's bolt; the rest carry effect payloads (resolved in applyShotHit) and/or
 // delivery kinds (resolved in fireWeapon / stepProjectiles).
 var Weapons = []WeaponDef{
-	{Name: "CANNON", Delivery: DeliverBolt, Damage: 24, Cost: 1, Effect: Effect{Kind: EffDamage}, Affects: TargetFoes, Glyph: 'o'}, // tank-only now; nerfed from the implicit projDmg (34) that made every cannon body top-tier
-	{Name: "SLOWER", Delivery: DeliverBolt, Cooldown: 1.0, Cost: 2, Effect: Effect{Kind: EffSlow, Mag: 0.55, Dur: 2.5}, Affects: TargetFoes, Glyph: '~'},
+	{Name: "CANNON", Delivery: DeliverBolt, Damage: 24, Cost: 1, Effect: Effect{Kind: EffDamage}, Affects: TargetFoes, Glyph: 'o'},                                   // tank-only now; nerfed from the implicit projDmg (34) that made every cannon body top-tier
+	{Name: "SLOWER", Delivery: DeliverBolt, Damage: 12, Cooldown: 1.0, Cost: 2, Effect: Effect{Kind: EffSlow, Mag: 0.55, Dur: 2.5}, Affects: TargetFoes, Glyph: '~'}, // octopod primary: chip + slow (first-pass dmg, tune in sim)
 	{Name: "MEDIC", Delivery: DeliverBolt, Damage: 8, Cooldown: 1.2, Cost: 2, Effect: Effect{Kind: EffHeal, Mag: 25}, Affects: TargetAllies, Glyph: '+'},
 	{Name: "KNOCKER", Delivery: DeliverBolt, Cooldown: 1.1, Cost: 2, Effect: Effect{Kind: EffKnockback, Mag: 4}, Affects: TargetFoes, Glyph: '*'},
 	{Name: "BUSTER", Delivery: DeliverBolt, Cooldown: 1.5, Cost: 2, Effect: Effect{Kind: EffShieldBust}, Affects: TargetFoes, Glyph: 'x'},
@@ -4730,8 +4734,8 @@ func (w *World) applyInput(i int, in Input, dt float64) {
 	}
 	// EffSlip (banana): no driver control - the tank slides helplessly forward at
 	// 60% speed in its current facing and can't steer the hull. Turret aim below
-	// still works. Server-authoritative; client reconciles to it.
-	// TODO(phase2): slip needs a wire bit so client prediction respects it.
+	// still works. Server-authoritative; the Slip wire bit lets the client predict
+	// the slide (net.go munges the predicted input) instead of rubber-banding.
 	if t.slipT > 0 {
 		t.Pos = t.Pos.Add(V3{f.X * spd * 0.6 * dt, 0, f.Z * spd * 0.6 * dt})
 	} else {
@@ -6240,6 +6244,10 @@ func (w *World) applyShotHit(s *Projectile, ti int) {
 		}
 		t.hitFlash = tankHitFlash // brief blink as feedback
 	case EffSlow:
+		teammate := w.rules().Teams == 2 && s.owner >= 0 && s.owner < len(w.Tanks) && w.Tanks[s.owner].Team == t.Team
+		if !teammate && s.dmg > 0 { // chip on top of the slow (octopod SLOWER, serpent SPRAY); pure-utility slows carry Damage 0
+			w.hurt(ti, s.dmg, s.owner, s.cause)
+		}
 		t.slowT, t.slowMag = s.dur, clampF01(s.mag)
 		t.hitFlash = tankHitFlash
 	case EffDamageDown:
@@ -6499,6 +6507,32 @@ func (w *World) Snapshot() ([]TankSnap, []ShotSnap, []FlagSnap, []PickupSnap) {
 				ammoFrac = 0
 			}
 		}
+		// Secondary gauge: charge weapons report a pip stock, cooldown weapons
+		// report a recharge fraction (mirrors the primary `reload` math).
+		var reload2 float64
+		var charges, maxCharges int
+		if t.weapon2 > 0 && t.weapon2 < len(Weapons) {
+			def := Weapons[t.weapon2]
+			if def.Charges > 0 { // charge-stock weapon: pips are the gauge
+				maxCharges = def.Charges
+				if charges = def.Charges - t.wp2Used; charges < 0 {
+					charges = 0
+				}
+				reload2 = 0
+			} else { // cooldown weapon: recharge fraction (0 = ready)
+				gap := def.Cooldown
+				if gap <= 0 {
+					gap = t.veh().FireDelay
+				}
+				if gap > 0 {
+					if reload2 = t.cooldown2 / gap; reload2 < 0 {
+						reload2 = 0
+					} else if reload2 > 1 {
+						reload2 = 1
+					}
+				}
+			}
+		}
 		ts = append(ts, TankSnap{
 			ID: i, Pos: t.Pos, HullYaw: t.HullYaw, TurretYaw: t.TurretYaw, TurretPitch: t.TurretPitch,
 			HP: t.HP, Color: t.Color, Name: t.Name, Dead: t.Dead, Bot: t.Bot,
@@ -6512,7 +6546,9 @@ func (w *World) Snapshot() ([]TankSnap, []ShotSnap, []FlagSnap, []PickupSnap) {
 			Body: t.body, ShotsFired: t.shotsFired, ShotsHit: t.shotsHit, Pickups: t.pickups,
 			DmgDealt: t.dmgDealt, HealDone: t.healDone,
 			Lives: t.lives, Team: t.Team, Carrying: t.Carrying >= 0,
-			Kills: t.Kills, Deaths: t.Deaths, RespawnIn: t.respawn, Reload: reload, Ammo: ammoFrac, HoldScore: t.holdScore,
+			Kills: t.Kills, Deaths: t.Deaths, RespawnIn: t.respawn, Reload: reload, Ammo: ammoFrac,
+			Reload2: reload2, Charges: charges, MaxCharges: maxCharges, Slip: t.slipT > 0,
+			HoldScore: t.holdScore,
 		})
 	}
 	sh := make([]ShotSnap, len(w.Shots))

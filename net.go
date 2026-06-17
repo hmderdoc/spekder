@@ -516,6 +516,14 @@ func (s *netSession) step(dt float64, in gm.Input) viewState {
 		solids := gm.SolidBoxes(cmap, latestEnts) // block on alive solid entities, matching the server
 		pveh := gm.VehBody(self.Body)
 		pveh.Speed *= gm.BodySpeedMul(self.Body) // match the sim's per-body speed (e.g. the fast insect)
+		if self.Slip {
+			// EffSlip (banana): the server forces a helpless forward slide with no
+			// steering. Munge the predicted input to match so prediction doesn't
+			// rubber-band against the server's slide.
+			in.HullL, in.HullR, in.Reverse = false, false, false
+			in.StrafeL, in.StrafeR = false, false
+			in.Throttle = true
+		}
 		s.predPos, s.predHull, s.predTur, s.predPitch, s.predVy = gm.Predict(s.predPos, s.predHull, s.predTur, s.predPitch, s.predVy, in, dt, pveh, cmap, solids)
 		dx, dz := self.Pos.X-s.predPos.X, self.Pos.Z-s.predPos.Z
 		if dx*dx+dz*dz > snapDist*snapDist {
