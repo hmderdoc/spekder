@@ -3360,23 +3360,104 @@ func drawStatBars(w *bufio.Writer, rightEdge, bottomRow int, e vehEntry, s *user
 // through, and fields are width-padded so a shorter name leaves no stale tail.
 func drawWeaponsBlock(w *bufio.Writer, col0, bottomRow int, e vehEntry, s *userSettings) {
 	body := e.body
-	passive := "none"
-	if r := gm.HPRegen(body); r > 0 {
-		passive = fmt.Sprintf("+%.1f HP/s", r)
-	}
-	primary := gm.WeaponName(gm.PrimaryWeapon(body))
+	primName := gm.WeaponName(gm.PrimaryWeapon(body))
 	if body == gm.BodyElephant {
-		primary = "HOOK/TUSK" // FIRE auto-picks by range: hook far, gore close
+		primName = "HOOK/TUSK" // FIRE auto-picks by range: hook far, gore close
 	}
-	rows := [][2]string{
-		{"PRIMARY", primary},
-		{"SECONDARY", gm.SecondaryWeaponName(body)}, // the turtle's B is its SHELL, not a weapon
-		{"PASSIVE", passive},                        // health regen (or none)
+	secName := gm.SecondaryWeaponName(body)
+	secAnn := ""
+	switch secName { // the turtle/minotaur B is a mode, not a palette weapon
+	case "SHELL":
+		secAnn = "\x1b[1;36;40m(INVULN)"
+	case "SHIELD":
+		secAnn = "\x1b[1;34;40m(BARRIER)"
+	default:
+		secAnn = weaponAnn(gm.SecondaryWeapon(body), body)
 	}
-	for i, kv := range rows {
+	passAnn := "\x1b[1;30;40mnone"
+	if r := gm.HPRegen(body); r > 0 {
+		passAnn = fmt.Sprintf("\x1b[1;35;40m+%.1f HP/s", r) // passives in light magenta
+	}
+	// LOADOUT header (yellow), then 1 / 2 / PASSIVE, each with a color-coded effect
+	// annotation so the screen shows what a weapon DOES, not just its name.
+	rows := []string{
+		"\x1b[1;33;40mLOADOUT",
+		fmt.Sprintf("\x1b[0;96;40m1 \x1b[1;37;40m%-9s %s", primName, weaponAnn(gm.PrimaryWeapon(body), body)),
+		fmt.Sprintf("\x1b[0;96;40m2 \x1b[1;37;40m%-9s %s", secName, secAnn),
+		fmt.Sprintf("\x1b[0;96;40mPASSIVE %s", passAnn),
+	}
+	for i, content := range rows {
 		row := bottomRow - (len(rows) - 1 - i)
-		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;90;40m%-9s \x1b[1;37;40m%-10s\x1b[0m", row, col0, kv[0], kv[1])
+		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;40m%-40s", row, col0, "") // clear the field (black bg, no stale tail)
+		fmt.Fprintf(w, "\x1b[%d;%dH%s\x1b[0m", row, col0, content)  // draw over it
 	}
+}
+
+// effectTag is the parenthesized status-effect label for a weapon's effect kind,
+// pre-colored (SGR on black). "" for plain damage/heal/shield (shown as +value).
+func effectTag(k gm.EffectKind) string {
+	switch k {
+	case gm.EffBleed:
+		return "\x1b[0;31;40m(BLEED)"
+	case gm.EffPoison:
+		return "\x1b[0;32;40m(POISON)"
+	case gm.EffDrain:
+		return "\x1b[0;33;40m(BURN)"
+	case gm.EffSlow:
+		return "\x1b[0;36;40m(SLOW)"
+	case gm.EffKnockback:
+		return "\x1b[0;37;40m(KNOCK)"
+	case gm.EffSlip:
+		return "\x1b[1;33;40m(SLIP)"
+	case gm.EffDamageDown:
+		return "\x1b[0;35;40m(WEAKEN)"
+	case gm.EffShieldBust:
+		return "\x1b[0;35;40m(STRIP)"
+	case gm.EffPull:
+		return "\x1b[0;37;40m(PULL)"
+	}
+	return ""
+}
+
+// weaponAnn builds a color-coded effect annotation for weapon idx on a body: its
+// damage or support value, an effect tag, and the recharge (or charge stock).
+// DMG light-red, HEAL light-green, SHIELD light-blue, tags vary; cooldown gray.
+func weaponAnn(idx, body int) string {
+	if idx < 0 || idx >= len(gm.Weapons) {
+		return ""
+	}
+	wp := gm.Weapons[idx]
+	seg := []string{}
+	switch wp.Effect.Kind {
+	case gm.EffHeal:
+		seg = append(seg, fmt.Sprintf("\x1b[1;32;40m+%.0f HEAL", wp.Effect.Mag))
+	case gm.EffShield:
+		seg = append(seg, "\x1b[1;34;40mSHIELD \x1b[0;34;40m(ARMOR)")
+	case gm.EffSpeed:
+		if wp.Damage > 0 {
+			seg = append(seg, fmt.Sprintf("\x1b[1;31;40m+%d DMG", wp.Damage))
+		}
+		seg = append(seg, "\x1b[1;36;40m(HASTE)")
+	default:
+		if wp.Damage > 0 {
+			seg = append(seg, fmt.Sprintf("\x1b[1;31;40m+%d DMG", wp.Damage))
+		}
+		if tag := effectTag(wp.Effect.Kind); tag != "" {
+			seg = append(seg, tag)
+		}
+	}
+	if wp.Charges > 0 { // charge-stock: show the stock + regen instead of a cooldown
+		seg = append(seg, fmt.Sprintf("\x1b[0;90;40mx%d %.2gs", wp.Charges, wp.ChargeRegen))
+	} else {
+		cd := wp.Cooldown
+		if cd == 0 {
+			cd = gm.VehBody(body).FireDelay
+		}
+		if cd > 0 {
+			seg = append(seg, fmt.Sprintf("\x1b[0;90;40m%.2gs", cd))
+		}
+	}
+	return strings.Join(seg, " ")
 }
 
 // indexOfEntryName returns the index of the entry with the given name (0 if

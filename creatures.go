@@ -273,22 +273,28 @@ func appendButterfly(dst []Tri, base func(V3) V3, col, bright [3]float64, s, clo
 	hx := aimAt(base, curAim, V3{0, 0.95 * s, 0})                                        // head tracks the aim
 	dst = box(dst, V3{0, 0.55 * s, 0}, V3{0.12 * s, 0.4 * s, 0.18 * s}, col, base)       // thorax
 	dst = box(dst, V3{0, 0.95 * s, 0.05 * s}, V3{0.1 * s, 0.1 * s, 0.1 * s}, bright, hx) // head
-	dst = eyePair(dst, hx, 0.05, 0.96, 0.17, 0.03, s)                                    // accent eyes
-	dst = limb(dst, hx, V3{0.05 * s, 1.0 * s, 0.1 * s}, 0.4, -1.2, 0.25*s, 0.02*s, limbc)
-	dst = limb(dst, hx, V3{-0.05 * s, 1.0 * s, 0.1 * s}, -0.4, -1.2, 0.25*s, 0.02*s, limbc)
-	flap := 0.6 * math.Sin(clock*9)
-	wingXF := func(hip V3, roll float64) func(V3) V3 {
+	dst = eyePair(dst, hx, 0.09, 0.95, 0.16, 0.034, s)                                   // eyes: wider apart, smaller so they don't bleed
+	for _, side := range []float64{1, -1} {                                              // antennae rise up and OUT to club tips
+		hip := V3{side * 0.09 * s, 1.0 * s, 0.05 * s}
+		dst = limb(dst, hx, hip, side*0.6, -2.6, 0.28*s, 0.018*s, limbc)
+		axf := limbDown(hx, hip, side*0.6, -2.6)
+		dst = box(dst, V3{0, -0.28 * s, 0}, V3{0.03 * s, 0.03 * s, 0.03 * s}, limbc, axf) // club tip (same color as the antenna)
+	}
+	// Wings spread FLAT to the sides in the plane that faces the viewer (broad in X
+	// and Y, thin in Z) - the classic butterfly silhouette: a large upper forewing
+	// and a smaller lower hindwing per side. They flutter by tipping gently about the
+	// vertical axis (toward/away from the camera), hinged at the body.
+	flap := 0.28 * math.Sin(clock*8)
+	wingXF := func(roll float64) func(V3) V3 { // rotate about Y: outer edge tips toward/away
 		sr, cr := math.Sin(roll), math.Cos(roll)
-		return func(l V3) V3 { return base(V3{l.X*cr - l.Y*sr, l.X*sr + l.Y*cr, l.Z}.Add(hip)) }
+		return func(l V3) V3 { return base(V3{l.X*cr - l.Z*sr, l.Y, l.X*sr + l.Z*cr}) }
 	}
 	for _, side := range []float64{1, -1} {
-		for zi, z := range []float64{0.18, -0.18} { // fore + aft wing
-			wc := col
-			if zi == 1 {
-				wc = bright
-			}
-			dst = box(dst, V3{side * 0.5 * s, 0, 0}, V3{0.5 * s, 0.02 * s, 0.34 * s}, wc, wingXF(V3{side * 0.12 * s, 0.6 * s, z * s}, side*(flap+0.1)))
-		}
+		xf := wingXF(side * flap)
+		dst = box(dst, V3{side * 0.42 * s, 0.78 * s, 0}, V3{0.36 * s, 0.3 * s, 0.025 * s}, col, xf)     // upper forewing (large)
+		dst = box(dst, V3{side * 0.64 * s, 0.92 * s, 0}, V3{0.16 * s, 0.18 * s, 0.025 * s}, bright, xf) // rounded outer corner
+		dst = box(dst, V3{side * 0.34 * s, 0.34 * s, 0}, V3{0.26 * s, 0.22 * s, 0.025 * s}, bright, xf) // lower hindwing
+		dst = box(dst, V3{side * 0.5 * s, 0.22 * s, 0}, V3{0.12 * s, 0.13 * s, 0.025 * s}, col, xf)     // rounded lower corner
 	}
 	return dst
 }
@@ -321,22 +327,33 @@ func appendMantis(dst []Tri, base func(V3) V3, col, bright [3]float64, s, clock 
 // appendTurtle: a domed shell on four stubby legs, head + tail, low and armored.
 // Shelled up (curShell), only the armor shows: head, legs, and tail retract.
 func appendTurtle(dst []Tri, base func(V3) V3, col, bright [3]float64, s, clock float64) []Tri {
-	if curShell {
-		dst = box(dst, V3{0, 0.32 * s, 0}, V3{0.55 * s, 0.3 * s, 0.65 * s}, col, base)             // shell, hunkered low
-		dst = box(dst, V3{0, 0.57 * s, 0}, V3{0.42 * s, 0.22 * s, 0.5 * s}, tint(col, 0.85), base) // dome
+	// carapace: a low wide rim + a tall center scute ringed by four lower side
+	// scutes, so it reads as a rounded-yet-faceted turtle shell, not two boxes.
+	shell := func(dst []Tri, lift float64) []Tri {
+		dst = box(dst, V3{0, (0.34 + lift) * s, 0}, V3{0.56 * s, 0.18 * s, 0.58 * s}, col, base)             // rim
+		dst = box(dst, V3{0, (0.54 + lift) * s, 0}, V3{0.24 * s, 0.14 * s, 0.26 * s}, tint(col, 0.92), base) // center scute (tallest)
+		for _, p := range [][3]float64{{0, 0.46, 0.32}, {0, 0.46, -0.32}, {0.34, 0.44, 0}, {-0.34, 0.44, 0}} {
+			dst = box(dst, V3{p[0] * s, (p[1] + lift) * s, p[2] * s}, V3{0.15 * s, 0.12 * s, 0.16 * s}, tint(col, 0.82), base) // side scutes, a touch lower
+		}
 		return dst
 	}
+	if curShell { // tucked in: just the hunkered shell, head/neck/legs retracted
+		return shell(dst, -0.06)
+	}
 	legc := tint(col, 0.6)
-	hx := aimAt(base, curAim, V3{0, 0.4 * s, 0.45 * s})                                       // neck: the head pokes around
-	dst = box(dst, V3{0, 0.45 * s, 0}, V3{0.55 * s, 0.3 * s, 0.65 * s}, col, base)            // shell
-	dst = box(dst, V3{0, 0.7 * s, 0}, V3{0.42 * s, 0.22 * s, 0.5 * s}, tint(col, 0.85), base) // dome
-	dst = box(dst, V3{0, 0.4 * s, 0.7 * s}, V3{0.18 * s, 0.16 * s, 0.22 * s}, bright, hx)     // head
-	dst = eyePair(dst, hx, 0.08, 0.45, 0.96, 0.05, s)                                         // accent eyes
-	dst = box(dst, V3{0, 0.4 * s, -0.72 * s}, V3{0.05 * s, 0.05 * s, 0.18 * s}, legc, base)   // tail
-	for _, zf := range []float64{0.4, -0.4} {
+	dst = shell(dst, 0)
+	// a thin neck pokes forward out of the shell's front opening with the head on
+	// its end (both track the aim); the carapace is short enough fore/aft that the
+	// neck and tail clearly emerge rather than sprouting from a solid box.
+	hx := aimAt(base, curAim, V3{0, 0.4 * s, 0.4 * s})
+	dst = box(dst, V3{0, 0.38 * s, 0.58 * s}, V3{0.07 * s, 0.07 * s, 0.16 * s}, legc, hx)      // neck (thin, separate)
+	dst = box(dst, V3{0, 0.4 * s, 0.78 * s}, V3{0.15 * s, 0.14 * s, 0.16 * s}, bright, hx)     // head
+	dst = eyePair(dst, hx, 0.08, 0.45, 1.0, 0.045, s)                                          // accent eyes
+	dst = box(dst, V3{0, 0.34 * s, -0.66 * s}, V3{0.045 * s, 0.045 * s, 0.18 * s}, legc, base) // tail, emerging from the rear
+	for _, zf := range []float64{0.36, -0.36} {
 		for _, side := range []float64{1, -1} {
 			swing := 0.18 * math.Sin(clock*5+zf+side)
-			dst = limb(dst, base, V3{side * 0.5 * s, 0.35 * s, zf * s}, side*0.5, swing, 0.3*s, 0.08*s, legc)
+			dst = limb(dst, base, V3{side * 0.5 * s, 0.32 * s, zf * s}, side*0.5, swing, 0.3*s, 0.08*s, legc)
 		}
 	}
 	return dst
@@ -345,16 +362,21 @@ func appendTurtle(dst []Tri, base func(V3) V3, col, bright [3]float64, s, clock 
 // appendTrex: a big biped - thick legs, heavy tail, large jawed head, tiny arms.
 func appendTrex(dst []Tri, base func(V3) V3, col, bright [3]float64, s, clock float64) []Tri {
 	limbc := tint(col, 0.7)
-	dst = box(dst, V3{0, 1.1 * s, 0}, V3{0.3 * s, 0.45 * s, 0.4 * s}, col, base)                  // torso
-	dst = box(dst, V3{0, 1.0 * s, -0.6 * s}, V3{0.12 * s, 0.12 * s, 0.5 * s}, col, base)          // tail base
-	dst = box(dst, V3{0, 0.9 * s, -1.0 * s}, V3{0.07 * s, 0.07 * s, 0.35 * s}, limbc, base)       // tail tip
-	hx := aimAt(base, curAim, V3{0, 1.7 * s, 0.1 * s})                                            // the great head swings to the aim
-	dst = box(dst, V3{0, 1.7 * s, 0.35 * s}, V3{0.26 * s, 0.26 * s, 0.4 * s}, bright, hx)         // head
-	dst = box(dst, V3{0, 1.55 * s, 0.62 * s}, V3{0.22 * s, 0.1 * s, 0.2 * s}, tint(col, 0.9), hx) // jaw
-	dst = box(dst, V3{0.14 * s, 1.82 * s, 0.6 * s}, V3{0.05 * s, 0.05 * s, 0.05 * s}, curAccent, hx)
-	dst = box(dst, V3{-0.14 * s, 1.82 * s, 0.6 * s}, V3{0.05 * s, 0.05 * s, 0.05 * s}, curAccent, hx)
-	dst = box(dst, V3{0.3 * s, 1.1 * s, 0.3 * s}, V3{0.05 * s, 0.15 * s, 0.05 * s}, limbc, base) // tiny arms
-	dst = box(dst, V3{-0.3 * s, 1.1 * s, 0.3 * s}, V3{0.05 * s, 0.15 * s, 0.05 * s}, limbc, base)
+	dst = box(dst, V3{0, 1.1 * s, 0}, V3{0.3 * s, 0.45 * s, 0.4 * s}, col, base)                                  // torso
+	dst = box(dst, V3{0, 1.0 * s, -0.6 * s}, V3{0.12 * s, 0.12 * s, 0.5 * s}, col, base)                          // tail base
+	dst = box(dst, V3{0, 0.9 * s, -1.0 * s}, V3{0.07 * s, 0.07 * s, 0.35 * s}, limbc, base)                       // tail tip
+	hx := aimAt(base, curAim, V3{0, 1.7 * s, 0.1 * s})                                                            // the great head swings to the aim
+	dst = box(dst, V3{0, 1.7 * s, 0.35 * s}, V3{0.26 * s, 0.26 * s, 0.4 * s}, bright, hx)                         // head
+	dst = box(dst, V3{0, 1.55 * s, 0.62 * s}, V3{0.22 * s, 0.1 * s, 0.2 * s}, tint(col, 0.9), hx)                 // jaw
+	dst = box(dst, V3{0, 1.5 * s, 0.79 * s}, V3{0.17 * s, 0.025 * s, 0.04 * s}, [3]float64{0.95, 0.93, 0.85}, hx) // upper teeth
+	dst = box(dst, V3{0, 1.47 * s, 0.76 * s}, V3{0.15 * s, 0.02 * s, 0.04 * s}, [3]float64{0.92, 0.9, 0.82}, hx)  // lower teeth
+	dst = eyePair(dst, hx, 0.14, 1.8, 0.72, 0.06, s)                                                              // eyes set into the front of the head
+	for _, side := range []float64{1, -1} {                                                                       // the famous tiny arms: held out and forward, clawed
+		dst = box(dst, V3{side * 0.27 * s, 1.05 * s, 0.42 * s}, V3{0.04 * s, 0.04 * s, 0.15 * s}, limbc, base) // forearm reaching forward
+		for _, fx := range []float64{0.03, -0.03} {                                                            // two little claw fingers at the tip
+			dst = box(dst, V3{(side*0.27 + fx) * s, 1.0 * s, 0.58 * s}, V3{0.014 * s, 0.014 * s, 0.06 * s}, limbc, base)
+		}
+	}
 	swing := 0.4 * math.Sin(clock*4)
 	dst = limb(dst, base, V3{0.18 * s, 0.72 * s, 0}, 0.1, swing, 0.78*s, 0.12*s, limbc)
 	dst = limb(dst, base, V3{-0.18 * s, 0.72 * s, 0}, -0.1, -swing, 0.78*s, 0.12*s, limbc)
@@ -470,8 +492,11 @@ func appendCrab(dst []Tri, base func(V3) V3, col, bright [3]float64, s, clock fl
 // radially and writhe (each on its own phase).
 func appendOctopod(dst []Tri, base func(V3) V3, col, bright [3]float64, s, clock float64) []Tri {
 	limbc := tint(col, 0.7)
-	dst = box(dst, V3{0, 0.75 * s, 0}, V3{0.34 * s, 0.32 * s, 0.34 * s}, col, base)        // mantle
-	dst = box(dst, V3{0, 0.96 * s, 0}, V3{0.26 * s, 0.22 * s, 0.26 * s}, col, base)        // dome
+	// bulbous mantle: a graduated stack, widest at the middle and tapering top and
+	// bottom, so it reads as a round head instead of two rigid stacked boxes
+	for _, L := range [][3]float64{{0.55, 0.30, 0.10}, {0.70, 0.36, 0.12}, {0.84, 0.34, 0.12}, {0.96, 0.26, 0.10}, {1.05, 0.16, 0.08}} {
+		dst = box(dst, V3{0, L[0] * s, 0}, V3{L[1] * s, L[2] * s, L[1] * s}, col, base)
+	}
 	dst = eyePair(dst, aimAt(base, curAim, V3{0, 0.78 * s, 0}), 0.13, 0.78, 0.38, 0.07, s) // big accent eyes track the aim
 	for i := 0; i < 8; i++ {                                                               // tentacles: hip on a ring, lean radially out, writhe
 		a := float64(i) / 8 * 2 * math.Pi
@@ -489,6 +514,7 @@ func appendScorpion(dst []Tri, base func(V3) V3, col, bright [3]float64, s, cloc
 	legc := tint(col, 0.55)
 	dst = box(dst, V3{0, 0.34 * s, 0.1 * s}, V3{0.32 * s, 0.18 * s, 0.42 * s}, col, base) // body
 	dst = box(dst, V3{0, 0.36 * s, -0.32 * s}, V3{0.28 * s, 0.2 * s, 0.3 * s}, col, base) // rear
+	dst = eyePair(dst, base, 0.1, 0.49, 0.46, 0.028, s)                                   // tiny eyes on the front carapace
 	zPos := []float64{0.22, 0.0, -0.22}
 	for k := 0; k < 3; k++ {
 		for _, side := range []float64{1, -1} {
@@ -534,6 +560,9 @@ func appendSerpent(dst []Tri, base func(V3) V3, col, bright [3]float64, s, clock
 	dst = box(dst, V3{sway * 3 * s, 0.88 * s, 0.26 * s}, V3{0.3 * s, 0.22 * s, 0.05 * s}, tint(col, 0.85), hx) // flared hood
 	dst = box(dst, V3{sway * 4 * s, 0.95 * s, 0.42 * s}, V3{0.13 * s, 0.09 * s, 0.16 * s}, bright, hx)         // head
 	dst = eyePair(dst, hx, 0.07, 0.99, 0.52, 0.035, s)
+	for _, fx := range []float64{0.04, -0.04} { // a pair of fangs jut down from the mouth
+		dst = box(dst, V3{sway*4*s + fx*s, 0.85 * s, 0.55 * s}, V3{0.012 * s, 0.05 * s, 0.015 * s}, [3]float64{0.95, 0.93, 0.85}, hx)
+	}
 	if math.Sin(clock*6) > 0.55 { // flicking tongue
 		dst = box(dst, V3{sway * 4 * s, 0.93 * s, 0.64 * s}, V3{0.015 * s, 0.015 * s, 0.07 * s}, curAccent, hx)
 	}
@@ -637,8 +666,8 @@ func appendInsect(dst []Tri, base func(V3) V3, col, bright [3]float64, s, clock 
 	dst = eyePair(dst, hx, 0.11, 0.45, 0.75, 0.05, s)                                      // accent eyes
 	dst = box(dst, V3{0, 0.42 * s, 0.12 * s}, V3{0.26 * s, 0.2 * s, 0.28 * s}, col, base)  // thorax
 	dst = box(dst, V3{0, 0.42 * s, -0.4 * s}, V3{0.3 * s, 0.24 * s, 0.4 * s}, col, base)   // abdomen
-	dst = limb(dst, hx, V3{0.08 * s, 0.55 * s, 0.66 * s}, 0.4, -1.0, 0.3*s, 0.025*s, legc) // antennae (point up-fwd)
-	dst = limb(dst, hx, V3{-0.08 * s, 0.55 * s, 0.66 * s}, -0.4, -1.0, 0.3*s, 0.025*s, legc)
+	dst = limb(dst, hx, V3{0.08 * s, 0.55 * s, 0.5 * s}, 0.3, -2.4, 0.34*s, 0.022*s, legc) // antennae: rise up and slightly forward
+	dst = limb(dst, hx, V3{-0.08 * s, 0.55 * s, 0.5 * s}, -0.3, -2.4, 0.34*s, 0.022*s, legc)
 	zPos := []float64{0.28, 0.06, -0.18}
 	for k := 0; k < 3; k++ {
 		for _, side := range []float64{1, -1} {
@@ -677,21 +706,21 @@ func appendElephant(dst []Tri, base func(V3) V3, col, bright [3]float64, s, cloc
 	dst = box(dst, V3{0, 1.1 * s, -0.15 * s}, V3{0.5 * s, 0.45 * s, 0.7 * s}, col, base) // body
 	hx := aimAt(base, curAim, V3{0, 1.5 * s, 0.5 * s})
 	dst = box(dst, V3{0, 1.5 * s, 0.72 * s}, V3{0.3 * s, 0.28 * s, 0.3 * s}, bright, hx) // head
-	flapE := 0.04 * math.Sin(clock*2)
-	for _, side := range []float64{1, -1} { // big flat ears
-		dst = box(dst, V3{side * (0.42 + flapE) * s, 1.55 * s, 0.6 * s}, V3{0.12 * s, 0.26 * s, 0.22 * s}, tint(col, 0.85), hx)
+	flapE := 0.12 * math.Sin(clock*3)
+	for _, side := range []float64{1, -1} { // big floppy ears: broad, thin, swinging
+		dst = box(dst, V3{side * (0.46 + flapE) * s, 1.52 * s, 0.58 * s}, V3{0.08 * s, 0.34 * s, 0.3 * s}, tint(col, 0.85), hx)
 		// tusks: ivory, curving forward under the head
 		dst = box(dst, V3{side * 0.16 * s, 1.26 * s, 0.95 * s}, V3{0.045 * s, 0.045 * s, 0.22 * s}, [3]float64{0.95, 0.93, 0.8}, hx)
 	}
 	dst = eyePair(dst, hx, 0.17, 1.62, 0.99, 0.05, s)
-	sway := 0.06 * math.Sin(clock*2.2) // the trunk hangs and swings
+	sway := 0.13 * math.Sin(clock*2.2) // the trunk hangs and swings (loose, wagging)
 	trunk := []V3{{0, 1.3, 0.98}, {0, 1.1, 1.06}, {0, 0.9, 1.12}, {0, 0.72, 1.16}}
 	for i, p := range trunk {
 		r := (0.1 - float64(i)*0.012) * s
 		dst = box(dst, V3{p.X*s + sway*float64(i+1)*0.4*s, p.Y * s, p.Z * s}, V3{r, 0.11 * s, r}, tint(col, 0.85), hx)
 	}
-	dst = box(dst, V3{0.1 * s * math.Sin(clock*1.5), 1.05 * s, -0.92 * s}, V3{0.035 * s, 0.035 * s, 0.2 * s}, legc, base) // tail
-	for _, zf := range []float64{0.42, -0.55} {                                                                           // pillar legs, slow heavy gait
+	dst = box(dst, V3{0.22 * s * math.Sin(clock*2.6), 1.05 * s, -0.92 * s}, V3{0.035 * s, 0.035 * s, 0.2 * s}, legc, base) // tail, wagging
+	for _, zf := range []float64{0.42, -0.55} {                                                                            // pillar legs, slow heavy gait
 		for _, side := range []float64{1, -1} {
 			swing := 0.14 * math.Sin(clock*3+math.Pi*(0.5-0.5*side)+zf)
 			dst = limb(dst, base, V3{side * 0.34 * s, 0.72 * s, zf * s}, side*0.05, swing, 0.68*s, 0.13*s, legc)
@@ -720,8 +749,14 @@ func appendFalcon(dst []Tri, base func(V3) V3, col, bright [3]float64, s, clock 
 		dst = box(dst, V3{side * 0.96 * s, 0, -0.06 * s}, V3{0.2 * s, 0.02 * s, 0.18 * s}, bright, wingXF(V3{side * 0.14 * s, 0.9 * s, 0.02 * s}, side*(flap+0.15))) // wingtip feathers
 	}
 	dst = box(dst, V3{0, 0.82 * s, -0.46 * s}, V3{0.13 * s, 0.02 * s, 0.2 * s}, bright, base) // fanned tail
-	dst = limb(dst, base, V3{0.07 * s, 0.7 * s, 0.05 * s}, 0.15, 0.5, 0.2*s, 0.03*s, limbc)   // tucked talons
-	dst = limb(dst, base, V3{-0.07 * s, 0.7 * s, 0.05 * s}, -0.15, 0.5, 0.2*s, 0.03*s, limbc)
+	for _, side := range []float64{1, -1} {                                                   // legs ending in gripping talons (three little toes each)
+		hip := V3{side * 0.07 * s, 0.7 * s, 0.05 * s}
+		dst = limb(dst, base, hip, side*0.15, 0.5, 0.2*s, 0.03*s, limbc)
+		xf := limbDown(base, hip, side*0.15, 0.5)
+		for _, tx := range []float64{0, 0.045, -0.045} {
+			dst = box(dst, V3{tx * s, -0.2 * s, 0.05 * s}, V3{0.013 * s, 0.045 * s, 0.013 * s}, curAccent, xf)
+		}
+	}
 	return dst
 }
 
