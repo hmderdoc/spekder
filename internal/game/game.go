@@ -2573,6 +2573,7 @@ const lungeSpeed = 16.0 // forward leap speed for melee chargers (decays via ste
 const (
 	pounceWindow = 1.0 // tiger POUNCE: window after the dash in which a kill refunds it
 	inkCloakDur  = 2.0 // octopod INK: self-cloak duration the ink screen grants the caster
+	meleeVReach  = 2.5 // max vertical reach of a melee/radial strike (a higher flyer evades)
 )
 
 // fireSecondary fires tank i's B-weapon, honoring charge-stock weapons and any
@@ -2765,6 +2766,9 @@ func (w *World) meleeStrike(s *Projectile) {
 			continue
 		}
 		t := &w.Tanks[ti]
+		if math.Abs(t.Pos.Y-o.Pos.Y) > meleeVReach {
+			continue // can't club someone well above/below: a flyer at altitude evades melee
+		}
 		dx, dz := t.Pos.X-o.Pos.X, t.Pos.Z-o.Pos.Z
 		d2 := dx*dx + dz*dz
 		if d2 > rng*rng {
@@ -5359,6 +5363,12 @@ func (w *World) botAI(i int, dt float64) {
 		ang := math.Atan2(pp.X-b.Pos.X, pp.Z-b.Pos.Z)
 		b.HullYaw = turnToward(b.HullYaw, w.avoidYaw(b, w.navYaw(i, pp, ang)), v.HullTurn*dt)
 		w.driveForward(i, dt, 0.8)
+	} else if mr == 0 && dist < keep*0.7 {
+		// Ranged + the foe is inside our range: KITE - turn away and back off while
+		// the turret swivels around to keep firing (hysteresis vs the `> keep`
+		// advance below stops it oscillating in the dead band between).
+		b.HullYaw = turnToward(b.HullYaw, w.avoidYaw(b, angTo+math.Pi), v.HullTurn*dt)
+		w.driveForward(i, dt, 0.75)
 	} else if dist > keep {
 		frac := 0.7
 		if mr > 0 {
