@@ -1536,8 +1536,8 @@ var Weapons = []WeaponDef{
 	// Phase 2 adds its special mechanic (INK self-cloak / POUNCE dash+kill-reset / CLAW 2-charge stock); for now it behaves as a plain cone/melee.
 	{Name: "POUNCE", Delivery: DeliverMelee, Damage: 18, Blast: 2.6, Cooldown: 1.5, Cost: 2, Effect: Effect{Kind: EffDamage}, Affects: TargetFoes, Glyph: '*', Cause: CauseMelee},
 	// Phase 2 adds its special mechanic (INK self-cloak / POUNCE dash+kill-reset / CLAW 2-charge stock); for now it behaves as a plain cone/melee.
-	{Name: "CLAW", Delivery: DeliverMelee, Damage: 34, Blast: 3.0, Cooldown: 0.8, Cost: 2, Effect: Effect{Kind: EffKnockback, Mag: 2}, Affects: TargetFoes, Glyph: '*', Cause: CauseMelee, Charges: 2, ChargeRegen: 3.0},
-	{Name: "SAND", Delivery: DeliverCone, Damage: 0, Blast: 8, Cooldown: 0.5, Cost: 1, Effect: Effect{Kind: EffSlow, Mag: 0.4, Dur: 1.8}, Affects: TargetFoes, Glyph: ':'},
+	{Name: "CLAW", Delivery: DeliverMelee, Damage: 44, Blast: 3.2, Cooldown: 0.7, Cost: 2, Effect: Effect{Kind: EffKnockback, Mag: 2}, Affects: TargetFoes, Glyph: '*', Cause: CauseMelee, Charges: 3, ChargeRegen: 2.2}, // crab burst: 3 charges, hits hard
+	{Name: "SAND", Delivery: DeliverCone, Damage: 0, Blast: 8, Cooldown: 0.5, Cost: 1, Effect: Effect{Kind: EffSlow, Mag: 0.55, Dur: 2.5}, Affects: TargetFoes, Glyph: ':'}, // stronger slow sets up the claw (Damage 0 so the bot commits to melee)
 }
 
 // Flag is a Flag Run pickup, or (in CTF) a team flag that can be carried,
