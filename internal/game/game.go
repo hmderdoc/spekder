@@ -2015,6 +2015,56 @@ func (w *World) collide(p *V3) {
 	CollideRamps(w.ActiveMap().Ramps, p)
 }
 
+// separateTanks keeps characters from stacking on the same spot (most visible
+// when same-class bots chase one target and converge). One relaxation pass per
+// tick: each overlapping live pair is shoved apart along their center line, split
+// evenly, then every moved tank is re-clamped/re-collided against the map so the
+// shove can't push someone through a wall or off the arena. Server-authoritative;
+// the local player's own push reconciles through the net predictor like any drift.
+// Vertical mismatch is respected (a tank up on a platform doesn't shove one below).
+func (w *World) separateTanks() {
+	const r = 1.0      // per-character radius (matches the map-collision inflation)
+	const minD = 2 * r // closest two centers may sit
+	const maxDY = 1.2  // only separate tanks at roughly the same height
+	for i := range w.Tanks {
+		a := &w.Tanks[i]
+		if a.Dead || a.gone {
+			continue
+		}
+		for j := i + 1; j < len(w.Tanks); j++ {
+			b := &w.Tanks[j]
+			if b.Dead || b.gone || math.Abs(a.Pos.Y-b.Pos.Y) > maxDY {
+				continue
+			}
+			dx, dz := b.Pos.X-a.Pos.X, b.Pos.Z-a.Pos.Z
+			d2 := dx*dx + dz*dz
+			if d2 >= minD*minD {
+				continue
+			}
+			d := math.Sqrt(d2)
+			nx, nz := dx, dz
+			if d > 1e-4 {
+				nx, nz = dx/d, dz/d
+			} else { // exactly coincident: pick a deterministic axis from the index
+				nx, nz = math.Cos(float64(i)), math.Sin(float64(i))
+			}
+			push := (minD - d) / 2
+			a.Pos.X -= nx * push
+			a.Pos.Z -= nz * push
+			b.Pos.X += nx * push
+			b.Pos.Z += nz * push
+		}
+	}
+	for i := range w.Tanks { // keep the shove legal
+		t := &w.Tanks[i]
+		if t.Dead || t.gone {
+			continue
+		}
+		clampArena(&t.Pos, w.half())
+		w.collide(&t.Pos)
+	}
+}
+
 // CollideRamps blocks horizontal movement into the SOLID body of a ramp - the
 // wedge beneath its sloped surface - so a ramp is a solid wedge, not a tent you
 // can walk under or through the back of. Walking UP the incline or standing on
@@ -4527,6 +4577,7 @@ func (w *World) simulate(dt float64, inputs map[int]Input) {
 			w.applyInput(i, inputs[i], dt)
 		}
 	}
+	w.separateTanks() // push overlapping characters apart so they can't stack
 	w.stepProjectiles(dt)
 	r := w.rules()
 	switch r.Objective {
