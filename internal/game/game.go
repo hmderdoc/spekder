@@ -1370,6 +1370,7 @@ type Projectile struct {
 	coneCos     float64    // DeliverCone: cos of the half-angle (0 = default); smaller = wider
 	backstabMul float64    // DeliverMelee: rear-arc damage multiplier (octopod stab)
 	foeKnock    float64    // support area weapon: shove force applied to foes caught in it (stag RALLY)
+	crit        bool       // this shot rolled a critical strike (drives the bigger crit-hit FX)
 }
 
 // Shot visual kinds, carried to the renderer so each projectile draws distinctly.
@@ -3144,7 +3145,9 @@ func (w *World) shellRam(i int) {
 			clampArena(&v.Pos, w.half())
 			w.collide(&v.Pos)
 		}
+		v.hitFlash = tankHitFlash // ram connects: flash + impact spark (hurt() alone is mute)
 		w.hurt(j, shellSpinDmg, i, CauseMelee)
+		w.spawnBlastFX(V3{v.Pos.X, v.Pos.Y + 0.3, v.Pos.Z})
 		t.spinT = shellSpinCD
 		return // one victim per ram window
 	}
@@ -3182,7 +3185,9 @@ func (w *World) goreCharge(i int) {
 			clampArena(&v.Pos, w.half())
 			w.collide(&v.Pos)
 		}
+		v.hitFlash = tankHitFlash // gore connects: flash + an impact spark (hurt() alone is mute)
 		w.hurt(j, bd.goreDmg, i, CauseMelee)
+		w.spawnBlastFX(V3{v.Pos.X, v.Pos.Y + 0.3, v.Pos.Z})
 		t.goreT = goreCD
 		return // one victim per charge window
 	}
@@ -3273,6 +3278,7 @@ func (w *World) fireWeapon(owner int, def *WeaponDef, secondary bool) {
 	// Critical strike (serpent/falcon): pure-RNG damage spike, no precondition.
 	if cc, cm := bodyCrit(t.body); cc > 0 && p.dmg > 0 && rand.Float64() < cc {
 		p.dmg = int(float64(p.dmg) * cm)
+		p.crit = true // a heavier hit FX sells the crit on landing
 	}
 	// Spawn from the body's muzzle origin (rotated by facing), so a scorpion fires
 	// from its tail, a humanoid from its hand, a tank from its barrel.
@@ -5371,6 +5377,10 @@ func (w *World) applyInput(i int, in Input, dt float64) {
 			}
 			dest = p
 		}
+		if dest != t.Pos { // a spark poof at both ends sells the teleport
+			w.spawnPuffFX(V3{t.Pos.X, t.Pos.Y + 0.5, t.Pos.Z})
+			w.spawnPuffFX(V3{dest.X, dest.Y + 0.5, dest.Z})
+		}
 		t.Pos, t.blinkCdT = dest, blinkCD
 	}
 	spd := v.Speed * MoveSpeedMul(t.body, t.cloakT > 0)
@@ -7158,10 +7168,12 @@ func (w *World) shotImpact(s *Projectile, p V3, direct int) {
 	}
 	if direct >= 0 {
 		if w.dodged(s, direct) {
-			return // a slithering serpent / banking falcon slipped the precise shot
+			w.spawnPuffFX(p) // a slithering serpent / banking falcon slipped the shot - sell the whiff
+			return
 		}
 		if w.turtleRearShielded(s, direct) {
-			return // the turtle's shell blocks rear ranged fire
+			w.spawnPuffFX(p) // the turtle's shell turns aside rear ranged fire - a clank
+			return
 		}
 		if s.owner >= 0 && s.owner < len(w.Tanks) {
 			w.Tanks[s.owner].shotsHit++ // direct hit (bolt/beam); blast counted in detonate
@@ -7231,6 +7243,40 @@ func (w *World) spawnBlastFX(at V3) {
 			Pos:   V3{X: at.X, Y: at.Y + 0.4, Z: at.Z},
 			vel:   V3{X: math.Cos(a) * sp, Y: 3 + rand.Float64()*3, Z: math.Sin(a) * sp},
 			life:  0.22 + rand.Float64()*0.16,
+			owner: -1,
+			fx:    true,
+			vis:   VisSpark,
+		})
+	}
+}
+
+// spawnCritFX is a bigger, faster spark pop for a critical strike - it reads as a
+// heavier hit than an ordinary blast without needing a new wire/render kind.
+func (w *World) spawnCritFX(at V3) {
+	for i := 0; i < 16; i++ {
+		a := rand.Float64() * 2 * math.Pi
+		sp := 7 + rand.Float64()*7
+		w.spawnQ = append(w.spawnQ, Projectile{
+			Pos:   V3{X: at.X, Y: at.Y + 0.5, Z: at.Z},
+			vel:   V3{X: math.Cos(a) * sp, Y: 4 + rand.Float64()*4, Z: math.Sin(a) * sp},
+			life:  0.28 + rand.Float64()*0.18,
+			owner: -1,
+			fx:    true,
+			vis:   VisSpark,
+		})
+	}
+}
+
+// spawnPuffFX is a small, soft spark puff - a glancing "whiff": a shot slipped by a
+// dodge, or turned aside by the turtle's shell.
+func (w *World) spawnPuffFX(at V3) {
+	for i := 0; i < 5; i++ {
+		a := rand.Float64() * 2 * math.Pi
+		sp := 2 + rand.Float64()*3
+		w.spawnQ = append(w.spawnQ, Projectile{
+			Pos:   V3{X: at.X, Y: at.Y + 0.6, Z: at.Z},
+			vel:   V3{X: math.Cos(a) * sp, Y: 1 + rand.Float64()*2, Z: math.Sin(a) * sp},
+			life:  0.18 + rand.Float64()*0.12,
 			owner: -1,
 			fx:    true,
 			vis:   VisSpark,
@@ -7315,6 +7361,9 @@ func (w *World) applyShotHit(s *Projectile, ti int) {
 		return
 	}
 	t := &w.Tanks[ti]
+	if s.crit { // a critical strike landed: a heavier spark pop on the target
+		w.spawnCritFX(V3{t.Pos.X, t.Pos.Y + 0.3, t.Pos.Z})
+	}
 	switch s.eff {
 	case EffHeal:
 		teammate := w.rules().Teams == 2 && s.owner >= 0 && s.owner < len(w.Tanks) && w.Tanks[s.owner].Team == t.Team

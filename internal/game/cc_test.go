@@ -160,9 +160,13 @@ func TestTurtleRearShield(t *testing.T) {
 
 	w.Tanks[0].Pos = V3{Z: -5} // behind the turtle
 	hp := w.Tanks[1].HP
+	nfx := len(w.spawnQ)
 	w.shotImpact(&Projectile{owner: 0, dmg: 20}, w.Tanks[1].Pos, 1)
 	if w.Tanks[1].HP != hp {
 		t.Errorf("rear shot should be shielded, turtle took %d", hp-w.Tanks[1].HP)
+	}
+	if len(w.spawnQ) <= nfx {
+		t.Error("a blocked rear shot should spawn a deflect puff (feedback)")
 	}
 
 	w.Tanks[0].Pos = V3{Z: 5} // in front
@@ -250,6 +254,23 @@ func TestHealerTargeting(t *testing.T) {
 	}
 }
 
+// TestCritFX: a crit-flagged hit pops a spark burst the player can read; a plain
+// direct bolt hit does not (only the crit gets the extra juice).
+func TestCritFX(t *testing.T) {
+	w := ccWorld(t, 2)
+	w.Tanks[1].body = BodyHumanoid
+
+	base := len(w.spawnQ)
+	w.applyShotHit(&Projectile{owner: 0, eff: EffDamage, dmg: 10, affects: TargetFoes}, 1)
+	if len(w.spawnQ) != base {
+		t.Fatalf("a plain bolt hit shouldn't spawn a burst, queued %d", len(w.spawnQ)-base)
+	}
+	w.applyShotHit(&Projectile{owner: 0, eff: EffDamage, dmg: 10, affects: TargetFoes, crit: true}, 1)
+	if len(w.spawnQ) <= base {
+		t.Error("a crit hit should pop a crit FX burst")
+	}
+}
+
 // TestStagRally: the battle-medic's RALLY burst heals allies and shoves foes (the
 // single area weapon does both - heal kin, knock enemies off the point).
 func TestStagRally(t *testing.T) {
@@ -298,7 +319,7 @@ func TestStagGore(t *testing.T) {
 		t.Fatalf("a standing stag should not gore: %d -> %d", hp, w.Tanks[1].HP)
 	}
 
-	// mid-charge -> gores once for goreDmg (24).
+	// mid-charge -> gores once for goreDmg (24), with hit feedback.
 	w.Tanks[0].lungeVX = lungeSpeed
 	w.goreCharge(0)
 	if w.Tanks[1].HP != hp-24 {
@@ -306,6 +327,12 @@ func TestStagGore(t *testing.T) {
 	}
 	if w.Tanks[0].goreT <= 0 {
 		t.Fatal("gore should start its cooldown")
+	}
+	if w.Tanks[1].hitFlash <= 0 {
+		t.Error("gore should flash the victim (the hit was visually mute before)")
+	}
+	if len(w.spawnQ) == 0 {
+		t.Error("gore should spawn an impact FX")
 	}
 	// still charging but on cooldown -> no second hit.
 	hp2 := w.Tanks[1].HP
