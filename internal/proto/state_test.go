@@ -39,6 +39,9 @@ func TestStateRoundTripCTF(t *testing.T) {
 	ents := []gm.EntitySnap{
 		{HP: 45, Dead: false, Yaw: 1.25, Pitch: -0.4},
 		{HP: 0, Dead: true, Yaw: -2.0},
+		// a runtime-spawned crab turret: self-describing so a template-less client can render it
+		{HP: 90, Yaw: 0.5, Pos: gm.V3{X: 7, Y: 0, Z: -2}, Spawned: true, Kind: gm.EntKindTurret,
+			Half: gm.V3{X: 0.45, Y: 0.5, Z: 0.45}, Color: [3]float64{0.2, 0.6, 0.9}, MaxHP: 120},
 	}
 	zones := []gm.ZoneSnap{
 		{Pos: gm.V3{X: 0, Z: 0}, Half: gm.V3{X: 4, Y: 1, Z: 4}, Prog: 0.5, Color: [3]float64{0.9, 0.3, 0.3}},
@@ -76,11 +79,21 @@ func TestStateRoundTripCTF(t *testing.T) {
 	if dp[0].Pos.X != 3 || dp[1].Pos.Z != -3 {
 		t.Fatalf("pickup positions lost: %+v", dp)
 	}
-	if len(de) != 2 {
-		t.Fatalf("want 2 entity snaps, got %d", len(de))
+	if len(de) != 3 {
+		t.Fatalf("want 3 entity snaps, got %d", len(de))
 	}
 	if de[0].HP != 45 || de[0].Dead || de[1].HP != 0 || !de[1].Dead {
 		t.Fatalf("entity snap hp/dead lost: %+v", de)
+	}
+	// the spawned turret's self-describing descriptor must survive the wire
+	if !de[2].Spawned || de[2].Kind != gm.EntKindTurret || de[2].MaxHP != 120 {
+		t.Fatalf("spawned entity descriptor lost: %+v", de[2])
+	}
+	if d := de[2].Half.X - 0.45; d > 1e-3 || d < -1e-3 || de[2].Pos.X != 7 {
+		t.Fatalf("spawned entity half/pos lost: %+v", de[2])
+	}
+	if de[0].Spawned {
+		t.Fatalf("authored entity wrongly flagged Spawned: %+v", de[0])
 	}
 	if d := de[0].Yaw - 1.25; d > 1e-3 || d < -1e-3 {
 		t.Fatalf("entity snap yaw lost: %+v", de[0])

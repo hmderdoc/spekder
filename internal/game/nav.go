@@ -33,6 +33,7 @@ type navGrid struct {
 	floor []float64 // per-cell supported surface height (top layer)
 	open  []bool    // per-cell: a tank can stand here (clearance + not hazard)
 	sig   uint64    // geometry signature the grid was baked against
+	noHop bool      // walk-only routing: reject jump links (proves jump-0 reachability)
 }
 
 func (g *navGrid) cellAt(x, z float64) (int, int) {
@@ -68,6 +69,9 @@ func (g *navGrid) edgeOK(a, b int) (float64, bool) {
 	case rise <= stepUp+0.05 && rise >= -(stepUp+0.05):
 		return 1, true
 	case rise > 0 && rise <= stepUp+navHopRise:
+		if g.noHop {
+			return 0, false // walk-only: a jump-0 body can't take a hop link
+		}
 		return 4, true // jump link: most characters can hop this; cost it
 	case rise < 0 && -rise <= navDrop:
 		return 1.2, true // dropping off a ledge is cheap

@@ -151,6 +151,8 @@ func previewPad(body int) float64 {
 	switch body {
 	case gm.BodyTrex:
 		return 1.0 / 0.7 // ~70% of current preview size
+	case gm.BodyTurtle:
+		return 1.0 / 0.68 // the bulky bipedal koopa reads oversized at full fill
 	}
 	return 1.0
 }
@@ -327,34 +329,47 @@ func appendMantis(dst []Tri, base func(V3) V3, col, bright [3]float64, s, clock 
 // appendTurtle: a domed shell on four stubby legs, head + tail, low and armored.
 // Shelled up (curShell), only the armor shows: head, legs, and tail retract.
 func appendTurtle(dst []Tri, base func(V3) V3, col, bright [3]float64, s, clock float64) []Tri {
-	// carapace: a low wide rim + a tall center scute ringed by four lower side
-	// scutes, so it reads as a rounded-yet-faceted turtle shell, not two boxes.
-	shell := func(dst []Tri, lift float64) []Tri {
-		dst = box(dst, V3{0, (0.34 + lift) * s, 0}, V3{0.56 * s, 0.18 * s, 0.58 * s}, col, base)             // rim
-		dst = box(dst, V3{0, (0.54 + lift) * s, 0}, V3{0.24 * s, 0.14 * s, 0.26 * s}, tint(col, 0.92), base) // center scute (tallest)
-		for _, p := range [][3]float64{{0, 0.46, 0.32}, {0, 0.46, -0.32}, {0.34, 0.44, 0}, {-0.34, 0.44, 0}} {
-			dst = box(dst, V3{p[0] * s, (p[1] + lift) * s, p[2] * s}, V3{0.15 * s, 0.12 * s, 0.16 * s}, tint(col, 0.82), base) // side scutes, a touch lower
-		}
+	legc := tint(col, 0.55)
+	// shellCol: a blended third color (the body tinted toward its accent) so the
+	// shell reads distinct from the body yet harmonized with both it and the accent.
+	shellCol := [3]float64{col[0]*0.6 + curAccent[0]*0.4, col[1]*0.6 + curAccent[1]*0.4, col[2]*0.6 + curAccent[2]*0.4}
+	if curShell {
+		// tucked into the shell: a low rounded dome (and the future spin-attack shell)
+		dst = box(dst, V3{0, 0.24 * s, 0}, V3{0.54 * s, 0.13 * s, 0.58 * s}, bright, base)               // pale rim band
+		dst = box(dst, V3{0, 0.38 * s, 0}, V3{0.44 * s, 0.2 * s, 0.48 * s}, shellCol, base)              // dome
+		dst = box(dst, V3{0, 0.54 * s, 0}, V3{0.28 * s, 0.16 * s, 0.32 * s}, tint(shellCol, 0.85), base) // cap
 		return dst
 	}
-	if curShell { // tucked in: just the hunkered shell, head/neck/legs retracted
-		return shell(dst, -0.06)
+	// Bipedal koopa: a domed shell on the BACK (pale rim + green dome bulging aft),
+	// an upright pale belly/plastron, a head with a beak, two walking legs in shoes,
+	// and short arms - a walking-upright stance, not a low quadruped.
+	// shell on the back: a pale rim framing a domed carapace built from layers that
+	// step aft and shrink (real depth, not flat slabs), in the blended shellCol;
+	// raised darker scutes break up the surface so it reads round even as boxes.
+	dst = box(dst, V3{0, 0.92 * s, -0.1 * s}, V3{0.44 * s, 0.44 * s, 0.05 * s}, bright, base) // pale rim/border
+	for _, L := range [][4]float64{                                                           // {halfX, halfY, zCenter, shade}
+		{0.4, 0.4, -0.16, 1.0}, {0.35, 0.35, -0.24, 0.92}, {0.29, 0.3, -0.32, 0.85},
+		{0.22, 0.24, -0.4, 0.78}, {0.13, 0.15, -0.47, 0.72},
+	} {
+		dst = box(dst, V3{0, 0.92 * s, L[2] * s}, V3{L[0] * s, L[1] * s, 0.06 * s}, tint(shellCol, L[3]), base)
 	}
-	legc := tint(col, 0.6)
-	dst = shell(dst, 0)
-	// a thin neck pokes forward out of the shell's front opening with the head on
-	// its end (both track the aim); the carapace is short enough fore/aft that the
-	// neck and tail clearly emerge rather than sprouting from a solid box.
-	hx := aimAt(base, curAim, V3{0, 0.4 * s, 0.4 * s})
-	dst = box(dst, V3{0, 0.38 * s, 0.58 * s}, V3{0.07 * s, 0.07 * s, 0.16 * s}, legc, hx)      // neck (thin, separate)
-	dst = box(dst, V3{0, 0.4 * s, 0.78 * s}, V3{0.15 * s, 0.14 * s, 0.16 * s}, bright, hx)     // head
-	dst = eyePair(dst, hx, 0.08, 0.45, 1.0, 0.045, s)                                          // accent eyes
-	dst = box(dst, V3{0, 0.34 * s, -0.66 * s}, V3{0.045 * s, 0.045 * s, 0.18 * s}, legc, base) // tail, emerging from the rear
-	for _, zf := range []float64{0.36, -0.36} {
-		for _, side := range []float64{1, -1} {
-			swing := 0.18 * math.Sin(clock*5+zf+side)
-			dst = limb(dst, base, V3{side * 0.5 * s, 0.32 * s, zf * s}, side*0.5, swing, 0.3*s, 0.08*s, legc)
-		}
+	for _, p := range [][3]float64{{0.18, 1.12, -0.24}, {-0.18, 1.12, -0.24}, {0.18, 0.72, -0.24}, {-0.18, 0.72, -0.24}, {0, 0.92, -0.22}} {
+		dst = box(dst, V3{p[0] * s, p[1] * s, p[2] * s}, V3{0.08 * s, 0.08 * s, 0.16 * s}, tint(shellCol, 0.62), base) // raised scute panels
+	}
+	belly := [3]float64{bright[0]*0.5 + 0.5, bright[1]*0.5 + 0.5, bright[2]*0.5 + 0.5}      // pale plastron: body color blended halfway to white
+	dst = box(dst, V3{0, 0.8 * s, 0.08 * s}, V3{0.26 * s, 0.32 * s, 0.16 * s}, belly, base) // upright belly
+	hx := aimAt(base, curAim, V3{0, 1.2 * s, 0})
+	dst = box(dst, V3{0, 1.24 * s, 0.12 * s}, V3{0.17 * s, 0.16 * s, 0.18 * s}, bright, hx)           // head
+	dst = box(dst, V3{0, 1.2 * s, 0.31 * s}, V3{0.09 * s, 0.06 * s, 0.08 * s}, tint(bright, 0.9), hx) // beak/snout
+	dst = eyePair(dst, hx, 0.09, 1.3, 0.25, 0.045, s)                                                 // eyes
+	for _, side := range []float64{1, -1} {
+		gait := math.Sin(clock*5 + math.Pi*(0.5-0.5*side))                                                       // legs/arms alternate L/R
+		dst = limb(dst, base, V3{side * 0.29 * s, 1.0 * s, 0.06 * s}, side*0.35, 0.15*gait, 0.3*s, 0.05*s, legc) // arm
+		legHip := V3{side * 0.13 * s, 0.52 * s, 0}
+		legFore := 0.35 * gait
+		dst = limb(dst, base, legHip, side*0.08, legFore, 0.5*s, 0.08*s, legc) // leg
+		legXF := limbDown(base, legHip, side*0.08, legFore)
+		dst = box(dst, V3{0, -0.52 * s, 0.07 * s}, V3{0.11 * s, 0.06 * s, 0.17 * s}, bright, legXF) // shoe
 	}
 	return dst
 }

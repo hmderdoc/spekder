@@ -145,10 +145,11 @@ func leaders(tanks []gm.TankSnap) []int {
 
 type stat struct {
 	games                int
-	wins                 int // top-fragger (FFA) / duel winner
+	wins                 int // top-fragger (FFA) / duel winner / KOTH king
 	draws                int
 	kills, deaths        int
 	dmg, heal            int
+	hold                 int // KOTH hold-points accrued (0 in other modes)
 	shotsFired, shotsHit int
 }
 
@@ -164,8 +165,16 @@ func (s *stat) add(t gm.TankSnap, won, draw bool) {
 	s.deaths += t.Deaths
 	s.dmg += t.DmgDealt
 	s.heal += t.HealDone
+	s.hold += t.HoldScore
 	s.shotsFired += t.ShotsFired
 	s.shotsHit += t.ShotsHit
+}
+
+func (s stat) holdPerGame() float64 {
+	if s.games == 0 {
+		return 0
+	}
+	return float64(s.hold) / float64(s.games)
 }
 
 func (s stat) winRate() float64 {
@@ -271,6 +280,84 @@ func runFFA(seeds int, diff gm.Difficulty, maxSec float64, base int64) {
 		len(cc), seeds, diff)
 	fmt.Printf("    (win = top fragger; even baseline = %.1f%%)\n", 100/float64(len(cc)))
 	printRanking(cc, by, "ffa win-share")
+}
+
+// --- koth: who holds the hill ----------------------------------------------
+
+// runKoth plays FFA King-of-the-Hill matches with all combat chars and ranks them
+// by hold-points accrued (the objective metric duel/FFA structurally miss). The
+// "king" of each match (most hold-points, decisive only) feeds a familiar win-share
+// column; deaths/g reads survival-on-point. This is the arena TURTLE is built for.
+func runKoth(seeds int, diff gm.Difficulty, maxSec float64, base int64) {
+	cc := combatChars()
+	bodies := make([]int, len(cc))
+	for i, c := range cc {
+		bodies[i] = c.body
+	}
+	by := map[int]*stat{}
+	for _, c := range cc {
+		by[c.body] = &stat{}
+	}
+	seed := base
+	for r := 0; r < seeds; r++ {
+		seed++
+		out := runMatch(seed, gm.ModeFFAKotH, bodies, diff, maxSec)
+		// king = the sole tank with the most hold-points this match
+		kingID, best, tie := -1, -1, false
+		for _, t := range out.tanks {
+			switch {
+			case t.HoldScore > best:
+				kingID, best, tie = t.ID, t.HoldScore, false
+			case t.HoldScore == best:
+				tie = true
+			}
+		}
+		if best <= 0 || tie {
+			kingID = -1 // nobody actually held it / a tie: no decisive king
+		}
+		for _, t := range out.tanks {
+			by[t.Body].add(t, kingID >= 0 && t.ID == kingID, false)
+		}
+	}
+	fmt.Printf("\n=== KOTH  (FFA King of the Hill, all %d combat chars, %d matches, diff=%s) ===\n",
+		len(cc), seeds, diff)
+	fmt.Printf("    (ranked by hold-points/game - the objective metric; win-share = match 'king')\n")
+	printKothRanking(cc, by)
+}
+
+func printKothRanking(cc []char, by map[int]*stat) {
+	sort.Slice(cc, func(a, b int) bool {
+		return by[cc[a].body].holdPerGame() > by[cc[b].body].holdPerGame()
+	})
+	var sum, sumsq float64
+	for _, c := range cc {
+		h := by[c.body].holdPerGame()
+		sum += h
+		sumsq += h * h
+	}
+	nF := float64(len(cc))
+	mean := sum / nF
+	std := math.Sqrt(math.Max(0, sumsq/nF-mean*mean))
+	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintf(w, "RANK\tCHARACTER\tHOLD/G\tWIN-SHARE\tK/D\tKILLS/G\tDEATHS/G\tACC\tFLAG\n")
+	for i, c := range cc {
+		s := by[c.body]
+		g := float64(max(s.games, 1))
+		flag := ""
+		if std > 0 {
+			switch {
+			case s.holdPerGame() > mean+1.5*std:
+				flag = "TOP"
+			case s.holdPerGame() < mean-1.5*std:
+				flag = "low"
+			}
+		}
+		fmt.Fprintf(w, "%d\t%s\t%.1f\t%.1f%%\t%.2f\t%.1f\t%.1f\t%.0f%%\t%s\n",
+			i+1, c.name, s.holdPerGame(), 100*s.winRate(), s.kd(),
+			float64(s.kills)/g, float64(s.deaths)/g, 100*s.acc(), flag)
+	}
+	w.Flush()
+	fmt.Printf("    mean hold/g = %.1f, stddev = %.1f  (TOP/low = >1.5 stddev from mean)\n", mean, std)
 }
 
 // --- ctf: A/B healer value --------------------------------------------------
@@ -410,10 +497,11 @@ func main() {
 	duelSeeds := flag.Int("duelseeds", 24, "seeds per duel pair")
 	ffaSeeds := flag.Int("ffaseeds", 50, "FFA matches")
 	ctfSeeds := flag.Int("ctfseeds", 50, "CTF matches per healer")
+	kothSeeds := flag.Int("kothseeds", 0, "FFA KOTH matches (0 = skip; measures hold-points)")
 	diffName := flag.String("diff", "HARD", "bot difficulty (EASY..ULTIMATE)")
 	maxSec := flag.Float64("maxsec", 120, "max simulated seconds per match")
 	baseSeed := flag.Int64("seed", 1000, "base RNG seed (reproducibility)")
-	skip := flag.String("skip", "", "comma-list of measurements to skip: duel,ffa,ctf")
+	skip := flag.String("skip", "", "comma-list of measurements to skip: duel,ffa,ctf,koth")
 	matrix := flag.Bool("matrix", false, "print the full duel win-rate matrix")
 	flag.Parse()
 
@@ -436,5 +524,8 @@ func main() {
 	}
 	if !skipped["ctf"] {
 		runCTF(*ctfSeeds, diff, *maxSec, *baseSeed+900000)
+	}
+	if *kothSeeds > 0 && !skipped["koth"] {
+		runKoth(*kothSeeds, diff, *maxSec, *baseSeed+1300000)
 	}
 }

@@ -36,12 +36,13 @@ func MapHash(m gm.Map) uint32 {
 //	5: Input gained the lobby Ready bit; MatchSnap gained the locked-vote count.
 //	6: removed the wire vehicle byte and the CustomStats tail; HELLO/CHANGECHAR carry body + a publish flag (the chassis system retired).
 //	7: TankSnap gained the secondary gauge (reload2 + charge count) and a slip flag.
+//	8: EntitySnap can be self-describing (Spawned bit + kind/half/colour/maxhp) so runtime-spawned entities (crab turret) render without an authored template.
 //
 // MsgBalance (0x46) was added WITHOUT bumping this: it is a server->client push
 // an older client silently drops (unknown type -> ignored), so it neither
 // half-talks nor corrupts state. Bumping would hard-reject every deployed client
 // - the opposite of the goal (deploy balance without a client wave).
-const ProtocolVersion = 7
+const ProtocolVersion = 8
 
 const (
 	MsgHello      = 0x01 // client->server: token, bbsid, handle, client version
@@ -1236,10 +1237,19 @@ func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.Sh
 		if e.Dead {
 			fl |= 1
 		}
+		if e.Spawned {
+			fl |= 2
+		}
 		w.u8(fl)
 		w.f32(e.Yaw)
 		w.f32(e.Pitch)
-		w.v3(e.Pos) // dynamic position (payload/moved entities)
+		w.v3(e.Pos)    // dynamic position (payload/moved entities)
+		if e.Spawned { // runtime entity: carry its descriptor so a template-less client can draw it
+			w.u8(e.Kind)
+			w.v3(e.Half)
+			w.col3(e.Color)
+			w.i16(e.MaxHP)
+		}
 	}
 	w.u16(len(zones))
 	for _, z := range zones {
@@ -1359,10 +1369,18 @@ func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, sh
 	for k := 0; k < ne; k++ {
 		var e gm.EntitySnap
 		e.HP = r.ri16()
-		e.Dead = r.ru8()&1 != 0
+		fl := r.ru8()
+		e.Dead = fl&1 != 0
+		e.Spawned = fl&2 != 0
 		e.Yaw = r.rf32()
 		e.Pitch = r.rf32()
 		e.Pos = r.rv3()
+		if e.Spawned {
+			e.Kind = r.ru8()
+			e.Half = r.rv3()
+			e.Color = r.rcol3()
+			e.MaxHP = r.ri16()
+		}
 		ents = append(ents, e)
 	}
 	nz := r.ru16()

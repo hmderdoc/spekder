@@ -7,6 +7,7 @@ import "testing"
 
 func TestPoisonDoTAndKillCredit(t *testing.T) {
 	w := twoTanks(t)
+	w.Tanks[1].body = BodyHumanoid // poison-vulnerable victim (BodyTank is now poison-immune)
 	// VENOM: an initial bite plus a 5 HP/sec drip for 4s, credited to the shooter.
 	w.applyShotHit(&Projectile{owner: 0, eff: EffPoison, dmg: 6, mag: 5, dur: 4, affects: TargetFoes, cause: CausePoison}, 1)
 	if w.Tanks[1].HP != 54 {
@@ -99,24 +100,47 @@ func TestPassiveRegen(t *testing.T) {
 func TestTurtleShellMode(t *testing.T) {
 	w := twoTanks(t)
 	w.Tanks[0].body = BodyTurtle
-	w.applyInput(0, Input{Fire2: true}, 0.05)
+	w.applyInput(0, Input{Jump: true}, 0.05) // JUMP = the invulnerable shell
 	if w.Tanks[0].shellT <= 0 {
-		t.Fatal("B didn't shell up")
+		t.Fatal("JUMP didn't shell up")
 	}
-	// shelled: immune to fire, and throttle doesn't move it
+	// shelled: invulnerable...
 	if w.shotCanAffect(&Projectile{owner: 1, eff: EffDamage, affects: TargetFoes}, 0) {
 		t.Fatal("shelled turtle is hittable")
 	}
+	// ...and STATIONARY - the invuln shell can't move or fire
 	x0, z0 := w.Tanks[0].Pos.X, w.Tanks[0].Pos.Z
 	w.applyInput(0, Input{Throttle: true}, 0.5)
 	if w.Tanks[0].Pos.X != x0 || w.Tanks[0].Pos.Z != z0 {
-		t.Fatal("shelled turtle moved")
+		t.Fatal("the invulnerable shell moved (it should be a stationary bunker)")
 	}
-	// B again (after the debounce) pops out and starts the recharge
+	// JUMP again (after the debounce) pops out and starts the recharge
 	w.Tanks[0].cooldown2 = 0
-	w.applyInput(0, Input{Fire2: true}, 0.05)
+	w.applyInput(0, Input{Jump: true}, 0.05)
 	if w.Tanks[0].shellT != 0 || w.Tanks[0].cooldown2 != shellRecharge {
 		t.Fatalf("pop-out: shellT=%v cd2=%v want 0/%v", w.Tanks[0].shellT, w.Tanks[0].cooldown2, shellRecharge)
+	}
+}
+
+// TestTurtleSpinRoll: B starts the spin-roll - a SEPARATE mobile charge (not the
+// shell): it moves, isn't invulnerable, and isn't shellT.
+func TestTurtleSpinRoll(t *testing.T) {
+	w := twoTanks(t)
+	w.Tanks[0].body = BodyTurtle
+	w.applyInput(0, Input{Fire2: true}, 0.05) // B = spin-roll
+	if w.Tanks[0].rollT <= 0 {
+		t.Fatal("B didn't start a spin-roll")
+	}
+	if w.Tanks[0].shellT != 0 {
+		t.Fatal("spin-roll must not enter the invulnerable shell")
+	}
+	if !w.shotCanAffect(&Projectile{owner: 1, eff: EffDamage, affects: TargetFoes}, 0) {
+		t.Fatal("a rolling turtle should still be vulnerable")
+	}
+	x0 := w.Tanks[0].Pos.X
+	w.applyInput(0, Input{}, 0.3) // mid-roll it launches forward on its own
+	if w.Tanks[0].Pos.X == x0 && w.Tanks[0].Pos.Z == 0 {
+		t.Fatal("the spin-roll didn't move")
 	}
 }
 
@@ -134,11 +158,11 @@ func TestElephantBuffer(t *testing.T) {
 	w := twoTanks(t)
 	e := &w.Tanks[0]
 	e.body, e.HP = BodyElephant, 150
-	e.bufferHP = elephantBufferMax
+	e.bufferHP = exoMax(BodyElephant)
 
 	// Damage soaks into the buffer first, from any direction (HP untouched).
 	w.hurt(0, 40, 1, CauseCannon)
-	if e.HP != 150 || e.bufferHP != elephantBufferMax-40 {
+	if e.HP != 150 || e.bufferHP != exoMax(BodyElephant)-40 {
 		t.Fatalf("buffer didn't soak: HP=%d buffer=%v", e.HP, e.bufferHP)
 	}
 	// Overflow past a near-empty buffer carries through to HP.

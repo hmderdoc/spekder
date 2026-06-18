@@ -24,8 +24,8 @@ func TestSecondaryWeaponAlignment(t *testing.T) {
 	if got := bodyDefFor(BodyCrab).weapon; got != wepSand {
 		t.Errorf("BodyCrab primary weapon = %d, want wepSand(%d)", got, wepSand)
 	}
-	if got := bodyDefFor(BodyCrab).secondary; got != wepClaw {
-		t.Errorf("BodyCrab secondary = %d, want wepClaw(%d)", got, wepClaw)
+	if got := bodyDefFor(BodyCrab).secondary; got != -1 {
+		t.Errorf("BodyCrab secondary = %d, want -1 (B deploys a turret, not a palette weapon)", got)
 	}
 	if got := bodyDefFor(BodyTrex).secondary; got != wepRoar {
 		t.Errorf("BodyTrex secondary = %d, want wepRoar(%d)", got, wepRoar)

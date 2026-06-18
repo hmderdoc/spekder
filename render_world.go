@@ -268,6 +268,22 @@ func appendPickup(dst []Tri, p gm.PickupSnap) []Tri {
 	return dst
 }
 
+// entityFromSnap reconstructs a renderable template for a runtime-spawned entity
+// (one the client has no authored template for, e.g. a crab's deployed turret)
+// from the self-describing fields the wire carries when EntitySnap.Spawned is set.
+func entityFromSnap(st gm.EntitySnap) gm.Entity {
+	e := gm.Entity{Pos: st.Pos, Half: st.Half, Color: st.Color, Solid: true}
+	switch st.Kind {
+	case gm.EntKindTurret:
+		e.Kind = "turret"
+		e.Turret = &gm.TurretTrait{} // presence drives the head+barrel render; values are server-side
+	}
+	if st.MaxHP > 0 {
+		e.Destruct = &gm.DestructTrait{MaxHP: st.MaxHP} // enables the HP damage tint
+	}
+	return e
+}
+
 // appendEntity builds a map trait-object from its static template (e) merged
 // with its current dynamic state (st from the wire). A turret is a base plus a
 // head+barrel that rotates to st.Yaw; other kinds render as a solid block.
@@ -495,12 +511,13 @@ func (r *Renderer) renderWorld(cam Cam, t float64, tanks []gm.TankSnap, shots []
 	for _, p := range pickups {
 		dyn = appendPickup(dyn, p)
 	}
-	for i := range entT {
-		var st gm.EntitySnap
-		if i < len(entS) {
-			st = entS[i]
+	for i := range entS {
+		st := entS[i]
+		if st.Spawned { // runtime entity (crab turret): render from the self-describing snap
+			dyn = appendEntity(dyn, entityFromSnap(st), st)
+		} else if i < len(entT) {
+			dyn = appendEntity(dyn, entT[i], st)
 		}
-		dyn = appendEntity(dyn, entT[i], st)
 	}
 	r.drawTris(cam, dyn, 0)
 	if flash > 0 {
@@ -575,15 +592,18 @@ func (r *Renderer) drawRadar(cam Cam, tanks []gm.TankSnap, flags []gm.FlagSnap, 
 		c := pickupColor(p.Kind)
 		blip(p.Pos.X, p.Pos.Z, [3]byte{clampB(c[0] * 255), clampB(c[1] * 255), clampB(c[2] * 255)})
 	}
-	// live turret emplacements show as orange threat blips
-	for i := range entT {
-		if entT[i].Turret == nil {
+	// live turret emplacements show as orange threat blips (authored + runtime-spawned)
+	for i := range entS {
+		st := entS[i]
+		if st.Dead {
 			continue
 		}
-		if i < len(entS) && entS[i].Dead {
-			continue
+		switch {
+		case st.Spawned && st.Kind == gm.EntKindTurret:
+			blip(st.Pos.X, st.Pos.Z, [3]byte{245, 150, 40})
+		case !st.Spawned && i < len(entT) && entT[i].Turret != nil:
+			blip(entT[i].Pos.X, entT[i].Pos.Z, [3]byte{245, 150, 40})
 		}
-		blip(entT[i].Pos.X, entT[i].Pos.Z, [3]byte{245, 150, 40})
 	}
 	// player marker + short heading tick pointing up
 	r.putPx(pcx, pcy, [3]byte{130, 205, 255})

@@ -27,18 +27,13 @@ go build -buildvcs=false -ldflags "$LDFLAGS" -o spekder-server ./cmd/server
 go build -buildvcs=false -ldflags "$LDFLAGS" -o server ./cmd/server
 
 echo "==> restart arena service"
-restarted=false
 if [ -t 0 ]; then
-	# Interactive: let sudo prompt for a password if needed.
-	sudo systemctl restart spekder-server && restarted=true
-elif sudo -n systemctl restart spekder-server 2>/dev/null; then
-	# Non-interactive (CI/agent): only works with passwordless sudo.
-	restarted=true
-fi
-if $restarted; then
-	systemctl --no-pager --lines=4 status spekder-server || true
+	# Interactive (a human in a terminal): let sudo prompt for the password.
+	sudo systemctl restart spekder-server && systemctl --no-pager --lines=4 status spekder-server || true
 else
-	echo "   could not restart automatically (needs root). Run:"
+	# Non-interactive (agent/CI): do NOT touch sudo - a `sudo -n` here just trips
+	# a root security alert. Leave the restart to the operator.
+	echo "   built. restart the arena yourself:"
 	echo "     sudo systemctl restart spekder-server"
 fi
 echo "==> done"

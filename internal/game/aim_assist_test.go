@@ -5,11 +5,32 @@ import (
 	"testing"
 )
 
+// TestAimLockSkipsOwnTurret: a crab's aim-assist must not lock onto its OWN
+// deployed turret, even when the turret sits closer to the reticle than the foe.
+func TestAimLockSkipsOwnTurret(t *testing.T) {
+	w, me, tgt := twoPlayerOpen(t)
+	w.SetAimAssist(true)
+	w.Tanks[me].body = BodyCrab
+	// own turret dead on the aim line (would win on yoff if it were eligible)...
+	w.entities = []Entity{{
+		Kind: "turret", Pos: V3{X: 0, Y: 0, Z: 5}, Half: V3{X: 0.45, Y: 0.5, Z: 0.45},
+		Destruct: &DestructTrait{MaxHP: 120}, HP: 120, Owner: me, Turret: &TurretTrait{Range: 16},
+	}}
+	w.Tanks[me].turretIdx = 1
+	// ...and an enemy slightly off it
+	w.Tanks[tgt].Pos, w.Tanks[tgt].cloakT = V3{X: 1, Z: 10}, 0
+	w.aimAssistStep(me, true, false, 1.0/30)
+	if w.Tanks[me].lockKind == 2 {
+		t.Fatal("aim-assist locked the crab's OWN turret")
+	}
+}
+
 // twoPlayerOpen sets up a deathmatch on the clear OPEN map with two human tanks
 // (so the second is an enemy for FFA aim-assist tests), at the origin.
 func twoPlayerOpen(t *testing.T) (*World, int, int) {
 	t.Helper()
 	w := NewWorld(0, ModeDeathmatch)
+	w.SetDifficulty(DiffEasy) // sticky lock-on is an easy-tier aid; these tests exercise that path
 	if idx := FindMap("OPEN GRID"); idx >= 0 {
 		w.PinMap(idx)
 	}
@@ -71,26 +92,50 @@ func TestAimLockDisabled(t *testing.T) {
 	}
 }
 
-// TestAimLockBreaksOnSustainedTurn: a held turn for the break time releases the
-// lock (and the post-break cooldown keeps it from instantly re-locking).
-func TestAimLockBreaksOnSustainedTurn(t *testing.T) {
+// TestAimLockHoldsThenBreaksOnSustainedTurn: the lock must SURVIVE the continued
+// sweep that acquired it (otherwise it self-cancels and never holds a target), hold
+// while aiming still, and release only on a sustained turn-away.
+func TestAimLockHoldsThenBreaksOnSustainedTurn(t *testing.T) {
 	w, me, tgt := twoPlayerOpen(t)
 	w.SetAimAssist(true)
 	w.Tanks[tgt].Pos, w.Tanks[tgt].cloakT = V3{X: 1, Z: 10}, 0
-	w.aimAssistStep(me, true, false, 1.0/30)
+	const dt = 1.0 / 30
+	w.aimAssistStep(me, true, false, dt) // acquires while sweeping
 	if w.Tanks[me].lockKind == 0 {
 		t.Fatal("should lock first")
 	}
-	released := false
-	for i := 0; i < 60; i++ { // keep turning; it must release at the break time
-		w.aimAssistStep(me, true, false, 1.0/30)
-		if w.Tanks[me].lockKind == 0 {
-			released = true
-			break
-		}
+	w.aimAssistStep(me, true, false, dt) // a single continued turn tick
+	if w.Tanks[me].lockKind == 0 {
+		t.Fatal("a single turn tick should not break the lock (it must hold)")
 	}
-	if !released {
-		t.Fatal("sustained turning should break the lock")
+	for i := 0; i < 20; i++ { // holding still keeps the lock
+		w.aimAssistStep(me, false, false, dt)
+	}
+	if w.Tanks[me].lockKind == 0 {
+		t.Fatal("holding still should keep the lock")
+	}
+	for i := 0; i < int(assistLockBreak/dt)+2; i++ { // sustained turn-away releases
+		w.aimAssistStep(me, true, false, dt)
+	}
+	if w.Tanks[me].lockKind != 0 {
+		t.Fatal("a sustained turn should release the lock")
+	}
+}
+
+// TestStandardAutoAimNoStickyLock: at the harder tiers the assist snaps onto a
+// target you're aiming near but does NOT form a tracking lock (you stay free).
+func TestStandardAutoAimNoStickyLock(t *testing.T) {
+	w, me, tgt := twoPlayerOpen(t)
+	w.SetDifficulty(DiffHard)
+	w.SetAimAssist(true)
+	w.Tanks[tgt].Pos, w.Tanks[tgt].cloakT = V3{X: 1, Z: 10}, 0
+	want := math.Atan2(1, 10)
+	w.aimAssistStep(me, true, false, 1.0/30)
+	if w.Tanks[me].lockKind != 0 {
+		t.Fatal("harder tiers should not form a sticky lock")
+	}
+	if aim := w.Tanks[me].HullYaw + w.Tanks[me].TurretYaw; math.Abs(aim-want) > 1e-6 {
+		t.Fatalf("standard auto-aim should still snap onto the target (%v), got %v", want, aim)
 	}
 }
 
@@ -116,6 +161,7 @@ func TestAimLockHoldsWhileStill(t *testing.T) {
 // destructibles) too - the small, elevated, hard-to-hit things it's most for.
 func TestAimLockTurretEntity(t *testing.T) {
 	w := NewWorld(0, ModeDeathmatch)
+	w.SetDifficulty(DiffEasy) // lock-on tier
 	if idx := FindMap("OPEN GRID"); idx >= 0 {
 		w.PinMap(idx)
 	}
@@ -125,7 +171,7 @@ func TestAimLockTurretEntity(t *testing.T) {
 	w.Tanks[me].HullYaw, w.Tanks[me].TurretYaw, w.Tanks[me].TurretPitch = 0, 0, 0
 	w.SetAimAssist(true)
 	w.entities = []Entity{{
-		Kind: "turret", Pos: V3{X: 1, Y: 2, Z: 10}, Half: V3{X: 0.7, Y: 0.3, Z: 0.7},
+		Kind: "turret", Pos: V3{X: 1, Y: 2, Z: 10}, Half: V3{X: 0.7, Y: 0.3, Z: 0.7}, Owner: -1,
 		Destruct: &DestructTrait{MaxHP: 50}, HP: 50, Turret: &TurretTrait{Range: 20},
 	}}
 	w.aimAssistStep(me, true, false, 1.0/30)

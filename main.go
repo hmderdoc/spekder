@@ -3036,11 +3036,11 @@ var playerBodies = []vehEntry{
 	{name: "CRAB", body: gm.BodyCrab, desc: "Wide armored shell; lobs heavy shots from a claw."},
 	{name: "OCTOPOD", body: gm.BodyOctopod, desc: "Bulbous body, eight tentacles; ink slows foes."},
 	{name: "TIGER", body: gm.BodyQuad, desc: "Feline skirmisher: pounce in, scratch for a bleeding wound, lick wounds to recover."},
-	{name: "TURTLE", body: gm.BodyTurtle, desc: "Bunker: snaps up close; B tucks into the shell (invulnerable)."},
+	{name: "TURTLE", body: gm.BodyTurtle, desc: "Bunker: SNAP bite; JUMP = stationary invulnerable shell (heals); B = spin-roll charge that rams."},
 	{name: "BUTTERFLY", body: gm.BodyButterfly, desc: "Flying healer. Hold JUMP to hover; heal beam mends allies."},
 	{name: "ELEPHANT", body: gm.BodyElephant, desc: "Anchor: trunk-hook a foe in then gore with tusks; regenerating shield buffer; B sprays ally shields."},
 	{name: "FALCON", body: gm.BodyFalcon, desc: "Flying striker. Hold JUMP to climb; fast talon bolts, gust blast."},
-	{name: "STAG", body: gm.BodyStag, desc: "Pack healer: radial aura mends allies; antler charge, swift bolt."},
+	{name: "STAG", body: gm.BodyStag, desc: "Battle-medic: AURA mends allies; B = RALLY heal burst + knocks foes off the point; JUMP = antler GORE charge."},
 	{name: "MINOTAUR", body: gm.BodyMinotaur, desc: "Bruiser: heavy hammer; tap B to raise/lower a frontal barrier (it breaks, then recharges)."},
 }
 
@@ -3301,8 +3301,26 @@ var charSortKeys = []struct {
 	label   string
 	statIdx int
 }{
-	{"NAME", -1}, {"ARMOR", 0}, {"SPEED", 1}, {"TURN", 2},
+	{"NAME", -1}, {"DAMAGE", -2}, {"ARMOR", 0}, {"SPEED", 1}, {"TURN", 2},
 	{"FIRE RATE", 3}, {"AMMO", 4}, {"REGEN", 5}, {"JUMP", 6},
+}
+
+// charDamageScore is a character's primary-weapon DPS (damage / effective firing
+// cadence), used as the DAMAGE sort key on the character-select screen.
+func charDamageScore(body int) float64 {
+	wi := gm.PrimaryWeapon(body)
+	if wi < 0 || wi >= len(gm.Weapons) {
+		return 0
+	}
+	wd := gm.Weapons[wi]
+	cad := wd.Cooldown
+	if cad <= 0 {
+		cad = gm.VehBody(body).FireDelay
+	}
+	if cad <= 0 {
+		return 0
+	}
+	return float64(wd.Damage) / cad
 }
 
 // charVehicle resolves an entry to the Vehicle whose stats it shows.
@@ -3352,6 +3370,19 @@ func drawStatBars(w *bufio.Writer, rightEdge, bottomRow int, e vehEntry, s *user
 	}
 }
 
+// resistRows are the optional IMMUNE / WEAK loadout lines for a body (empty when
+// it has neither): cyan IMMUNE, red WEAK, listing the damage/effect categories.
+func resistRows(body int) []string {
+	var out []string
+	if im := gm.BodyImmune(body); im != "" {
+		out = append(out, "\x1b[1;36;40mIMMUNE \x1b[0;36;40m"+im)
+	}
+	if wk := gm.BodyWeak(body); wk != "" {
+		out = append(out, "\x1b[1;31;40mWEAK \x1b[0;31;40m"+wk)
+	}
+	return out
+}
+
 // drawWeaponsBlock overlays the selected character's weapon loadout (primary,
 // secondary, and passive HP regen when it has one) as a small left-justified
 // block anchored to the preview panel's bottom-left corner - cross-corner from
@@ -3364,19 +3395,58 @@ func drawWeaponsBlock(w *bufio.Writer, col0, bottomRow int, e vehEntry, s *userS
 	if body == gm.BodyElephant {
 		primName = "HOOK/TUSK" // FIRE auto-picks by range: hook far, gore close
 	}
+	// Turtle: its JUMP key is the shell (a passive trait, not a B-weapon), and the
+	// shell itself is the second "attack" via spin-ram - so it gets its own layout.
+	if body == gm.BodyTurtle {
+		rows := []string{
+			"\x1b[1;33;40mLOADOUT",
+			fmt.Sprintf("\x1b[0;96;40m1 \x1b[1;37;40m%-9s %s", primName, weaponAnn(gm.PrimaryWeapon(body), body)),
+			fmt.Sprintf("\x1b[0;96;40m2 \x1b[1;37;40m%-9s %s", "SHELLSPIN", "\x1b[1;31;40m+14 DMG \x1b[1;36;40m(RAM)"),
+			"\x1b[0;96;40mJUMP \x1b[1;36;40mSHELL \x1b[1;35;40m(INVULN+HEAL)",
+			"\x1b[0;96;40mPASSIVE \x1b[1;32;40mSHELL SHIELD \x1b[0;36;40m(rear fire + ailments)",
+		}
+		rows = append(rows, resistRows(body)...)
+		for i, content := range rows {
+			row := bottomRow - (len(rows) - 1 - i)
+			fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;40m%-40s", row, col0, "")
+			fmt.Fprintf(w, "\x1b[%d;%dH%s\x1b[0m", row, col0, content)
+		}
+		return
+	}
+	// Octopod SPY: short stab (rear-arc backstab), INK cloak, and a JUMP blink.
+	if body == gm.BodyOctopod {
+		rows := []string{
+			"\x1b[1;33;40mLOADOUT",
+			fmt.Sprintf("\x1b[0;96;40m1 \x1b[1;37;40m%-9s %s", "STAB", "\x1b[1;31;40m+12 DMG \x1b[1;35;40m(x3 BACKSTAB)"),
+			fmt.Sprintf("\x1b[0;96;40m2 \x1b[1;37;40m%-9s %s", "INK", "\x1b[1;36;40m(CLOAK)"),
+			"\x1b[0;96;40mJUMP \x1b[1;35;40mBLINK \x1b[1;36;40m(TELEPORT)",
+			"\x1b[0;96;40mPASSIVE \x1b[1;32;40muncloaked: +SPD +DMG",
+		}
+		rows = append(rows, resistRows(body)...)
+		for i, content := range rows {
+			row := bottomRow - (len(rows) - 1 - i)
+			fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;40m%-40s", row, col0, "")
+			fmt.Fprintf(w, "\x1b[%d;%dH%s\x1b[0m", row, col0, content)
+		}
+		return
+	}
 	secName := gm.SecondaryWeaponName(body)
 	secAnn := ""
-	switch secName { // the turtle/minotaur B is a mode, not a palette weapon
+	switch secName { // the minotaur B is a mode, not a palette weapon
 	case "SHELL":
 		secAnn = "\x1b[1;36;40m(INVULN)"
 	case "SHIELD":
 		secAnn = "\x1b[1;34;40m(BARRIER)"
+	case "TURRET":
+		secAnn = "\x1b[1;31;40m+14 DMG \x1b[1;34;40m(DEPLOY)"
 	default:
 		secAnn = weaponAnn(gm.SecondaryWeapon(body), body)
 	}
 	passAnn := "\x1b[1;30;40mnone"
 	if r := gm.HPRegen(body); r > 0 {
 		passAnn = fmt.Sprintf("\x1b[1;35;40m+%.1f HP/s", r) // passives in light magenta
+	} else if gm.BodyClimbs(body) {
+		passAnn = "\x1b[1;32;40mWALL CLIMB" // the insect scales walls (green: a mobility passive)
 	}
 	// LOADOUT header (yellow), then 1 / 2 / PASSIVE, each with a color-coded effect
 	// annotation so the screen shows what a weapon DOES, not just its name.
@@ -3386,6 +3456,7 @@ func drawWeaponsBlock(w *bufio.Writer, col0, bottomRow int, e vehEntry, s *userS
 		fmt.Sprintf("\x1b[0;96;40m2 \x1b[1;37;40m%-9s %s", secName, secAnn),
 		fmt.Sprintf("\x1b[0;96;40mPASSIVE %s", passAnn),
 	}
+	rows = append(rows, resistRows(body)...)
 	for i, content := range rows {
 		row := bottomRow - (len(rows) - 1 - i)
 		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;40m%-40s", row, col0, "") // clear the field (black bg, no stale tail)
@@ -3407,6 +3478,10 @@ func effectTag(k gm.EffectKind) string {
 		return "\x1b[0;36;40m(SLOW)"
 	case gm.EffKnockback:
 		return "\x1b[0;37;40m(KNOCK)"
+	case gm.EffStun:
+		return "\x1b[1;31;40m(STUN)"
+	case gm.EffStrangle:
+		return "\x1b[1;35;40m(ROOT)"
 	case gm.EffSlip:
 		return "\x1b[1;33;40m(SLIP)"
 	case gm.EffDamageDown:
@@ -3431,6 +3506,9 @@ func weaponAnn(idx, body int) string {
 	switch wp.Effect.Kind {
 	case gm.EffHeal:
 		seg = append(seg, fmt.Sprintf("\x1b[1;32;40m+%.0f HEAL", wp.Effect.Mag))
+		if wp.FoeKnock > 0 {
+			seg = append(seg, "\x1b[1;33;40m+KNOCK")
+		}
 	case gm.EffShield:
 		seg = append(seg, "\x1b[1;34;40mSHIELD \x1b[0;34;40m(ARMOR)")
 	case gm.EffSpeed:
@@ -3479,6 +3557,10 @@ func sortEntries(entries []vehEntry, s *userSettings, statIdx int) {
 		if statIdx >= 0 {
 			if fa, fb := charBarFracs(ea, s)[statIdx], charBarFracs(eb, s)[statIdx]; fa != fb {
 				return fa > fb
+			}
+		} else if statIdx == -2 { // DAMAGE: primary-weapon DPS, high to low
+			if da, db := charDamageScore(ea.body), charDamageScore(eb.body); da != db {
+				return da > db
 			}
 		}
 		return ea.name < eb.name

@@ -25,11 +25,12 @@ func TestEffectHeal(t *testing.T) {
 	if w.Tanks[1].HP != 85 {
 		t.Fatalf("heal: HP=%d want 85", w.Tanks[1].HP)
 	}
-	// never overheals past MaxHP
-	w.Tanks[1].HP = veh(1).MaxHP - 5
+	// never overheals past MaxHP (the tank's own body row, not the old palette)
+	max := w.Tanks[1].veh().MaxHP
+	w.Tanks[1].HP = max - 5
 	w.applyShotHit(&Projectile{owner: 0, eff: EffHeal, mag: 50, affects: TargetAllies}, 1)
-	if w.Tanks[1].HP != veh(1).MaxHP {
-		t.Fatalf("overheal: HP=%d want %d", w.Tanks[1].HP, veh(1).MaxHP)
+	if w.Tanks[1].HP != max {
+		t.Fatalf("overheal: HP=%d want %d", w.Tanks[1].HP, max)
 	}
 }
 

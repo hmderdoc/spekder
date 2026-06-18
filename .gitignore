@@ -27,5 +27,7 @@
 /scores.json
 /players.json
 
-# Generated balancesim run (regenerable; not a committed doc)
+# Generated balancesim runs (regenerable; not committed docs)
 /BALANCE_CURRENT.txt
+/sim_all.txt
+/sim_ctf.txt

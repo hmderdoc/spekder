@@ -515,7 +515,7 @@ func (s *netSession) step(dt float64, in gm.Input) viewState {
 	} else {
 		solids := gm.SolidBoxes(cmap, latestEnts) // block on alive solid entities, matching the server
 		pveh := gm.VehBody(self.Body)
-		pveh.Speed *= gm.BodySpeedMul(self.Body) // match the sim's per-body speed (e.g. the fast insect)
+		pveh.Speed *= gm.MoveSpeedMul(self.Body, self.Cloak) // match the sim's per-body speed (incl. the octopod's uncloaked bonus)
 		if self.Slip {
 			// EffSlip (banana): the server forces a helpless forward slide with no
 			// steering. Munge the predicted input to match so prediction doesn't

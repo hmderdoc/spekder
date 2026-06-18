@@ -14,35 +14,33 @@ func TestClawChargeStock(t *testing.T) {
 		{HP: 200, Team: -1, Carrying: -1, body: BodyCrab, weapon2: wepClaw, ammo: 100},
 	}
 	def := &Weapons[wepClaw]
-	if def.Charges != 2 {
-		t.Fatalf("CLAW Charges = %d, want 2", def.Charges)
+	max := def.Charges
+	if max < 2 {
+		t.Fatalf("CLAW Charges = %d, want a charge-stock weapon (>=2)", max)
 	}
 
-	// First snap consumes a charge.
-	w.fireSecondary(0)
-	if w.Tanks[0].wp2Used != 1 {
-		t.Fatalf("after 1st fire wp2Used = %d, want 1", w.Tanks[0].wp2Used)
+	// Each snap consumes a charge (cooldown2 gates back-to-back snaps, so clear it).
+	for n := 1; n <= max; n++ {
+		w.Tanks[0].cooldown2 = 0
+		w.fireSecondary(0)
+		if w.Tanks[0].wp2Used != n {
+			t.Fatalf("after fire %d, wp2Used = %d, want %d", n, w.Tanks[0].wp2Used, n)
+		}
 	}
-	// Cooldown gates back-to-back snaps; clear it so the second charge is reachable.
+	// One past the stock is blocked, even with cooldown cleared.
 	w.Tanks[0].cooldown2 = 0
 	w.fireSecondary(0)
-	if w.Tanks[0].wp2Used != 2 {
-		t.Fatalf("after 2nd fire wp2Used = %d, want 2", w.Tanks[0].wp2Used)
-	}
-	// Third snap is blocked: stock is empty even with cooldown cleared.
-	w.Tanks[0].cooldown2 = 0
-	w.fireSecondary(0)
-	if w.Tanks[0].wp2Used != 2 {
-		t.Fatalf("3rd fire should be blocked, wp2Used = %d, want 2", w.Tanks[0].wp2Used)
+	if w.Tanks[0].wp2Used != max {
+		t.Fatalf("fire past empty stock should be blocked, wp2Used = %d, want %d", w.Tanks[0].wp2Used, max)
 	}
 
-	// Advance time past one ChargeRegen; a single charge should return.
+	// Advance past one ChargeRegen; a single charge should return.
 	steps := int(def.ChargeRegen/0.05) + 2
 	for i := 0; i < steps; i++ {
 		w.simulate(0.05, nil)
 	}
-	if w.Tanks[0].wp2Used != 1 {
-		t.Fatalf("after %vs regen wp2Used = %d, want 1", def.ChargeRegen, w.Tanks[0].wp2Used)
+	if w.Tanks[0].wp2Used != max-1 {
+		t.Fatalf("after %vs regen wp2Used = %d, want %d", def.ChargeRegen, w.Tanks[0].wp2Used, max-1)
 	}
 }
 

@@ -49,7 +49,7 @@ func TestBotsClimbElevatedHill(t *testing.T) {
 	defer func() { Maps = Maps[:len(Maps)-1] }()
 	w := elevatedKothWorld(t, 3)
 	for i := range w.Tanks {
-		w.Tanks[i].body = BodyTank
+		w.Tanks[i].body = BodyHumanoid // tank jump is 0 now; use a jumping body to guard map reachability
 	}
 	z := &w.zones[0]
 	for s := 0; s < 120; s++ {

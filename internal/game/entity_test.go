@@ -13,7 +13,7 @@ func TestTurretAimsAndFires(t *testing.T) {
 	w.Tanks[me].guard = 0
 	w.Tanks[me].cloakT = 0
 	w.entities = []Entity{{
-		Kind: "turret", Pos: V3{X: 0, Y: 1, Z: 0}, Half: V3{X: 0.8, Y: 1, Z: 0.8},
+		Kind: "turret", Pos: V3{X: 0, Y: 1, Z: 0}, Half: V3{X: 0.8, Y: 1, Z: 0.8}, Owner: -1,
 		Yaw: 0, Turret: &TurretTrait{Range: 20, FireDelay: 1.0, Dmg: 10, TurnRate: 4},
 	}}
 	w.Shots = nil
@@ -38,7 +38,7 @@ func TestTurretTracksAndRespectsCloak(t *testing.T) {
 	w.Tanks[me].Pos = V3{X: 10, Z: 0} // off to the side: want yaw ~= +pi/2
 	w.Tanks[me].guard = 0
 	w.entities = []Entity{{
-		Kind: "turret", Pos: V3{}, Half: V3{X: 0.8, Y: 1, Z: 0.8},
+		Kind: "turret", Pos: V3{}, Half: V3{X: 0.8, Y: 1, Z: 0.8}, Owner: -1,
 		Yaw: 0, Turret: &TurretTrait{Range: 20, FireDelay: 1.0, TurnRate: 1.0},
 	}}
 	w.stepEntities(1.0 / 30)
@@ -227,24 +227,27 @@ func firstBot(w *World) int {
 // TestPitchedShotHeightMatters: with height-aware hit detection, a flat shot
 // passes under an elevated target, but a shot at the target's height connects.
 func TestPitchedShotHeightMatters(t *testing.T) {
-	w, me := startDMMap(t, 1, "OPEN GRID")
-	bot := firstBot(w)
-	if bot < 0 {
-		t.Skip("no bot")
+	// Built by hand (no random bot spawn) so the target's body/hitbox is fixed and
+	// the test can't flake on a per-run spawn pick.
+	saved := Maps
+	t.Cleanup(func() { Maps = saved })
+	Maps = []Map{{Name: "T", Size: 30}}
+	w := &World{Mode: ModeDeathmatch}
+	w.Tanks = []Tank{
+		{HP: 150, Team: -1, Carrying: -1, body: BodyTank, Pos: V3{}},                 // 0 = shooter
+		{HP: 150, Team: -1, Carrying: -1, body: BodyTank, Pos: V3{X: 0, Y: 3, Z: 6}}, // 1 = elevated target
 	}
-	w.Tanks[bot].Pos = V3{X: 0, Y: 3, Z: 6} // up on a ledge, dead ahead
-	w.Tanks[bot].guard, w.Tanks[bot].shieldT, w.Tanks[bot].Dead = 0, 0, false
-	hp := w.Tanks[bot].HP
+	hp := w.Tanks[1].HP
 
-	w.Shots = []Projectile{{Pos: V3{X: 0, Y: EyeHeight, Z: 6}, vel: V3{Z: 1}, owner: me, life: 1}}
+	w.Shots = []Projectile{{Pos: V3{X: 0, Y: EyeHeight, Z: 6}, vel: V3{Z: 1}, owner: 0, life: 1, dmg: 20}}
 	w.stepProjectiles(1.0 / 30)
-	if w.Tanks[bot].HP != hp {
-		t.Fatalf("flat shot should pass under an elevated target (hp %d -> %d)", hp, w.Tanks[bot].HP)
+	if w.Tanks[1].HP != hp {
+		t.Fatalf("flat shot should pass under an elevated target (hp %d -> %d)", hp, w.Tanks[1].HP)
 	}
-	w.Shots = []Projectile{{Pos: V3{X: 0, Y: 3.3, Z: 6}, vel: V3{Z: 1}, owner: me, life: 1}}
+	w.Shots = []Projectile{{Pos: V3{X: 0, Y: 3.5, Z: 6}, vel: V3{Z: 1}, owner: 0, life: 1, dmg: 20}}
 	w.stepProjectiles(1.0 / 30)
-	if w.Tanks[bot].HP >= hp {
-		t.Fatalf("shot at the target's height should hit (hp stayed %d)", w.Tanks[bot].HP)
+	if w.Tanks[1].HP >= hp {
+		t.Fatalf("shot at the target's height should hit (hp stayed %d)", w.Tanks[1].HP)
 	}
 }
 
@@ -255,7 +258,7 @@ func TestTurretDepressesAtGroundTarget(t *testing.T) {
 	w.Tanks[me].Pos = V3{X: 0, Y: 0, Z: 6}
 	w.Tanks[me].guard, w.Tanks[me].cloakT = 0, 0
 	w.entities = []Entity{{
-		Kind: "turret", Pos: V3{X: 0, Y: 4, Z: 0}, Half: V3{X: 0.7, Y: 0.3, Z: 0.7},
+		Kind: "turret", Pos: V3{X: 0, Y: 4, Z: 0}, Half: V3{X: 0.7, Y: 0.3, Z: 0.7}, Owner: -1,
 		Turret: &TurretTrait{Range: 30, FireDelay: 1, TurnRate: 6},
 	}}
 	for i := 0; i < 12; i++ {
