@@ -1494,6 +1494,48 @@ func drawBin(w *bufio.Writer, data []byte, col0, row0 int) {
 
 // runInfoScreen shows a titled, centered block of text until the player backs out
 // (ENTER or Backspace; ESC quits the program as everywhere).
+// runSoundTest plays a short tune and asks a first-time user whether they heard
+// it, so sound only stays on for terminals that actually support ANSI music. The
+// result is persisted (see main), so this is shown once.
+func runSoundTest(w *bufio.Writer, cols, rows int, ip *input) bool {
+	setSoundOn(true) // force the probe to emit regardless of the loaded default
+	w.WriteString("\x1b[2J\x1b[H")
+	title := "SOUND CHECK"
+	lines := []string{
+		"Spekder plays music and effects via \"ANSI music\",",
+		"supported by SyncTERM and similar terminals.",
+		"",
+		"A short tune is playing right now.",
+		"",
+		"Did you hear it?",
+		"",
+		"[Y] yes - keep sound on        [N] no - turn it off",
+	}
+	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;96m%s\x1b[0m", rows/2-5, (cols-len(title))/2+1, title)
+	for i, l := range lines {
+		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;37m%s\x1b[0m", rows/2-3+i, (cols-len(l))/2+1, l)
+	}
+	emitMusic(w, "MLT140O4L8CEGECEGL4>C") // a short bright arpeggio
+	w.Flush()
+	for {
+		select {
+		case <-ip.quitCh:
+			return false
+		case r := <-ip.runes:
+			switch r {
+			case 'y', 'Y':
+				return true
+			case 'n', 'N':
+				return false
+			}
+		case k := <-ip.events:
+			if k == mkBack || k == mkEsc { // Bksp/Esc = no
+				return false
+			}
+		}
+	}
+}
+
 func runInfoScreen(w *bufio.Writer, cols, rows int, ip *input, title string, lines []string) {
 	w.WriteString("\x1b[2J\x1b[H")
 	fmt.Fprintf(w, "\x1b[1;%dH\x1b[1;96m%s\x1b[0m", (cols-len(title))/2+1, title)
@@ -2706,6 +2748,8 @@ func runMenu(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 				// Attract mode; returns on a keypress. If it bailed because the
 				// link couldn't carry the frames, hold off a good while before
 				// trying again instead of re-saturating the connection every 30s.
+				// The attract demo has no SFX, and the background music goroutine
+				// keeps playing through it (the demo isn't a live match).
 				if runDemo(w, cols, rows, rows3d, rnd, ip, chat, dropfile) {
 					demoDelay = 5 * time.Minute
 				} else {
@@ -2878,15 +2922,16 @@ func runOptions(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *inpu
 	const (
 		iDiff = iota
 		iAssist
+		iSound
 		iColor
 		iEditor
 		iControls
 		iVersion
 		iBack
 	)
-	names := []string{"DIFFICULTY", "AIM ASSIST", "COLOR", "MAP EDITOR", "CONTROLS", "VERSION INFO", "BACK"}
-	blurbs := []string{"", "", "", "Build and edit arenas.", "Remap your key bindings.", "Your version, the arena's, and any update.", "Return to the main menu."}
-	dim := []bool{false, false, false, false, false, false, false}
+	names := []string{"DIFFICULTY", "AIM ASSIST", "SOUND", "COLOR", "MAP EDITOR", "CONTROLS", "VERSION INFO", "BACK"}
+	blurbs := []string{"", "", "", "", "Build and edit arenas.", "Remap your key bindings.", "Your version, the arena's, and any update.", "Return to the main menu."}
+	dim := []bool{false, false, false, false, false, false, false, false}
 	onOff := func(b bool) string {
 		if b {
 			return "ON"
@@ -2897,9 +2942,11 @@ func runOptions(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *inpu
 	draw := func() {
 		names[iDiff] = "DIFFICULTY: " + s.difficulty.String()
 		names[iAssist] = "AIM ASSIST: " + onOff(s.aimAssist)
+		names[iSound] = "SOUND: " + onOff(s.sound)
 		names[iColor] = "COLOR: " + colorModeName(s.colorMode)
 		blurbs[iDiff] = "Bot skill level."
 		blurbs[iAssist] = "Sticky aim: ease onto a target your reticle is near."
+		blurbs[iSound] = "Hit and kill sound effects (ANSI music; needs a supporting terminal)."
 		blurbs[iColor] = "TRUECOLOR looks best; 256 is lighter on slow links; 16 suits classic terminals."
 		drawListMenu(w, cols, rows, "OPTIONS", names, blurbs, dim, sel)
 	}
@@ -2938,6 +2985,12 @@ func runOptions(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *inpu
 					s.aimAssist = !s.aimAssist
 					saveUserSettings(dropfile, *s)
 					draw()
+				case iSound:
+					s.sound = !s.sound
+					s.soundTested = true // a deliberate choice: don't re-prompt at next launch
+					setSoundOn(s.sound)  // live: the music goroutine picks it up next tick
+					saveUserSettings(dropfile, *s)
+					draw()
 				case iColor:
 					s.colorMode = (s.colorMode + 1) % colorModes
 					colorMode = s.colorMode // applies immediately (next encode)
@@ -2946,7 +2999,9 @@ func runOptions(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *inpu
 				case iEditor:
 					_, pn := door32Identity(dropfile)
 					updatePresence(dropfile, "map editor", "")
+					suspendMusic(true) // the editor is a focused tool: no backdrop music
 					runEditor(w, cols, rows, rows3d, rnd, ip, s, pn, dropfile)
+					suspendMusic(false)
 					draw() // repaint the options menu on return
 				case iControls:
 					runControls(w, cols, rows, ip, dropfile, s)
@@ -4766,15 +4821,21 @@ func main() {
 	go ip.idleWatchdog(term, idleLimit)
 	logf("setup done: grid %dx%d (rows3d=%d), idle timeout %v, entering loop", cols, rows, rows3d, idleLimit)
 
+	// The locked writer lets the background music goroutine and the UI's bufio
+	// flushes share the terminal without splitting each other's escape sequences.
+	lw := &lockedWriter{w: &countWriter{w: term}}
+	w := bufio.NewWriterSize(lw, 1<<16)
+
 	cleanup := func() {
 		clearPresence(dropfile)
+		suspendMusic(true) // stop the music goroutine emitting
 		restore()
-		fmt.Fprint(term, "\x1b[?7h\x1b[0m\x1b[?25h\x1b[2J\x1b[H")
+		// Cut any still-queued music and restore the screen, through the locked
+		// writer so it can't collide with the music goroutine.
+		io.WriteString(lw, "\x1b[|MBT255L64O2C\x0e\x0f\x1b[?7h\x1b[0m\x1b[?25h\x1b[2J\x1b[H")
 	}
 	sigCh = make(chan os.Signal, 1)
 	signal.Notify(sigCh, shutdownSignals...)
-
-	w := bufio.NewWriterSize(&countWriter{w: term}, 1<<16)
 
 	// Load author maps (editor output) so they're playable/pinnable offline. The
 	// arena server loads its own set; this is the offline/door pool.
@@ -4789,6 +4850,19 @@ func main() {
 	ip.setBinds(effectiveBinds(settings.keyBinds)) // apply custom controls
 	startUpdateCheck()                             // background GitHub probe for a newer client
 	_, playerName := door32Identity(dropfile)      // the caller's handle, for scoreboards
+	// Sound: an anonymous / no-dropfile launch (e.g. login.js attract straight into
+	// the demo) stays silent; a real first-time user gets a one-off sound check whose
+	// result is persisted so it's never asked again.
+	if !dropfileHasUser(dropfile) {
+		setSoundOn(false)
+	} else if !settings.soundTested {
+		settings.sound = runSoundTest(w, cols, rows, ip)
+		settings.soundTested = true
+		setSoundOn(settings.sound)
+		saveUserSettings(dropfile, settings)
+	}
+	startMusicLoop(lw) // begin background music now that sound is decided
+
 	// Pre-login / anonymous launch (no dropfile user, e.g. login.js attract): drop
 	// straight into the demo. Any key wakes it to the menu; Esc/disconnect exits.
 	if !dropfileHasUser(dropfile) {
@@ -4948,6 +5022,7 @@ func main() {
 func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, sess session, dropfile, presenceState, presenceDetail string, oneShot bool, pickChar func() (int, [3]float64, bool)) (bool, bool) {
 	ip.setEscMenu(true) // in-game Esc = exit confirm, not instant quit
 	defer ip.setEscMenu(false)
+	defer suspendMusic(false) // resume menu/lobby music when we leave the match
 	netSess, _ := sess.(*netSession)     // non-nil only for an online arena match
 	offSess, _ := sess.(*offlineSession) // non-nil only for a local single-player match
 	escConfirm := false                  // the small "leave match?" banner
@@ -5004,6 +5079,10 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 	topdown := false
 	lastPhase := gm.PhaseActive
 	lastSelfDead := false    // the local tank's death state last frame (for the change-char gate)
+	lastSelfHP := -1         // local HP last frame: a drop = we took a hit (SFX). -1 = unset
+	lastSelfKills := -1      // local kills last frame: a rise = we scored a frag (SFX)
+	lastSelfDeadSfx := false // local dead state last frame: false->true = death stinger
+	lastCount := 0           // last countdown number beeped (0 = not counting down)
 	matchStart := time.Now() // reset when a match goes Active; used for stats duration
 	_, statName := door32Identity(dropfile)
 	recordScores := dropfileHasUser(dropfile) // anonymous/pre-login matches don't count
@@ -5293,6 +5372,23 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 			}
 		}
 		lastPhase = v.phase
+		// Background music plays in the lobby/post-match, but not during active play
+		// (SFX own the mono beeper) or the countdown (so its beeps are clean).
+		suspendMusic(v.phase == gm.PhaseActive || v.phase == gm.PhaseCountdown)
+		// Countdown beeps: a medium tick on 5..2, a high "GO" tone on 1.
+		if v.phase == gm.PhaseCountdown {
+			if n := int(math.Ceil(v.timer)); n != lastCount {
+				switch {
+				case n == 1:
+					sfxGo(w)
+				case n >= 2 && n <= 5:
+					sfxTick(w)
+				}
+				lastCount = n
+			}
+		} else {
+			lastCount = 0
+		}
 		lastSelfDead = v.self.Dead
 		lobbyN = len(v.pairings)
 		lobbyPairings = v.pairings
@@ -5358,6 +5454,20 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 			continue
 		}
 		p := v.self
+		// Sound FX (ANSI music): diff the local tank across frames. Death (-> kill cam)
+		// and frags take priority over the plain hit blip; emit is gated/rate-limited in
+		// the sfx helpers. Only while a match is live.
+		if v.phase == gm.PhaseActive {
+			switch {
+			case p.Dead && !lastSelfDeadSfx:
+				sfxDeath(w)
+			case lastSelfKills >= 0 && p.Kills > lastSelfKills:
+				sfxKill(w)
+			case lastSelfHP >= 0 && p.HP < lastSelfHP:
+				sfxHit(w, now)
+			}
+		}
+		lastSelfHP, lastSelfKills, lastSelfDeadSfx = p.HP, p.Kills, p.Dead
 		if oneShot && oneShotAt.IsZero() {
 			// The level is decided when the match ends, or the moment the player
 			// is permanently out of lives (no elimination rule ends Flag Run).

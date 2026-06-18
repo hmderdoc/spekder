@@ -16,8 +16,10 @@ import (
 type userSettings struct {
 	difficulty   gm.Difficulty
 	aimAssist    bool
-	colorMode    int // colorTrue/color256/color16 (see color.go)
-	campaignBest int // highest campaign level cleared (0 = never)
+	sound        bool // ANSI-music sound effects + music; opt-out
+	soundTested  bool // whether the first-run sound check has been done (else: ask)
+	colorMode    int  // colorTrue/color256/color16 (see color.go)
+	campaignBest int  // highest campaign level cleared (0 = never)
 
 	// Custom controls (see controls.go). keyBinds maps a game action -> its key
 	// (0 = explicitly unbound); absent = the default key.
@@ -25,7 +27,7 @@ type userSettings struct {
 }
 
 func defaultSettings() userSettings {
-	return userSettings{difficulty: gm.DiffNormal, aimAssist: true, colorMode: colorTrue, keyBinds: map[int]byte{}}
+	return userSettings{difficulty: gm.DiffNormal, aimAssist: true, sound: true, colorMode: colorTrue, keyBinds: map[int]byte{}}
 }
 
 // sanitizeKey reduces a handle to a safe, stable filename fragment.
@@ -91,6 +93,16 @@ func loadUserSettings(dropfile string) userSettings {
 	case "on", "true", "1", "yes":
 		s.aimAssist = true
 	}
+	switch strings.ToLower(ini["sound"]) {
+	case "off", "false", "0", "no":
+		s.sound = false
+	case "on", "true", "1", "yes":
+		s.sound = true
+	}
+	switch strings.ToLower(ini["soundtested"]) {
+	case "on", "true", "1", "yes":
+		s.soundTested = true
+	}
 	if bs := ini["binds"]; bs != "" {
 		s.keyBinds = map[int]byte{}
 		for _, entry := range strings.Split(bs, ",") {
@@ -108,6 +120,7 @@ func loadUserSettings(dropfile string) userSettings {
 			}
 		}
 	}
+	setSoundOn(s.sound) // sync the emit gate to the loaded preference
 	return s
 }
 
@@ -133,7 +146,15 @@ func saveUserSettings(dropfile string, s userSettings) {
 	if s.aimAssist {
 		aa = "on"
 	}
-	body := fmt.Sprintf("difficulty = %s\naimassist = %s\ncolormode = %s\n", s.difficulty.String(), aa, colorModeSlug(s.colorMode))
+	snd := "off"
+	if s.sound {
+		snd = "on"
+	}
+	stested := "off"
+	if s.soundTested {
+		stested = "on"
+	}
+	body := fmt.Sprintf("difficulty = %s\naimassist = %s\nsound = %s\nsoundtested = %s\ncolormode = %s\n", s.difficulty.String(), aa, snd, stested, colorModeSlug(s.colorMode))
 	if s.campaignBest > 0 {
 		body += fmt.Sprintf("campaignbest = %d\n", s.campaignBest)
 	}
