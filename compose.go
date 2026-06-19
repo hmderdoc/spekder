@@ -25,11 +25,22 @@ var musScales = []musScale{
 	{"major", [7]int{0, 2, 4, 5, 7, 9, 11}},
 	{"natural minor", [7]int{0, 2, 3, 5, 7, 8, 10}},
 	{"harmonic minor", [7]int{0, 2, 3, 5, 7, 8, 11}}, // raised 7th -> a major V
-	{"dorian", [7]int{0, 2, 3, 5, 7, 9, 10}},
-	{"mixolydian", [7]int{0, 2, 4, 5, 7, 9, 10}}, // flat 7
+	{"dorian", [7]int{0, 2, 3, 5, 7, 9, 10}},         // minor with a bright natural 6
+	{"mixolydian", [7]int{0, 2, 4, 5, 7, 9, 10}},     // major with a flat 7 (heroic/rock)
+	{"lydian", [7]int{0, 2, 4, 6, 7, 9, 11}},         // raised 4th: bright, dreamy, "magical"
+	{"phrygian", [7]int{0, 1, 3, 5, 7, 8, 10}},       // flat 2nd: dark, tense, exotic
+	{"phrygian dominant", [7]int{0, 1, 4, 5, 7, 8, 10}}, // flat2 + major 3rd: Spanish/Middle-Eastern
 }
 
-func (s musScale) minorish() bool { return s.name != "major" && s.name != "mixolydian" }
+// minorish picks the chord pool: major/mixolydian/lydian use the bright pool; the
+// minor & flat-2 modes use the minor pool.
+func (s musScale) minorish() bool {
+	switch s.name {
+	case "major", "mixolydian", "lydian":
+		return false
+	}
+	return true
+}
 
 // degreePitch is the absolute semitone (0 = C0) of scale degree d (1-based; may
 // exceed 7 or go below 1 to climb/drop octaves) above the given root pitch.
@@ -152,24 +163,48 @@ var progsMajorCtx = [][]int{
 	{6, 4, 1, 5},                         // vi-IV-I-V
 	{2, 5, 1, 1},                         // ii-V-I (jazz)
 	{1, 6, 2, 5},                         // I-vi-ii-V (rhythm-changes turnaround)
-	{1, 1, 1, 1, 4, 4, 1, 1, 5, 4, 1, 5}, // 12-bar blues
+	// exotic / video-game flavors (modal motion shines in lydian/mixolydian):
+	{1, 7, 4, 1},    // I-bVII-IV (mixolydian, heroic overworld)
+	{6, 7, 1, 1},    // vi-bVII-I (mixolydian lift)
+	{1, 2, 4, 1},    // I-II-IV (lydian's bright major II)
+	{4, 5, 3, 6},    // IV-V-iii-vi (anime / J-pop "royal road")
+	{1, 5, 6, 3},    // I-V-vi-iii
+	{1, 3, 4, 5},    // I-iii-IV-V (rising, bright)
+	{1, 1, 1, 1, 4, 4, 1, 1, 5, 4, 1, 5}, // 12-bar blues (used sparingly - see composeSong)
 }
 
 // Minor context (natural/harmonic minor, dorian).
 var progsMinorCtx = [][]int{
-	{1, 6, 3, 7},                         // i-VI-III-VII
-	{1, 4, 5, 1},                         // i-iv-V (harmonic minor -> major V pull)
-	{1, 7, 6, 7},                         // i-VII-VI-VII
-	{1, 4, 1, 5},                         // i-iv-i-V
-	{1, 6, 7, 5},                         // i-VI-VII-V
-	{2, 5, 1, 1},                         // ii-V-i (minor jazz)
-	{1, 1, 1, 1, 4, 4, 1, 1, 5, 5, 1, 1}, // minor 12-bar blues
+	{1, 6, 3, 7}, // i-VI-III-VII
+	{1, 4, 5, 1}, // i-iv-V (harmonic minor -> major V pull)
+	{1, 7, 6, 7}, // i-VII-VI-VII
+	{1, 4, 1, 5}, // i-iv-i-V
+	{1, 6, 7, 5}, // i-VI-VII-V
+	{2, 5, 1, 1}, // ii-V-i (minor jazz)
+	// exotic / cinematic / exotic-mode flavors:
+	{1, 7, 6, 5}, // Andalusian cadence: i-bVII-bVI-V (epic; harmonic-minor V is major)
+	{1, 6, 7, 1}, // i-bVI-bVII-i (heroic minor)
+	{1, 3, 7, 6}, // i-III-bVII-bVI (cinematic descent)
+	{1, 2, 1, 7}, // i-bII-i-bVII (phrygian's exotic flat-2)
+	{1, 4, 7, 3}, // i-iv-bVII-III (modal)
+	{1, 5, 1, 6}, // i-V-i-bVI
+	{1, 1, 1, 1, 4, 4, 1, 1, 5, 5, 1, 1}, // minor 12-bar blues (used sparingly)
 }
 
 type musSong struct {
 	desc   string            // key/scale
 	levels [][]string        // [variation step][section] -> MML; step 0 is the untouched base
 	durs   [][]time.Duration // matching section durations (transforms preserve bar length)
+}
+
+// bluesIn returns the 12-bar blues progression in a pool (fallback: first entry).
+func bluesIn(pool [][]int) []int {
+	for _, p := range pool {
+		if progIsBlues(p) {
+			return p
+		}
+	}
+	return pool[0]
 }
 
 func pickRiffs(n int) []riff {
@@ -184,7 +219,37 @@ func pickRiffs(n int) []riff {
 // renderSection renders 8 bars: bar i takes prog[i] (looping the 4-chord set) with
 // riff rs[i] (looping the chosen riffs). Returns the legato MML string and its play
 // duration (plus a small breath at the end so the next section doesn't clip).
-func renderSection(root int, s musScale, prog []int, rs []riff, tempo int, xforms []riffXform, finale bool) (string, time.Duration) {
+// bnote is one bass-line note: an absolute pitch (so it can walk with scale steps
+// and passing tones, unlike chord-relative riff roles) and a length in ticks.
+type bnote struct{ pitch, ticks int }
+
+// bassBar builds one 16-tick bar of WALKING BASS for the chord on degree cd moving
+// to nextCd. The low notes carry the line (root / fifth / scale-step / a chromatic
+// passing tone leading into the next chord's root), interleaved with mid-octave
+// chord tones (a stride "chuck") so on the monophonic voice it grooves like bass +
+// comp rather than a single solo line. style climbs with the variation level:
+// 0 = root-fifth foundation, 1 = octave bass, 2 = a full walk into the next root.
+func bassBar(scaleRoot int, s musScale, cd, nextCd, style int) []bnote {
+	deg := func(d, oct int) int { return degreePitch(scaleRoot, s, d) + 12*oct }
+	rootLo, fifthLo, thirdLo := deg(cd, -1), deg(cd+4, -1), deg(cd+2, -1)
+	octRoot := deg(cd, 0)                    // the root an octave up (octave bass)
+	mid3, mid5 := deg(cd+2, 0), deg(cd+4, 0) // mid chord tones for the "chuck"
+	nextLo := deg(nextCd, -1)
+	approach := nextLo - 1 // chromatic approach into the next root...
+	if nextLo < rootLo {
+		approach = nextLo + 1 // ...from above when the line descends
+	}
+	switch style {
+	case 0: // root-fifth boom-chuck (quarters): low R / chord / low 5 / chord
+		return []bnote{{rootLo, 4}, {mid5, 4}, {fifthLo, 4}, {mid3, 4}}
+	case 1: // octave bass (eighths): R, chord, octave-R, chord, R, chord, 5, chord
+		return []bnote{{rootLo, 2}, {mid5, 2}, {octRoot, 2}, {mid3, 2}, {rootLo, 2}, {mid5, 2}, {fifthLo, 2}, {mid3, 2}}
+	default: // walking (eighths): R, 3rd, 5th, then a passing tone into the next root
+		return []bnote{{rootLo, 2}, {mid5, 2}, {thirdLo, 2}, {mid3, 2}, {fifthLo, 2}, {mid5, 2}, {approach, 2}, {mid3, 2}}
+	}
+}
+
+func renderSection(root int, s musScale, prog []int, rs []riff, tempo int, xforms []riffXform, finale, bass bool, level int) (string, time.Duration) {
 	var b strings.Builder
 	b.WriteString("MLT")
 	b.WriteString(strconv.Itoa(tempo))
@@ -206,6 +271,16 @@ func renderSection(root int, s musScale, prog []int, rs []riff, tempo int, xform
 			continue
 		}
 		cd := prog[bar%len(prog)]
+		if bass { // walking-bass groove: a low line + chord chucks, climbing with level
+			nextCd := prog[(bar+1)%len(prog)]
+			for _, bn := range bassBar(root, s, cd, nextCd, level) {
+				tok, no := pitchMML(bn.pitch, oct, lenTok(bn.ticks))
+				oct = no
+				b.WriteString(tok)
+				ticks += bn.ticks
+			}
+			continue
+		}
 		rf := applyXforms(rs[bar%len(rs)], xforms) // base riff, reshaped by this step's variation transforms
 		for _, n := range rf {
 			lt := lenTok(n.ticks)
@@ -483,26 +558,38 @@ func composeSong() musSong {
 	if s.minorish() {
 		progSet = progsMinorCtx
 	}
-	// Progression: differ from last song (no blues-after-blues); the two sections
-	// differ too, and never both blues (which would make the song drag).
-	avoidBluesA := lastMus.have && progIsBlues(lastMus.progA)
-	progA := pickProg(progSet, avoidBluesA, nil)
-	if lastMus.have && sameProg(progA, lastMus.progA) {
-		progA = pickProg(progSet, avoidBluesA, lastMus.progA)
+	// Progression: blues is distinctive, so play it only occasionally (~1 in 6) and
+	// never back-to-back; otherwise pick a non-blues progression that differs from
+	// the last song. The bridge (B) is never blues.
+	playBlues := !(lastMus.have && progIsBlues(lastMus.progA)) && rand.Intn(6) == 0
+	var progA []int
+	if playBlues {
+		progA = bluesIn(progSet)
+	} else {
+		progA = pickProg(progSet, true, lastMus.progA)
 	}
-	progB := pickProg(progSet, progIsBlues(progA), progA)
+	progB := pickProg(progSet, true, progA)
 
 	rA, rB := pickRiffs(2), pickRiffs(2)
 	plan := makePlan()
 	blues := progIsBlues(progA)
+	// Groove: one section may run a walking bass instead of arpeggios (so songs get
+	// a real bass foundation), but never both - the arpeggios stay the lead texture.
+	bassA, bassB := false, false
+	switch rand.Intn(3) {
+	case 0:
+		bassA = true
+	case 1:
+		bassB = true
+	}
 	var levels [][]string
 	var durs [][]time.Duration
 	for li, step := range plan {
 		finale := li == len(plan) - 1 // final pass walks out to the tonic on its closing bar
-		a, ad := renderSection(root, s, progA, rA, tempo, step, false)
+		a, ad := renderSection(root, s, progA, rA, tempo, step, false, bassA, li)
 		end, endD := a, ad
 		if finale {
-			end, endD = renderSection(root, s, progA, rA, tempo, step, true)
+			end, endD = renderSection(root, s, progA, rA, tempo, step, true, bassA, li)
 		}
 		if blues {
 			// Blues is played as choruses, not AABA: two 12-bar choruses per pass, so
@@ -510,7 +597,7 @@ func composeSong() musSong {
 			levels = append(levels, []string{a, end})
 			durs = append(durs, []time.Duration{ad, endD})
 		} else {
-			b, bd := renderSection(root, s, progB, rB, tempo, step, false)
+			b, bd := renderSection(root, s, progB, rB, tempo, step, false, bassB, li)
 			levels = append(levels, []string{a, a, b, end}) // AABA
 			durs = append(durs, []time.Duration{ad, ad, bd, endD})
 		}
