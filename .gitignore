@@ -11,6 +11,12 @@
 /door
 /server
 
+# Cross-compiled download binaries (e.g. the Apple Silicon door).
+/spekder-macos-*
+/spekder-darwin-*
+/spekder-linux-*
+/spekder-windows-*
+
 # Runtime / per-install (spekder.ini.example is committed; the live config is not)
 /spekder.log
 /door.log

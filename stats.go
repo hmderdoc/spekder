@@ -33,6 +33,7 @@ func matchResultFrom(v viewState, player string, dur float64) matchResult {
 		Vehicle: charName(v.self.Body), Player: player,
 		Won: won, Duration: dur,
 		Kills: v.self.Kills, Deaths: v.self.Deaths,
+		KillsHuman: v.self.KillsHuman, KillsBot: v.self.KillsBot, Captures: v.self.Captures,
 		ShotsFired: v.self.ShotsFired, ShotsHit: v.self.ShotsHit,
 		Pickups: v.self.Pickups, Wave: v.wave, Objective: obj,
 		DmgDealt: v.self.DmgDealt, HealDone: v.self.HealDone,
@@ -47,12 +48,36 @@ type modeStat struct {
 	Games, Wins, Best int
 }
 
+// aggStat is a cumulative bucket keyed by (mode, difficulty) - the source the
+// high-score boards slice when the player filters difficulty. ARENA (online)
+// matches bucket under the "ARENA" tier (no solo difficulty).
+type aggStat struct {
+	Games, Wins, Losses  int
+	Kills, Deaths        int
+	KillsHuman, KillsBot int
+	ShotsFired, ShotsHit int
+	Captures             int
+	Score                int
+}
+
 type scoreEntry struct {
 	Score int    `json:"score"`
+	Kills int    `json:"kills"` // frags in that run (DEATHMATCH board secondary column)
+	Caps  int    `json:"caps"`  // flag captures in that run (CTF board secondary column)
 	Map   string `json:"map"`
 	Name  string `json:"name"`
 	When  int64  `json:"when"`
-	Diff  int    `json:"diff"` // difficulty tier the run was played on (gm.Difficulty)
+	Diff  int    `json:"diff"` // difficulty tier the run was played on (gm.Difficulty); -1 = arena
+}
+
+const arenaTier = "ARENA" // bucket-key difficulty label for online matches
+
+// bucketKey is the (mode, difficulty) key into statLine.Buckets / the arena rollup.
+func bucketKey(mode string, diff gm.Difficulty, online bool) string {
+	if online {
+		return mode + "/" + arenaTier
+	}
+	return mode + "/" + diff.String()
 }
 
 type statLine struct {
@@ -65,6 +90,8 @@ type statLine struct {
 	PerMode                         map[string]*modeStat
 	PerVehicle                      map[string]int
 	High                            map[string][]scoreEntry // per mode, best single runs (top N)
+	Buckets                         map[string]*aggStat     // per (mode, difficulty), for filtered boards
+	TierHigh                        map[int][]scoreEntry    // FLAG RUN: best whole-tier session scores
 }
 
 // matchResult is one finished match, the input to record().
@@ -75,6 +102,8 @@ type matchResult struct {
 	Won                        bool
 	Duration                   float64
 	Kills, Deaths              int
+	KillsHuman, KillsBot       int
+	Captures                   int
 	ShotsFired, ShotsHit       int
 	Pickups, Wave, Objective   int
 	DmgDealt, HealDone         int
@@ -85,6 +114,7 @@ type matchResult struct {
 }
 
 const highScoreKeep = 10
+const captureBonus = 15 // points per personal flag capture/collection (rewards the doer)
 
 // difficultyMul weights a solo score by bot tier: an Ultimate clear is worth far
 // more than the same run on Easy. Online matches have no tier (always 1.0).
@@ -105,8 +135,9 @@ func difficultyMul(d gm.Difficulty) float64 {
 // scoreMatch is the points formula (transparent, mode-aware). See SCORING.md.
 func scoreMatch(r matchResult) int {
 	s := r.Kills*10 - r.Deaths*4 + r.Pickups*2
-	s += r.DmgDealt / 25 // chip damage / assists
-	s += r.HealDone / 15 // support: HP restored to allies
+	s += r.DmgDealt / 25         // chip damage / assists
+	s += r.HealDone / 15         // support: HP restored to allies
+	s += r.Captures * captureBonus // personal flag captures/collections
 	if r.Won {
 		s += 50
 	}
@@ -152,6 +183,7 @@ func scoreBreakdown(r matchResult) string {
 	add("pickups", r.Pickups*2)
 	add("dmg", r.DmgDealt/25)
 	add("heal", r.HealDone/15)
+	add("caps", r.Captures*captureBonus)
 	if r.Won {
 		add("win", 50)
 	}
@@ -225,15 +257,67 @@ func (st *statLine) record(r matchResult) {
 	if r.Vehicle != "" {
 		st.PerVehicle[r.Vehicle]++
 	}
+	// Bucketed aggregates by (mode, difficulty) - the source filtered boards slice.
+	if st.Buckets == nil {
+		st.Buckets = map[string]*aggStat{}
+	}
+	key := bucketKey(r.ModeName, r.Difficulty, r.Online)
+	ag := st.Buckets[key]
+	if ag == nil {
+		ag = &aggStat{}
+		st.Buckets[key] = ag
+	}
+	ag.Games++
+	if r.Won {
+		ag.Wins++
+	} else {
+		ag.Losses++
+	}
+	ag.Kills += r.Kills
+	ag.Deaths += r.Deaths
+	ag.KillsHuman += r.KillsHuman
+	ag.KillsBot += r.KillsBot
+	ag.ShotsFired += r.ShotsFired
+	ag.ShotsHit += r.ShotsHit
+	ag.Captures += r.Captures
+	ag.Score += r.Score
 	if st.High == nil {
 		st.High = map[string][]scoreEntry{}
 	}
-	list := append(st.High[r.ModeName], scoreEntry{Score: r.Score, Map: r.MapName, Name: r.Player, When: r.When, Diff: int(r.Difficulty)})
+	diff := int(r.Difficulty)
+	if r.Online {
+		diff = -1
+	}
+	list := append(st.High[r.ModeName], scoreEntry{Score: r.Score, Kills: r.Kills, Caps: r.Captures, Map: r.MapName, Name: r.Player, When: r.When, Diff: diff})
 	sort.SliceStable(list, func(i, j int) bool { return list[i].Score > list[j].Score })
 	if len(list) > highScoreKeep {
 		list = list[:highScoreKeep]
 	}
 	st.High[r.ModeName] = list
+}
+
+// recordTierRun folds a finished FLAG RUN tier SESSION (all levels of one tier,
+// scored together) into the per-tier high-score list. Returns the 1-based local
+// rank (0 = didn't place).
+func recordTierRun(dropfile string, tier, score, diff int, player string) int {
+	st := loadStats(dropfile)
+	if st.TierHigh == nil {
+		st.TierHigh = map[int][]scoreEntry{}
+	}
+	when := time.Now().Unix()
+	list := append(st.TierHigh[tier], scoreEntry{Score: score, Name: player, When: when, Diff: diff})
+	sort.SliceStable(list, func(i, j int) bool { return list[i].Score > list[j].Score })
+	if len(list) > highScoreKeep {
+		list = list[:highScoreKeep]
+	}
+	st.TierHigh[tier] = list
+	saveStats(dropfile, st)
+	for i, e := range list {
+		if e.When == when && e.Score == score {
+			return i + 1
+		}
+	}
+	return 0
 }
 
 // favorite returns the highest-count key in a count map (ties: first seen-stable).

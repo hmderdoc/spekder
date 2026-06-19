@@ -207,6 +207,7 @@ func submitScore(r matchResult, name string) {
 		Map: r.MapName, Score: r.Score, When: uint32(r.When),
 		Won: r.Won, Kills: r.Kills, Deaths: r.Deaths,
 		ShotsFired: r.ShotsFired, ShotsHit: r.ShotsHit, Wave: r.Wave,
+		KillsHuman: r.KillsHuman, KillsBot: r.KillsBot, Captures: r.Captures,
 	}))
 }
 

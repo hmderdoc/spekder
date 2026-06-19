@@ -99,6 +99,18 @@ func lenTok(ticks int) string {
 	return "8"
 }
 
+// validLen reports whether a tick count is exactly representable by lenTok. A
+// transform that produces any other length would desync the section duration
+// from the rendered MML (the note plays short - lenTok falls back to "8"). So
+// the riff transforms gate their output on this.
+func validLen(ticks int) bool {
+	switch ticks {
+	case 1, 2, 3, 4, 6, 8, 12, 16:
+		return true
+	}
+	return false
+}
+
 // rnote is one riff step: role picks a tone relative to the current chord; ticks
 // is its length in sixteenths.
 type rnote struct {
@@ -339,7 +351,9 @@ func ornamentRole(r byte, i int) byte {
 func xOrnament(rf riff) riff {
 	out := make(riff, 0, len(rf)+4)
 	for i, n := range rf {
-		if n.role == '-' || n.ticks < 2 || rand.Float64() < 0.5 {
+		// Skip rests, too-short notes, a coin-flip, and any note whose ornamented
+		// remainder (ticks-2) wouldn't be a representable length.
+		if n.role == '-' || n.ticks < 2 || rand.Float64() < 0.5 || (n.ticks >= 4 && !validLen(n.ticks-2)) {
 			out = append(out, n)
 			continue
 		}
@@ -403,7 +417,7 @@ func xSyncopate(rf riff) riff {
 	out := make(riff, 0, len(rf)+2)
 	pushed := false
 	for i, n := range rf {
-		if !pushed && i > 0 && n.role != '-' && n.ticks >= 2 && rand.Float64() < 0.5 {
+		if !pushed && i > 0 && n.role != '-' && n.ticks >= 2 && validLen(n.ticks-1) && rand.Float64() < 0.5 {
 			out = append(out, rnote{'-', 1}, rnote{n.role, n.ticks - 1})
 			pushed = true
 			continue
@@ -417,7 +431,7 @@ func xSyncopate(rf riff) riff {
 func xSkeleton(rf riff) riff {
 	out := make(riff, 0, len(rf))
 	for i := 0; i < len(rf); {
-		if i+1 < len(rf) && rf[i].role != '-' && rf[i+1].role != '-' {
+		if i+1 < len(rf) && rf[i].role != '-' && rf[i+1].role != '-' && validLen(rf[i].ticks+rf[i+1].ticks) {
 			out = append(out, rnote{rf[i].role, rf[i].ticks + rf[i+1].ticks})
 			i += 2
 		} else {

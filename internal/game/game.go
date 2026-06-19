@@ -974,7 +974,6 @@ const (
 	ctfCaptureLimit = 3    // CTF: captures to win a match
 	ctfCaptureRad   = 2.6  // CTF: how close to your base to score a capture
 	flagReturnTime  = 15.0 // CTF: sec a dropped flag waits before returning home
-	ctfCaptureBonus = 5    // CTF: personal frags awarded for a capture
 
 	zoneCaptureTime = 4.0 // KotH: default sec of uncontested presence to flip a zone
 	kothScoreLimit  = 60  // KotH: hold-points (~seconds held) to win
@@ -1325,6 +1324,8 @@ type Tank struct {
 	// TankSnap for the door.
 	shotsFired, shotsHit, pickups int
 	dmgDealt, healDone            int
+	killsHuman, killsBot          int // kills split by victim type (for K/D high-score breakdown)
+	captures                      int // flags captured (CTF) or collected (FLAG RUN) by this tank
 
 	lungeVX, lungeVZ float64 // transient forward leap velocity (melee charge), decays
 }
@@ -1348,6 +1349,8 @@ type TankSnap struct {
 	Pickups                int
 	DmgDealt               int
 	HealDone               int
+	KillsHuman, KillsBot   int     // kills split by victim type (K/D breakdown)
+	Captures               int     // flags captured (CTF) / collected (FLAG RUN)
 	Lives                  int
 	Team                   int     // CTF team (-1 in non-team modes)
 	Carrying               bool    // CTF: carrying an enemy flag
@@ -4403,6 +4406,7 @@ func (w *World) collectFlags(dt float64) {
 			rad = flagHoldRadius // a "hill" you stand in, not a touch grab
 		}
 		collectorOn, enemyOn := false, false
+		collectorIdx := -1 // who gets capture credit (prefer a human collector over allies)
 		for ti := range w.Tanks {
 			t := &w.Tanks[ti]
 			if t.Dead || t.gone {
@@ -4417,20 +4421,27 @@ func (w *World) collectFlags(dt float64) {
 			}
 			if !t.Bot || ti == w.demoHero || w.allyCollector(ti) {
 				collectorOn = true
+				if collectorIdx < 0 || (!t.Bot && w.Tanks[collectorIdx].Bot) {
+					collectorIdx = ti // a human present takes credit over an allied bot
+				}
 			} else {
 				enemyOn = true
 			}
 		}
+		took := false
 		switch {
 		case f.DwellReq > 0:
 			if collectorOn && !enemyOn {
 				f.dwellT += dt
 				if f.dwellT >= f.DwellReq {
-					f.Taken = true
+					f.Taken, took = true, true
 				}
 			}
 		case collectorOn:
-			f.Taken = true
+			f.Taken, took = true, true
+		}
+		if took && collectorIdx >= 0 {
+			w.Tanks[collectorIdx].captures++
 		}
 	}
 }
@@ -4494,7 +4505,7 @@ func (w *World) stepCTF(dt float64) {
 					if t.Team == 0 || t.Team == 1 {
 						w.teamScore[t.Team]++
 					}
-					t.Kills += ctfCaptureBonus
+					t.captures++ // a real per-player capture stat (previously inflated kills)
 				}
 			}
 		}
@@ -7405,6 +7416,11 @@ func (w *World) hurt(ti, dmg, owner int, cause KillCause) {
 	killer := -1
 	if owner >= 0 && owner < len(w.Tanks) && owner != ti {
 		w.Tanks[owner].Kills++
+		if t.Bot {
+			w.Tanks[owner].killsBot++
+		} else {
+			w.Tanks[owner].killsHuman++
+		}
 		killer = owner
 		if w.Tanks[owner].pounceT > 0 {
 			w.Tanks[owner].cooldown2 = 0 // POUNCE kill refunds the dash (Genji-style chain)
@@ -8176,6 +8192,7 @@ func (w *World) Snapshot() ([]TankSnap, []ShotSnap, []FlagSnap, []PickupSnap) {
 			ShieldUp: t.shieldUp, ShieldFrac: shieldFracOf(t),
 			Body: t.body, ShotsFired: t.shotsFired, ShotsHit: t.shotsHit, Pickups: t.pickups,
 			DmgDealt: t.dmgDealt, HealDone: t.healDone,
+			KillsHuman: t.killsHuman, KillsBot: t.killsBot, Captures: t.captures,
 			Lives: t.lives, Team: t.Team, Carrying: t.Carrying >= 0,
 			Kills: t.Kills, Deaths: t.Deaths, RespawnIn: t.respawn, Reload: reload, Ammo: ammoFrac,
 			Reload2: reload2, Charges: charges, MaxCharges: maxCharges, Slip: t.slipT > 0,

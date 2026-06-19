@@ -51,7 +51,15 @@ type docPage struct {
 // rebuild (optional) regenerates the pages for a new terminal width - pass it for
 // width-reflowing content like HELP; nil for fixed-width tables that just need a
 // re-centered, re-heighted layout on resize.
-func runPagedDoc(w *bufio.Writer, cols, rows int, ip *input, screenTitle, titleSGR string, pages []docPage, rebuild func(cols int) []docPage) {
+// docFilter adds a single cycling filter (the SHIFT-D difficulty toggle on the
+// high-score boards): label() is shown in the footer, cycle() advances the
+// caller's filter state, and runPagedDoc then re-runs rebuild() to repaint.
+type docFilter struct {
+	label func() string
+	cycle func()
+}
+
+func runPagedDoc(w *bufio.Writer, cols, rows int, ip *input, screenTitle, titleSGR string, pages []docPage, rebuild func(cols int) []docPage, filter *docFilter) {
 	if len(pages) == 0 {
 		pages = []docPage{{body: tableLines([]string{"(nothing here yet)"}, docTheme)}}
 	}
@@ -125,6 +133,9 @@ func runPagedDoc(w *bufio.Writer, cols, rows int, ip *input, screenTitle, titleS
 		if len(pages) > 1 {
 			foot = "left/right  section    up/dn  scroll    ENTER / Bksp  back"
 		}
+		if filter != nil {
+			foot += "    D  " + filter.label()
+		}
 		fmt.Fprintf(&b, "\x1b[%d;%dH\x1b[0;90m%s\x1b[0m", footRow, (cols-len(foot))/2+1, foot)
 		// Scroll affordance (only when the section overflows): far right of the footer.
 		if len(body) > viewH {
@@ -164,6 +175,19 @@ func runPagedDoc(w *bufio.Writer, cols, rows int, ip *input, screenTitle, titleS
 						}
 						scroll = 0
 					}
+				}
+				relayout()
+				draw()
+			}
+		case r := <-ip.runes:
+			if filter != nil && r == 'D' && rebuild != nil { // SHIFT-D (lowercase d pages right)
+				filter.cycle()
+				if np := rebuild(cols); len(np) > 0 {
+					pages = np
+					if pg >= len(pages) {
+						pg = len(pages) - 1
+					}
+					scroll = 0
 				}
 				relayout()
 				draw()

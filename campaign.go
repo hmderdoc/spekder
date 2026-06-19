@@ -35,6 +35,8 @@ func runCampaign(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *inp
 	if len(idxs) == 0 {
 		return false
 	}
+	tier := gm.CampaignMaps[idxs[0]].Tier // every map in idxs shares a tier
+	tierScore := 0                        // summed across the levels of this session
 	lives := campaignLives
 	for li := 0; li < len(idxs); li++ {
 		m := gm.CampaignMaps[idxs[li]]
@@ -44,6 +46,7 @@ func runCampaign(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *inp
 		sess := newOfflineOnMap(idx, 0, gm.EffectiveMode(m), s.difficulty, s.aimAssist, playerName, vcolor, vbody)
 		sess.w.SetCampaignLives(lives)
 		quit, _ := playMatch(w, cols, rows, rows3d, rnd, ip, sess, dropfile, "campaign", m.Name, true, false, nil)
+		tierScore += lastMatchScore
 		snap := sess.w.Match()
 		left := livesOf(sess)
 		sess.close()
@@ -60,9 +63,10 @@ func runCampaign(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *inp
 			return false
 		}
 		if cleared := snap.FlagsTotal > 0 && snap.FlagsLeft == 0; !cleared {
+			recordTierRun(dropfile, tier, tierScore, int(s.difficulty), playerName)
 			runInfoScreen(w, cols, rows, ip, "GAME OVER", []string{
 				fmt.Sprintf("The run ends at level %d: %s.", li+1, m.Name),
-				fmt.Sprintf("Best run so far: level %d.", s.campaignBest),
+				fmt.Sprintf("Best run so far: level %d.   Run score: %d.", s.campaignBest, tierScore),
 				"",
 				"Grab every flag before the clock - and keep a life in reserve.",
 			})
@@ -74,8 +78,10 @@ func runCampaign(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *inp
 		}
 		lives = left + 1 // the cleared-level bonus life
 		if li == len(idxs)-1 {
+			recordTierRun(dropfile, tier, tierScore, int(s.difficulty), playerName)
 			runInfoScreen(w, cols, rows, ip, "CAMPAIGN COMPLETE", []string{
 				fmt.Sprintf("All %d levels cleared, %d lives still in hand.", len(idxs), lives),
+				fmt.Sprintf("Run score: %d.", tierScore),
 				"The flags are safe. For now.",
 			})
 			return false

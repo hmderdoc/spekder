@@ -37,7 +37,7 @@ func playerKey(name, bbs string) string { return bbs + "\x00" + name }
 // recordScore inserts a submitted score into its mode's table (top-N), folds the
 // match into the submitter's career aggregate, and persists both.
 func (s *server) recordScore(sub proto.ScoreSubmit) {
-	row := proto.ScoreRow{Mode: sub.Mode, Name: sub.Name, BBS: sub.BBS, Map: sub.Map, Score: sub.Score, When: sub.When}
+	row := proto.ScoreRow{Mode: sub.Mode, Name: sub.Name, BBS: sub.BBS, Map: sub.Map, Score: sub.Score, When: sub.When, Kills: sub.Kills, Caps: sub.Captures}
 	s.mu.Lock()
 	if s.board == nil {
 		s.board = map[string][]proto.ScoreRow{}
@@ -65,6 +65,9 @@ func (s *server) recordScore(sub proto.ScoreSubmit) {
 	}
 	a.Kills += sub.Kills
 	a.Deaths += sub.Deaths
+	a.KillsHuman += sub.KillsHuman
+	a.KillsBot += sub.KillsBot
+	a.Captures += sub.Captures
 	a.ShotsFired += sub.ShotsFired
 	a.ShotsHit += sub.ShotsHit
 	a.TotalScore += sub.Score
@@ -74,6 +77,24 @@ func (s *server) recordScore(sub proto.ScoreSubmit) {
 	if sub.Wave > a.BestWave {
 		a.BestWave = sub.Wave
 	}
+	// Per-mode record (for the per-mode K/D & win% boards).
+	mi := -1
+	for k := range a.Modes {
+		if a.Modes[k].Mode == sub.Mode {
+			mi = k
+			break
+		}
+	}
+	if mi < 0 {
+		a.Modes = append(a.Modes, proto.ModeAgg{Mode: sub.Mode})
+		mi = len(a.Modes) - 1
+	}
+	a.Modes[mi].Games++
+	if sub.Won {
+		a.Modes[mi].Wins++
+	}
+	a.Modes[mi].Kills += sub.Kills
+	a.Modes[mi].Deaths += sub.Deaths
 
 	boardData, _ := json.MarshalIndent(s.board, "", "  ")
 	playerData, _ := json.MarshalIndent(s.players, "", "  ")

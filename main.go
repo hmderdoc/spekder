@@ -2061,7 +2061,7 @@ func runInfoScreen(w *bufio.Writer, cols, rows int, ip *input, title string, lin
 // solo/online play, custom maps and an about page. Left/right pages the
 // sections; up/down scrolls a long one. See help.go for the copy.
 func runHelp(w *bufio.Writer, cols, rows int, ip *input) {
-	runPagedDoc(w, cols, rows, ip, "HELP", titleBlue, helpPages(cols), helpPages)
+	runPagedDoc(w, cols, rows, ip, "HELP", titleBlue, helpPages(cols), helpPages, nil)
 }
 
 // runVersionInfo is the view-only VERSION INFO screen (from OPTIONS, or the
@@ -2373,7 +2373,7 @@ func runPlayerCard(w *bufio.Writer, cols, rows int, ip *input, dropfile string) 
 			"",
 			"Finish a match and your record shows up here - wins and losses, kills",
 			"and accuracy, your best runs and your favorite characters.",
-		}, cols-8, docTheme)}}, nil)
+		}, cols-8, docTheme)}}, nil, nil)
 		return
 	}
 	ratio := func(a, b int) string {
@@ -2427,7 +2427,7 @@ func runPlayerCard(w *bufio.Writer, cols, rows int, ip *input, dropfile string) 
 	for _, e := range order {
 		L = append(L, fmt.Sprintf("  %-12s %6d %6d %7d", clip(e.name, 12), e.ms.Games, e.ms.Wins, e.ms.Best))
 	}
-	runPagedDoc(w, cols, rows, ip, "PLAYER CARD", titleGreen, []docPage{{body: tableLines(L, docTheme)}}, nil)
+	runPagedDoc(w, cols, rows, ip, "PLAYER CARD", titleGreen, []docPage{{body: tableLines(L, docTheme)}}, nil, nil)
 }
 
 // hsDateShort formats a leaderboard timestamp as "2 Jan 2006" (empty if unset).
@@ -2522,11 +2522,25 @@ func careerBoardPages(players []proto.PlayerRow) []docPage {
 		pages = append(pages, pg)
 	}
 	if pg, ok := board("K/D",
-		fmt.Sprintf("   %5s %7s %7s   %s", "K/D", "KILLS", "DEATHS", "PLAYER"),
+		fmt.Sprintf("   %5s %6s %6s %6s %6s   %s", "K/D", "KILLS", "vHUM", "vBOT", "DEATHS", "PLAYER"),
 		func(p proto.PlayerRow) bool { return p.Games >= minSkillGames },
 		func(a, b proto.PlayerRow) bool { return kd(a) > kd(b) },
 		func(rank int, p proto.PlayerRow) string {
-			return fmt.Sprintf(" %2d. %5.2f %7d %7d   %s", rank+1, kd(p), p.Kills, p.Deaths, hsWho(p.Name, p.BBS))
+			return fmt.Sprintf(" %2d. %5.2f %6d %6d %6d %6d   %s", rank+1, kd(p), p.Kills, p.KillsHuman, p.KillsBot, p.Deaths, hsWho(p.Name, p.BBS))
+		}); ok {
+		pages = append(pages, pg)
+	}
+	if pg, ok := board("CAPTURES",
+		fmt.Sprintf("   %6s %6s   %s", "CAPS", "GAMES", "PLAYER"),
+		func(p proto.PlayerRow) bool { return p.Captures > 0 },
+		func(a, b proto.PlayerRow) bool {
+			if a.Captures != b.Captures {
+				return a.Captures > b.Captures
+			}
+			return a.Games < b.Games // fewer games for the same caps = more efficient
+		},
+		func(rank int, p proto.PlayerRow) string {
+			return fmt.Sprintf(" %2d.%6d %6d   %s", rank+1, p.Captures, p.Games, hsWho(p.Name, p.BBS))
 		}); ok {
 		pages = append(pages, pg)
 	}
@@ -2556,21 +2570,76 @@ func careerBoardPages(players []proto.PlayerRow) []docPage {
 	return pages
 }
 
-// runHighScores shows one board per screen, paged left/right. With an arena it
-// leads with the global career boards (winningest / K-D / accuracy / waves) then
-// the per-mode single-match boards; offline it falls back to the caller's local
-// per-mode tables (which carry the difficulty tier each run was set on).
+// modeSkillBoards builds one global board per mode ranking players by K/D, with a
+// win% column - the per-mode skill breakdown. A mode appears only if some player
+// has the minimum games in it.
+func modeSkillBoards(players []proto.PlayerRow) []docPage {
+	const minModeGames = 3
+	kdOf := func(m proto.ModeAgg) float64 {
+		if m.Deaths == 0 {
+			return float64(m.Kills)
+		}
+		return float64(m.Kills) / float64(m.Deaths)
+	}
+	type entry struct {
+		who string
+		m   proto.ModeAgg
+	}
+	byMode := map[string][]entry{}
+	for _, p := range players {
+		for _, m := range p.Modes {
+			if m.Games >= minModeGames {
+				byMode[m.Mode] = append(byMode[m.Mode], entry{hsWho(p.Name, p.BBS), m})
+			}
+		}
+	}
+	var pages []docPage
+	for i := range gm.Rulesets { // stable tab order = the mode enum order
+		name := gm.Mode(i).String()
+		es := byMode[name]
+		if len(es) == 0 {
+			continue
+		}
+		sort.SliceStable(es, func(a, b int) bool { return kdOf(es[a].m) > kdOf(es[b].m) })
+		body := []rline{styledLine("\x1b[0;90m", fmt.Sprintf("   %5s %6s %6s   %s", "K/D", "WIN%", "GAMES", "PLAYER"))}
+		for j, e := range es {
+			if j >= 10 {
+				break
+			}
+			win := 0
+			if e.m.Games > 0 {
+				win = e.m.Wins * 100 / e.m.Games
+			}
+			body = append(body, styledLine(hsRowColor(j),
+				fmt.Sprintf(" %2d. %5.2f  %3d%% %6d   %s", j+1, kdOf(e.m), win, e.m.Games, e.who)))
+		}
+		pages = append(pages, docPage{name: name + " K/D", body: body})
+	}
+	return pages
+}
+
+// hsDiffFilter is the difficulty slice shown on the high-score boards, cycled by
+// SHIFT-D: -1 = ALL, 0..4 = a gm.Difficulty tier, hsArenaFilter = online/arena.
+const hsArenaFilter = 5
+
+// runHighScores shows one board per screen, paged left/right, with a SHIFT-D
+// difficulty filter. With an arena it leads with the global career boards then
+// the per-mode single-match boards; offline it shows the caller's own per-mode
+// best runs and FLAG RUN tier-session boards (TIER 0 is instructional, no board).
 func runHighScores(w *bufio.Writer, cols, rows int, ip *input, dropfile string) {
 	const head = "\x1b[0;90m"
-	title := "HIGH SCORES  (local)"
-	var pages []docPage
 
-	if arenaConfigured() { // prefer the global boards
-		var careerPages, modePages []docPage
-		if prows, err := queryGlobalPlayers(); err == nil {
-			careerPages = careerBoardPages(prows)
+	// Global (arena) boards first. PvP play has no bot difficulty, so these carry
+	// no SHIFT-D filter - just the new kill-split / captures / per-mode columns.
+	if arenaConfigured() {
+		prows, perr := queryGlobalPlayers()
+		grows, gerr := queryGlobalScores()
+		var pages []docPage
+		if perr == nil {
+			pages = careerBoardPages(prows)
+			pages = append(pages, modeSkillBoards(prows)...)
 		}
-		if grows, err := queryGlobalScores(); err == nil && len(grows) > 0 {
+		if gerr == nil && len(grows) > 0 {
 			byMode := map[string][]proto.ScoreRow{}
 			for _, r := range grows {
 				byMode[r.Mode] = append(byMode[r.Mode], r)
@@ -2581,53 +2650,216 @@ func runHighScores(w *bufio.Writer, cols, rows int, ip *input, dropfile string) 
 				if len(list) == 0 {
 					continue
 				}
+				ctf := gm.Mode(i) == gm.ModeCTF
 				sort.SliceStable(list, func(a, b int) bool { return list[a].Score > list[b].Score })
-				body := []rline{styledLine(head, fmt.Sprintf("    %6s  %-18s %-26s %s", "SCORE", "MAP", "PLAYER", "WHEN"))}
+				h := fmt.Sprintf("   %6s %5s", "SCORE", "KILLS")
+				if ctf {
+					h += fmt.Sprintf(" %4s", "CAPS")
+				}
+				h += fmt.Sprintf("  %-14s %-22s %s", "MAP", "PLAYER", "WHEN")
+				body := []rline{styledLine(head, h)}
 				for j, e := range list {
 					if j >= 10 {
 						break
 					}
-					body = append(body, styledLine(hsRowColor(j),
-						fmt.Sprintf(" %2d.%6d  %-18s %-26s %s", j+1, e.Score, clip(e.Map, 18), hsWho(e.Name, e.BBS), hsDateShort(int64(e.When)))))
+					r := fmt.Sprintf(" %2d.%6d %5d", j+1, e.Score, e.Kills)
+					if ctf {
+						r += fmt.Sprintf(" %4d", e.Caps)
+					}
+					r += fmt.Sprintf("  %-14s %-22s %s", clip(e.Map, 14), clip(hsWho(e.Name, e.BBS), 22), hsDateShort(int64(e.When)))
+					body = append(body, styledLine(hsRowColor(j), r))
 				}
-				modePages = append(modePages, docPage{name: name + " best", body: body})
+				pages = append(pages, docPage{name: name + " best", body: body})
 			}
 		}
-		pages = append(careerPages, modePages...)
 		if len(pages) > 0 {
-			title = "HIGH SCORES  (global)"
+			runPagedDoc(w, cols, rows, ip, "HIGH SCORES  (global)", titleRed, pages, nil, nil)
+			return
 		}
 	}
 
-	if len(pages) == 0 { // no arena / unreachable / empty: the caller's local tables
+	diffFilter := -1
+	label := func() string {
+		switch diffFilter {
+		case -1:
+			return "difficulty: ALL"
+		case hsArenaFilter:
+			return "difficulty: ARENA"
+		default:
+			return "difficulty: " + gm.Difficulty(diffFilter).String()
+		}
+	}
+	keep := func(diff int) bool { // does a run's stored difficulty pass the filter?
+		switch diffFilter {
+		case -1:
+			return true
+		case hsArenaFilter:
+			return diff < 0 // arena runs store Diff = -1
+		default:
+			return diff == diffFilter
+		}
+	}
+	tierCol := func() bool { return diffFilter == -1 } // the TIER column only adds info under ALL
+
+	// localModeBoard renders the caller's own best runs for one mode under the
+	// current filter (KILLS always; CAPS for flag modes; TIER only under ALL).
+	localModeBoard := func(name string, list []scoreEntry, caps bool) (docPage, bool) {
+		var es []scoreEntry
+		for _, e := range list {
+			if keep(e.Diff) {
+				es = append(es, e)
+			}
+		}
+		if len(es) == 0 {
+			return docPage{}, false
+		}
+		h := fmt.Sprintf("   %6s %5s", "SCORE", "KILLS")
+		if caps {
+			h += fmt.Sprintf(" %4s", "CAPS")
+		}
+		h += fmt.Sprintf("  %-16s", "MAP")
+		if tierCol() {
+			h += fmt.Sprintf(" %-9s", "TIER")
+		}
+		h += " WHEN"
+		body := []rline{styledLine(head, h)}
+		for j, e := range es {
+			if j >= 10 {
+				break
+			}
+			r := fmt.Sprintf(" %2d.%6d %5d", j+1, e.Score, e.Kills)
+			if caps {
+				r += fmt.Sprintf(" %4d", e.Caps)
+			}
+			r += fmt.Sprintf("  %-16s", clip(e.Map, 16))
+			if tierCol() {
+				r += fmt.Sprintf(" %-9s", gm.Difficulty(e.Diff).String())
+			}
+			r += " " + hsDateShort(e.When)
+			body = append(body, styledLine(hsRowColor(j), r))
+		}
+		return docPage{name: name, body: body}, true
+	}
+
+	// localTierBoard renders one FLAG RUN tier's session high scores.
+	localTierBoard := func(tier int, list []scoreEntry) (docPage, bool) {
+		var es []scoreEntry
+		for _, e := range list {
+			if keep(e.Diff) {
+				es = append(es, e)
+			}
+		}
+		if len(es) == 0 {
+			return docPage{}, false
+		}
+		h := fmt.Sprintf("   %6s", "SCORE")
+		if tierCol() {
+			h += fmt.Sprintf(" %-9s", "TIER")
+		}
+		h += "  PLAYER             WHEN"
+		body := []rline{styledLine(head, h)}
+		for j, e := range es {
+			if j >= 10 {
+				break
+			}
+			r := fmt.Sprintf(" %2d.%6d", j+1, e.Score)
+			if tierCol() {
+				r += fmt.Sprintf(" %-9s", gm.Difficulty(e.Diff).String())
+			}
+			r += fmt.Sprintf("  %-18s %s", clip(e.Name, 18), hsDateShort(e.When))
+			body = append(body, styledLine(hsRowColor(j), r))
+		}
+		return docPage{name: fmt.Sprintf("FLAG RUN  TIER %d", tier), body: body}, true
+	}
+
+	// keepLabel mirrors keep() against a bucket's difficulty label string.
+	keepLabel := func(diffLabel string) bool {
+		switch diffFilter {
+		case -1:
+			return true
+		case hsArenaFilter:
+			return diffLabel == arenaTier
+		default:
+			return diffLabel == gm.Difficulty(diffFilter).String()
+		}
+	}
+	build := func(int) []docPage {
 		st := loadStats(dropfile)
-		for i := range gm.Rulesets {
-			name := gm.Mode(i).String()
-			list := st.High[name]
-			if len(list) == 0 {
+		var pages []docPage
+		// BY MODE summary: the caller's per-mode record (games / win% / K/D) under
+		// the current difficulty filter, aggregated from the (mode,difficulty) buckets.
+		type modeAgg struct{ games, wins, kills, deaths int }
+		bym := map[string]*modeAgg{}
+		for key, ag := range st.Buckets {
+			slash := strings.LastIndex(key, "/")
+			if slash < 0 || !keepLabel(key[slash+1:]) {
 				continue
 			}
-			body := []rline{styledLine(head, fmt.Sprintf("    %6s  %-18s %-10s %s", "SCORE", "MAP", "TIER", "WHEN"))}
-			for j, e := range list {
-				if j >= 10 {
-					break
-				}
-				body = append(body, styledLine(hsRowColor(j),
-					fmt.Sprintf(" %2d.%6d  %-18s %-10s %s", j+1, e.Score, clip(e.Map, 18), gm.Difficulty(e.Diff).String(), hsDateShort(e.When))))
+			mode := key[:slash]
+			a := bym[mode]
+			if a == nil {
+				a = &modeAgg{}
+				bym[mode] = a
 			}
-			pages = append(pages, docPage{name: name, body: body})
+			a.games += ag.Games
+			a.wins += ag.Wins
+			a.kills += ag.Kills
+			a.deaths += ag.Deaths
 		}
+		if len(bym) > 0 {
+			body := []rline{styledLine(head, fmt.Sprintf("   %-18s %6s %6s %7s", "MODE", "GAMES", "WIN%", "K/D"))}
+			for i := range gm.Rulesets {
+				name := gm.Mode(i).String()
+				a := bym[name]
+				if a == nil || a.games == 0 {
+					continue
+				}
+				win := a.wins * 100 / a.games
+				kd := float64(a.kills)
+				if a.deaths > 0 {
+					kd = float64(a.kills) / float64(a.deaths)
+				}
+				body = append(body, styledLine("\x1b[0;37m",
+					fmt.Sprintf("   %-18s %6d %5d%% %7.2f", clip(name, 18), a.games, win, kd)))
+			}
+			if len(body) > 1 {
+				pages = append(pages, docPage{name: "BY MODE", body: body})
+			}
+		}
+		for i := range gm.Rulesets {
+			m := gm.Mode(i)
+			if m == gm.ModeFlagRun {
+				continue // FLAG RUN shows per-tier boards (below), not a flat list
+			}
+			if pg, ok := localModeBoard(m.String()+" best", st.High[m.String()], m == gm.ModeCTF); ok {
+				pages = append(pages, pg)
+			}
+		}
+		for t := 1; t <= maxTier(); t++ { // TIER 0 is instructional - no board
+			if pg, ok := localTierBoard(t, st.TierHigh[t]); ok {
+				pages = append(pages, pg)
+			}
+		}
+		if len(pages) == 0 {
+			msg := "No high scores yet."
+			if diffFilter != -1 {
+				msg = "No runs recorded at this difficulty."
+			}
+			pages = []docPage{{body: proseLines([]string{
+				msg, "",
+				"Finish a match to set one - each mode keeps its own board, harder",
+				"difficulties are worth more, and SHIFT-D filters by difficulty.",
+			}, cols-8, docTheme)}}
+		}
+		return pages
 	}
 
-	if len(pages) == 0 {
-		pages = []docPage{{body: proseLines([]string{
-			"No high scores yet.",
-			"",
-			"Finish a match to set one - each mode keeps its own board, and harder",
-			"difficulties are worth more.",
-		}, cols-8, docTheme)}}
-	}
-	runPagedDoc(w, cols, rows, ip, title, titleRed, pages, nil)
+	runPagedDoc(w, cols, rows, ip, "HIGH SCORES", titleRed, build(cols), build, &docFilter{label: label, cycle: func() {
+		diffFilter++
+		if diffFilter > hsArenaFilter {
+			diffFilter = -1
+		}
+	}})
 }
 
 // pickAliveBot returns a random living tank index, or -1 if all are down.
@@ -5635,10 +5867,16 @@ func main() {
 // reaches its Ended phase). Both false = backed out to the menu (Backspace).
 // Shared by the main game and the editor's playtest. oneShot (the campaign runner)
 // makes it return after a single match.
+// lastMatchScore is the score of the most recently finished match (0 if the
+// player backed out). The FLAG RUN tier runner reads it after each playMatch to
+// sum a whole-tier session score. Single-threaded door: one match at a time.
+var lastMatchScore int
+
 func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, sess session, dropfile, presenceState, presenceDetail string, oneShot, forgiving bool, pickChar func() (int, [3]float64, bool)) (bool, bool) {
 	ip.setEscMenu(true) // in-game Esc = exit confirm, not instant quit
 	defer ip.setEscMenu(false)
 	defer suspendMusic(false) // resume menu/lobby music when we leave the match
+	lastMatchScore = 0        // reset; set on a completed match, read by the tier runner
 	netSess, _ := sess.(*netSession)     // non-nil only for an online arena match
 	offSess, _ := sess.(*offlineSession) // non-nil only for a local single-player match
 	escConfirm := false                  // the small "leave match?" banner
@@ -5977,12 +6215,15 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 		if v.phase == gm.PhaseActive && lastPhase != gm.PhaseActive {
 			matchStart = time.Now()
 		}
-		if v.phase == gm.PhaseEnded && lastPhase == gm.PhaseActive && presenceState != "playtest" && recordScores {
+		// TIER 0 (presence "flagrun") is instructional - aim-assist, Easy bots, infinite
+		// retries - so it never touches stats or high scores. Playtest is excluded too.
+		if v.phase == gm.PhaseEnded && lastPhase == gm.PhaseActive && presenceState != "playtest" && presenceState != "flagrun" && recordScores {
 			r := matchResultFrom(v, statName, time.Since(matchStart).Seconds())
 			r.Online = matchOnline
 			r.Difficulty = matchDiff
 			r.Score = scoreMatch(r)
 			lastResult = &r
+			lastMatchScore = r.Score                     // read by the FLAG RUN tier runner to sum a session
 			resultRank = recordResultRanked(dropfile, r) // record + learn where it placed
 			// Solo scores stay local; only real arena matches feed the global board.
 			if r.Online && arenaConfigured() {

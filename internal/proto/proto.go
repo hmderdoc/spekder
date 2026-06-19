@@ -83,21 +83,35 @@ type ScoreSubmit struct {
 	Kills, Deaths               int
 	ShotsFired, ShotsHit        int
 	Wave                        int
+	// Second optional tail (still additive): kill split + captures for the richer
+	// global boards. An older door omits it; an older server ignores it.
+	KillsHuman, KillsBot, Captures int
 }
 
-// ScoreRow is one global high-score entry returned to the door.
+// ScoreRow is one global high-score entry returned to the door. Kills/Caps ride
+// an optional trailing block so the per-mode boards can show those columns.
 type ScoreRow struct {
 	Mode, Name, BBS, Map string
 	Score                int
 	When                 uint32
+	Kills, Caps          int
 }
 
 // PlayerRow is one player's aggregated career stats on the arena, keyed by
 // Name@BBS. Drives the cumulative (winningest), skill-rate (K/D, accuracy) and
-// survival-wave global boards.
+// survival-wave global boards. KillsHuman/KillsBot/Captures ride an optional
+// trailing block (additive; older peers omit it).
 type PlayerRow struct {
 	Name, BBS                                                                         string
 	Games, Wins, Kills, Deaths, ShotsFired, ShotsHit, BestWave, BestScore, TotalScore int
+	KillsHuman, KillsBot, Captures                                                    int
+	Modes                                                                             []ModeAgg // per-mode record (drives the per-mode K/D & win% boards)
+}
+
+// ModeAgg is one player's record in a single mode, for the per-mode skill boards.
+type ModeAgg struct {
+	Mode                       string
+	Games, Wins, Kills, Deaths int
 }
 
 func EncodeScore(s ScoreSubmit) []byte {
@@ -120,6 +134,10 @@ func EncodeScore(s ScoreSubmit) []byte {
 	c.u16(s.ShotsFired)
 	c.u16(s.ShotsHit)
 	c.u16(s.Wave)
+	// Second additive tail: kill split + captures.
+	c.u16(s.KillsHuman)
+	c.u16(s.KillsBot)
+	c.u16(s.Captures)
 	return c.b
 }
 
@@ -150,6 +168,15 @@ func DecodeScore(p []byte) (ScoreSubmit, bool) {
 	}
 	if len(c.b)-c.i >= 2 {
 		s.Wave = c.ru16()
+	}
+	if len(c.b)-c.i >= 2 {
+		s.KillsHuman = c.ru16()
+	}
+	if len(c.b)-c.i >= 2 {
+		s.KillsBot = c.ru16()
+	}
+	if len(c.b)-c.i >= 2 {
+		s.Captures = c.ru16()
 	}
 	return s, !c.err
 }
@@ -185,6 +212,24 @@ func EncodePlayers(rows []PlayerRow) []byte {
 		c.u32(uint32(r.BestScore))
 		c.u32(uint32(r.TotalScore))
 	}
+	// Additive trailing block (older doors read the fixed rows above and ignore
+	// these bytes): kill split + captures, in the same row order.
+	for _, r := range rows {
+		c.u32(uint32(r.KillsHuman))
+		c.u32(uint32(r.KillsBot))
+		c.u32(uint32(r.Captures))
+	}
+	// Second additive trailing block: per-mode records (variable length per row).
+	for _, r := range rows {
+		c.u16(len(r.Modes))
+		for _, m := range r.Modes {
+			c.str(m.Mode)
+			c.u32(uint32(m.Games))
+			c.u32(uint32(m.Wins))
+			c.u32(uint32(m.Kills))
+			c.u32(uint32(m.Deaths))
+		}
+	}
 	return c.b
 }
 
@@ -212,6 +257,28 @@ func DecodePlayers(p []byte) ([]PlayerRow, bool) {
 	}
 	if c.err {
 		return nil, false
+	}
+	// Additive trailing block from a newer server (absent from an older one).
+	if len(c.b)-c.i >= n*12 {
+		for i := 0; i < n; i++ {
+			out[i].KillsHuman = int(c.ru32())
+			out[i].KillsBot = int(c.ru32())
+			out[i].Captures = int(c.ru32())
+		}
+		// Second block: per-mode records (only if more bytes follow).
+		if len(c.b)-c.i > 0 {
+			for i := 0; i < n && !c.err; i++ {
+				cnt := c.ru16()
+				for k := 0; k < cnt && !c.err; k++ {
+					m := ModeAgg{Mode: c.rstr()}
+					m.Games = int(c.ru32())
+					m.Wins = int(c.ru32())
+					m.Kills = int(c.ru32())
+					m.Deaths = int(c.ru32())
+					out[i].Modes = append(out[i].Modes, m)
+				}
+			}
+		}
 	}
 	return out, true
 }
@@ -242,6 +309,11 @@ func EncodeScores(rows []ScoreRow) []byte {
 		c.u32(uint32(r.Score))
 		c.u32(r.When)
 	}
+	// Additive trailing block: per-row kills + captures (older doors ignore it).
+	for _, r := range rows {
+		c.u16(r.Kills)
+		c.u16(r.Caps)
+	}
 	return c.b
 }
 
@@ -258,7 +330,17 @@ func DecodeScores(p []byte) ([]ScoreRow, bool) {
 		r.When = c.ru32()
 		out = append(out, r)
 	}
-	return out, !c.err
+	if c.err {
+		return nil, false
+	}
+	// Additive trailing block from a newer server (per-row kills + captures).
+	if len(c.b)-c.i >= n*4 {
+		for i := 0; i < n; i++ {
+			out[i].Kills = int(c.ru16())
+			out[i].Caps = int(c.ru16())
+		}
+	}
+	return out, true
 }
 
 // EncodeChangeChar carries a mid-session character swap on the live game
