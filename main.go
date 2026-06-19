@@ -1175,7 +1175,13 @@ func drawStatus(w *bufio.Writer, cols int, v viewState, p *gm.TankSnap) {
 	if r.Objective == gm.ObjNeutralFlags {
 		fmt.Fprintf(&b, "  FLAGS %d/%d", v.flagsTotal-v.flagsLeft, v.flagsTotal)
 	}
-	if r.Teams == 2 { // team modes (CTF, Team KotH): RED vs BLU score
+	if r.Objective == gm.ObjEscort { // ESCORT: your role + payload progress, not a kill score
+		role, color := "ESCORT", "92" // team 0 pushes the payload (green)
+		if v.myTeam == 1 {
+			role, color = "DEFEND", "91" // team 1 holds it off (red)
+		}
+		fmt.Fprintf(&b, "  \x1b[%sm%s\x1b[0;37m %d%%", color, role, v.payloadPct)
+	} else if r.Teams == 2 { // team modes (CTF, Team KotH): RED vs BLU score
 		mark0, mark1 := " ", " "
 		if v.myTeam == 0 {
 			mark0 = ">"
@@ -1433,6 +1439,7 @@ type menuChoice struct {
 	help       bool
 	highScores bool
 	card       bool
+	custom     bool // play a scripted/custom map (ESCORT, boss, ...) under its own rules+events
 	update     bool
 	mode       gm.Mode
 }
@@ -2260,11 +2267,17 @@ func botCountFor(mode gm.Mode, allBots bool) int {
 // carry the frames (so the caller can hold off re-entering for a while), false on
 // a keypress/quit.
 func runDemo(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, chat *chatUI, dropfile string) bool {
-	var modes []gm.Mode // non-Survival modes (Survival needs a player to end)
+	var modes []gm.Mode // demo-able modes
+	haveEscort := len(gm.EscortMaps()) > 0
 	for m := range gm.Rulesets {
-		if gm.Rulesets[m].Bots != gm.BotWaves {
-			modes = append(modes, gm.Mode(m))
+		r := gm.Rulesets[m]
+		if r.Bots == gm.BotWaves {
+			continue // Survival needs a human to end the match
 		}
+		if r.Objective == gm.ObjEscort && !haveEscort {
+			continue // no payload map to escort
+		}
+		modes = append(modes, gm.Mode(m))
 	}
 	if len(modes) == 0 {
 		modes = []gm.Mode{0}
@@ -2304,6 +2317,11 @@ func runDemo(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 			return wd
 		}
 		wd := gm.NewWorld(botCountFor(mode, true), mode)
+		if mode == gm.ModeEscort { // ESCORT needs a payload map; rotation has none
+			if em := gm.EscortMaps(); len(em) > 0 {
+				wd.PinMap(em[rand.Intn(len(em))])
+			}
+		}
 		wd.SetDifficulty(gm.DiffNormal)
 		wd.SetAimAssist(true)
 		wd.SkipCountdown() // open on action: a frozen count-in grid is a lousy attract
@@ -2563,6 +2581,20 @@ func shimmerText(s, baseSGR string, phase int) string {
 	return b.String()
 }
 
+// spCarousel returns the name + blurb for single-player carousel slot spMode: a
+// ruleset mode (FLAG RUN shows the campaign blurb), or the synthetic CUSTOM slot
+// at index len(Rulesets) that leads to the scripted-map picker.
+func spCarousel(spMode int, campBlurb string) (name, desc string) {
+	if spMode >= len(gm.Rulesets) {
+		return "CUSTOM", "Scripted scenarios like ESCORT - each plays its own rules."
+	}
+	rs := gm.Rulesets[spMode]
+	if gm.Mode(spMode) == gm.ModeFlagRun {
+		return rs.Name, campBlurb
+	}
+	return rs.Name, rs.Desc
+}
+
 // drawSPMode overdraws the single-player blurb's "< NAME >" prefix in its
 // per-mode colors with the shimmer sweep. Same characters as the plain text
 // it covers, so the layout (and wrapText's line break) is unchanged.
@@ -2670,12 +2702,8 @@ func runMenu(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 		// Blurb (2 lines) + note, right-aligned on a black strip so they read over art.
 		blurb := items[sel].blurb
 		if items[sel].single { // show + cycle the chosen single-player mode
-			rs := gm.Rulesets[spMode]
-			desc := rs.Desc
-			if gm.Mode(spMode) == gm.ModeFlagRun {
-				desc = campBlurb // FLAG RUN is the campaign
-			}
-			blurb = "< " + rs.Name + " >  " + desc
+			name, desc := spCarousel(spMode, campBlurb)
+			blurb = "< " + name + " >  " + desc
 		}
 		bl := wrapText(blurb, descW)
 		for j := 0; j < 2; j++ {
@@ -2686,7 +2714,7 @@ func runMenu(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 			fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;37;40m%-*s\x1b[0m", blurbRow+j, descCol, descW, line)
 		}
 		if items[sel].single { // recolor the mode selector over the plain line
-			drawSPMode(w, descCol, blurbRow, gm.Rulesets[spMode].Name, spMode, shimmerPhase)
+			spName, _ := spCarousel(spMode, campBlurb); drawSPMode(w, descCol, blurbRow, spName, spMode, shimmerPhase)
 		}
 		noteTxt := ""
 		if note != "" {
@@ -2778,7 +2806,7 @@ func runMenu(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 			// transcript box overlays the center of the screen.
 			if items[sel].single && !chat.transcript {
 				shimmerPhase++
-				drawSPMode(w, descCol, blurbRow, gm.Rulesets[spMode].Name, spMode, shimmerPhase)
+				spName, _ := spCarousel(spMode, campBlurb); drawSPMode(w, descCol, blurbRow, spName, spMode, shimmerPhase)
 				w.Flush()
 			}
 		case k := <-ip.events:
@@ -2839,12 +2867,12 @@ func runMenu(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 				drawOptions()
 			case mkLeft:
 				if items[sel].single {
-					spMode = (spMode - 1 + len(gm.Rulesets)) % len(gm.Rulesets)
+					spMode = (spMode - 1 + len(gm.Rulesets) + 1) % (len(gm.Rulesets) + 1)
 					drawOptions()
 				}
 			case mkRight:
 				if items[sel].single {
-					spMode = (spMode + 1) % len(gm.Rulesets)
+					spMode = (spMode + 1) % (len(gm.Rulesets) + 1)
 					drawOptions()
 				}
 			case mkEnter:
@@ -2869,9 +2897,12 @@ func runMenu(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 					highScores: it.highScores, card: it.card,
 				}
 				if it.single {
-					if gm.Mode(spMode) == gm.ModeFlagRun {
+					switch {
+					case spMode >= len(gm.Rulesets): // the CUSTOM carousel slot
+						mc.custom = true
+					case gm.Mode(spMode) == gm.ModeFlagRun:
 						mc.campaign = true // FLAG RUN is the campaign
-					} else {
+					default:
 						mc.mode = gm.Mode(spMode)
 					}
 				}
@@ -3880,10 +3911,71 @@ func mapModeName(m gm.Map) string {
 	return "Any"
 }
 
-func runMapPicker(w *bufio.Writer, cols, rows int, ip *input) (idx int, back, quit bool) {
-	order := make([]int, len(gm.Maps))
-	for i := range order {
-		order[i] = i
+// runCustomPicker lists the installed scripted/custom maps (escort, boss, user
+// scripts) and returns the chosen gm.Maps index. back=true returns to the menu.
+func runCustomPicker(w *bufio.Writer, cols, rows int, ip *input) (idx int, back, quit bool) {
+	var maps []int
+	for i := range gm.Maps {
+		if gm.Maps[i].Scripted() {
+			maps = append(maps, i)
+		}
+	}
+	if len(maps) == 0 {
+		runInfoScreen(w, cols, rows, ip, "CUSTOM", []string{"No custom maps are installed.", "", "Build one in OPTIONS -> MAP EDITOR."})
+		return -1, true, false
+	}
+	sel := 0
+	draw := func() {
+		names := make([]string, len(maps))
+		blurbs := make([]string, len(maps))
+		for i, mi := range maps {
+			names[i] = gm.Maps[mi].Name
+			cap := gm.MapCapacity(gm.Maps[mi])
+			who := "solo"
+			if cap > 1 {
+				who = fmt.Sprintf("up to %d", cap)
+			}
+			objective := "scripted scenario"
+			if len(gm.Maps[mi].Paths) > 0 {
+				objective = "escort the payload"
+			}
+			blurbs[i] = fmt.Sprintf("%s - %s", objective, who)
+		}
+		drawListMenu(w, cols, rows, "CUSTOM", names, blurbs, nil, sel)
+	}
+	draw()
+	for {
+		select {
+		case <-ip.quitCh:
+			return -1, false, true
+		case k := <-ip.events:
+			switch k {
+			case mkUp:
+				sel = (sel - 1 + len(maps)) % len(maps)
+				draw()
+			case mkDown:
+				sel = (sel + 1) % len(maps)
+				draw()
+			case mkEnter:
+				return maps[sel], false, false
+			case mkBack:
+				return -1, true, false
+			}
+		}
+	}
+}
+
+func runMapPicker(w *bufio.Writer, cols, rows int, ip *input, mode gm.Mode) (idx int, back, quit bool) {
+	// Only maps that actually play in the chosen mode (so picking ESCORT can't hand
+	// you a deathmatch map, etc.). RANDOM (-1) is always offered below.
+	var order []int
+	for i := range gm.Maps {
+		if gm.Maps[i].Scripted() { // bespoke custom maps live under the CUSTOM picker
+			continue
+		}
+		if gm.EffectiveMode(gm.Maps[i]) == mode {
+			order = append(order, i)
+		}
 	}
 	nameOf := func(mi int) string {
 		if n := gm.Maps[mi].Name; n != "" {
@@ -4967,9 +5059,28 @@ func main() {
 			}
 			sess = ns
 			state, detail = "online arena", ""
+		} else if choice.custom {
+			updatePresence(dropfile, "custom select", "")
+			mapIdx, back, mquit := runCustomPicker(w, cols, rows, ip)
+			if mquit {
+				cleanup()
+				return
+			}
+			if back || mapIdx < 0 {
+				note = ""
+				continue // back to the main menu
+			}
+			// A custom map plays under its own embedded mode + events (escort cart,
+			// boss script, ...), labeled CUSTOM rather than the underlying ruleset.
+			mode := gm.NaturalMode(gm.Maps[mapIdx])
+			if r := gm.Maps[mapIdx].Rules; r != nil && r.Mode >= 0 {
+				mode = gm.Mode(r.Mode)
+			}
+			state, detail = "custom", "CUSTOM: "+gm.Maps[mapIdx].Name
+			sess = newOfflineOnMap(mapIdx, botCountFor(mode, false), mode, settings.difficulty, settings.aimAssist, playerName, vcolor, vbody)
 		} else {
 			updatePresence(dropfile, "map select", choice.mode.String())
-			mapIdx, back, mquit := runMapPicker(w, cols, rows, ip)
+			mapIdx, back, mquit := runMapPicker(w, cols, rows, ip, choice.mode)
 			if mquit {
 				cleanup()
 				return

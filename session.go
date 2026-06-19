@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math/rand"
 	"os"
 	"strconv"
 
@@ -49,6 +50,7 @@ type viewState struct {
 	wave       int                // Survival: current wave
 	teamScore  [2]int             // CTF: captures per team
 	winnerTeam int                // CTF: winning team (-1 = tie/none)
+	payloadPct int                // ESCORT: payload progress 0-100
 	myTeam     int                // CTF: our team (-1 if none)
 	gmap       gm.Map             // active map definition (renderer rebuilds geometry on change)
 }
@@ -72,6 +74,13 @@ func newOfflineSession(numBots int, mode gm.Mode, diff gm.Difficulty, aimAssist 
 	w := gm.NewWorld(numBots, mode)
 	w.SetDifficulty(diff)
 	w.SetAimAssist(aimAssist)
+	// ESCORT needs a payload map; a generated/random map has none, so pin a random
+	// escort map (an explicit "map=" override below still wins).
+	if mode == gm.ModeEscort {
+		if em := gm.EscortMaps(); len(em) > 0 {
+			w.PinMap(em[rand.Intn(len(em))])
+		}
+	}
 	// Pin offline play to a specific map (no rotation) so a layout can be reached
 	// deterministically. Source order: the SPEKDER_MAP env var overrides a
 	// "map = <name|index>" key in spekder.ini/door.ini. Until there's an in-game
@@ -115,7 +124,7 @@ func (s *offlineSession) step(dt float64, in gm.Input) viewState {
 		camPos: self.Pos, camYaw: self.HullYaw + self.TurretYaw, viewTurret: self.TurretYaw, viewPitch: self.TurretPitch,
 		mode: m.Mode, phase: m.Phase, timer: m.Timer, winnerID: m.WinnerID,
 		flags: flags, pickups: pickups, ents: ents, zones: zones, flagsLeft: m.FlagsLeft, flagsTotal: m.FlagsTotal, mapIdx: m.MapIdx,
-		wave: m.Wave, teamScore: m.TeamScore, winnerTeam: m.WinnerTeam, myTeam: self.Team,
+		wave: m.Wave, teamScore: m.TeamScore, winnerTeam: m.WinnerTeam, payloadPct: m.PayloadPct, myTeam: self.Team,
 		kills: m.Kills, events: m.Events, gmap: s.w.ActiveMap(),
 	}
 }

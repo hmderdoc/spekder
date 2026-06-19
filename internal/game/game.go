@@ -71,6 +71,7 @@ type Entity struct {
 	Flag     *FlagTrait
 	Zone     *ZoneTrait
 	Trigger  *TriggerTrait
+	Payload  *PayloadTrait
 
 	// --- event-driven behavior (authored; see EVENTS.md) ---
 	Tag       string     // author name, referenced by actions/conditions as #tag
@@ -150,6 +151,16 @@ type FlagTrait struct {
 // like flag; the runtime zone (w.zones) does the contest/hold scoring and render.
 type ZoneTrait struct {
 	Capture float64
+}
+
+// PayloadTrait marks an entity as an ESCORT payload: it follows the named path
+// (default "main") toward the goal, advancing only while an escort (team 0) is
+// within Radius and no defender (team 1) contests it - driven by stepEscort, which
+// reuses the entity move/path machinery. A map with a payload plays as ModeEscort.
+type PayloadTrait struct {
+	Path   string  // path to follow ("" = "main")
+	Radius float64 // contest/escort footprint (0 = default)
+	Speed  float64 // units/sec while advancing (0 = default)
 }
 
 // SchemaVersion is the current map-file format version. Authored maps may set
@@ -318,6 +329,11 @@ type jzone struct {
 	Capture float64 `json:"capture"`
 }
 type jtrigger struct{}
+type jpayload struct {
+	Path   string  `json:"path,omitempty"`
+	Radius float64 `json:"radius,omitempty"`
+	Speed  float64 `json:"speed,omitempty"`
+}
 type jpath struct {
 	Name   string       `json:"name"`
 	Points [][2]float64 `json:"points"`
@@ -347,6 +363,7 @@ type jentity struct {
 	Flag      *jflag     `json:"flag"`
 	Zone      *jzone     `json:"zone"`
 	Trigger   *jtrigger  `json:"trigger,omitempty"`
+	Payload   *jpayload  `json:"payload,omitempty"`
 	Tag       string     `json:"tag,omitempty"`
 	Watch     []float64  `json:"watch,omitempty"`
 	Behaviors []Behavior `json:"behaviors,omitempty"`
@@ -414,6 +431,9 @@ func (je jentity) toEntity() Entity {
 	}
 	if je.Trigger != nil {
 		e.Trigger = &TriggerTrait{}
+	}
+	if je.Payload != nil {
+		e.Payload = &PayloadTrait{Path: je.Payload.Path, Radius: je.Payload.Radius, Speed: je.Payload.Speed}
 	}
 	e.Tag, e.Watch, e.Behaviors = je.Tag, je.Watch, je.Behaviors
 	return e
@@ -633,6 +653,9 @@ func (e Entity) toJEntity() jentity {
 	if e.Trigger != nil {
 		je.Trigger = &jtrigger{}
 	}
+	if e.Payload != nil {
+		je.Payload = &jpayload{Path: e.Payload.Path, Radius: e.Payload.Radius, Speed: e.Payload.Speed}
+	}
 	je.Tag, je.Watch, je.Behaviors = e.Tag, e.Watch, e.Behaviors
 	return je
 }
@@ -748,6 +771,7 @@ const (
 	ModeElimination
 	ModeTeamKotH
 	ModeFFAKotH
+	ModeEscort
 )
 
 // WinKind / BotSpawn / ObjKind are fixed palettes a Ruleset composes (palette,
@@ -760,6 +784,7 @@ const (
 	WinCollectAll                 // every neutral flag has been collected
 	WinElimination                // one side eliminated (co-op: all humans out of lives)
 	WinScore                      // a team/tank reaches Count hold-points (King of the Hill)
+	WinPayload                    // ESCORT: the payload reached the goal (attackers win)
 )
 
 type BotSpawn int
@@ -776,6 +801,7 @@ const (
 	ObjNeutralFlags         // scattered neutral flags (Flag Run)
 	ObjTeamFlags            // one flag per team at its base (CTF)
 	ObjZone                 // control zone(s) to hold (King of the Hill)
+	ObjEscort               // a payload to escort along a path (Escort)
 )
 
 // WinCond is one early-end trigger; Count is its threshold (kills/captures).
@@ -823,6 +849,9 @@ var Rulesets = []Ruleset{
 	ModeFFAKotH: {Name: "KING OF THE HILL", Desc: "Solo vs bots: hold the hill to score; first to the score wins.",
 		Teams: 0, TimeLimit: matchTime, Bots: BotFill, Objective: ObjZone,
 		Win: []WinCond{{WinScore, kothScoreLimit}}},
+	ModeEscort: {Name: "ESCORT", Desc: "Two teams: push the payload to the goal, or hold it off until time.",
+		Teams: 2, TimeLimit: matchTime, Bots: BotFill, Objective: ObjEscort,
+		Win: []WinCond{{WinPayload, 0}}},
 }
 
 func (m Mode) String() string {
@@ -1713,6 +1742,7 @@ type MatchSnap struct {
 	Wave       int         // Survival: current wave
 	TeamScore  [2]int      // CTF: captures per team
 	WinnerTeam int         // CTF: winning team (0/1), -1 = tie/none
+	PayloadPct int         // ESCORT: payload progress along its path, 0-100
 	Events     []string    // author messages this tick (toast banners)
 	Ready      int         // lobby: humans who have locked their vote (ENTER)
 }
@@ -1735,7 +1765,8 @@ func (w *World) Match() MatchSnap {
 	return MatchSnap{
 		Mode: w.Mode, Phase: w.Phase, Timer: w.Timer, WinnerID: w.WinnerID,
 		FlagsLeft: left, FlagsTotal: len(w.flags), Votes: votes, Kills: w.kills, MapIdx: w.MapIdx, Wave: w.wave,
-		TeamScore: w.teamScore, WinnerTeam: w.winnerTeam, Events: w.events, Ready: w.lobbyReadyCount(),
+		TeamScore: w.teamScore, WinnerTeam: w.winnerTeam, PayloadPct: w.payloadProgress(),
+		Events: w.events, Ready: w.lobbyReadyCount(),
 	}
 }
 
@@ -3475,10 +3506,13 @@ func (w *World) startCountdownMap(mode Mode, mapIdx int) {
 // the Hill if it has a zone, Flag Run for neutral flags, else Deathmatch. Lobby
 // pairings vote on a map; this picks the mode that map implies.
 func NaturalMode(m Map) Mode {
-	hasZone, teamFlag, neutralFlag := false, false, false
+	hasZone, hasPayload, teamFlag, neutralFlag := false, false, false, false
 	for _, e := range m.Entities {
 		if e.Zone != nil {
 			hasZone = true
+		}
+		if e.Payload != nil {
+			hasPayload = true
 		}
 		if e.Flag != nil {
 			if e.Flag.Team >= 0 {
@@ -3489,6 +3523,8 @@ func NaturalMode(m Map) Mode {
 		}
 	}
 	switch {
+	case hasPayload:
+		return ModeEscort
 	case teamFlag:
 		return ModeCTF
 	case hasZone:
@@ -3498,6 +3534,18 @@ func NaturalMode(m Map) Mode {
 	default:
 		return ModeDeathmatch
 	}
+}
+
+// EscortMaps returns the indices of maps that play as ESCORT (carry a payload),
+// so a mode selector can pin one instead of a generated map with no objective.
+func EscortMaps() []int {
+	var out []int
+	for i := range Maps {
+		if EffectiveMode(Maps[i]) == ModeEscort {
+			out = append(out, i)
+		}
+	}
+	return out
 }
 
 // EffectiveMode is the mode a map plays in: its explicit Rules.Mode if set, else
@@ -3517,7 +3565,10 @@ func EffectiveMode(m Map) Mode {
 // map picker or an explicit vote), not via random rotation where they'd surprise
 // a normal match.
 func (m Map) Scripted() bool {
-	if len(m.Logic) > 0 || len(m.Paths) > 0 || len(m.Actors) > 0 {
+	// Event-logic / actors make a map "bespoke" (CUSTOM, pick-only). A bare path on
+	// its own does NOT - an ESCORT map is a normal map with a payload+path objective,
+	// recognized via EffectiveMode, not a custom script.
+	if len(m.Logic) > 0 || len(m.Actors) > 0 {
 		return true
 	}
 	for i := range m.Entities {
@@ -3779,6 +3830,8 @@ func (w *World) startMatch() {
 		w.setupTeamFlags()
 	case ObjZone:
 		w.setupZones()
+	case ObjEscort:
+		w.setupPayload()
 	}
 	if r.Bots == BotWaves {
 		w.setupSurvival()
@@ -4617,6 +4670,116 @@ func (w *World) pathFor(name string) []V3 {
 
 // pathAt returns the point at cumulative distance d along a polyline, and whether
 // d is at/past the end.
+const (
+	payloadRadius = 4.0 // default escort/contest footprint
+	payloadSpeed  = 3.0 // default payload units/sec while advancing
+)
+
+// payloadEntity returns the index of the escort payload entity, or -1.
+func (w *World) payloadEntity() int {
+	for i := range w.entities {
+		if w.entities[i].Payload != nil {
+			return i
+		}
+	}
+	return -1
+}
+
+// setupPayload wires the payload onto its path (default "main") and parks it at
+// the start, ready for stepEscort. Run at match start.
+func (w *World) setupPayload() {
+	i := w.payloadEntity()
+	if i < 0 {
+		return
+	}
+	e := &w.entities[i]
+	e.mvPath = e.Payload.Path
+	if e.mvPath == "" {
+		e.mvPath = "main"
+	}
+	if e.mvSpeed = e.Payload.Speed; e.mvSpeed <= 0 {
+		e.mvSpeed = payloadSpeed
+	}
+	e.mvDist, e.mvOn = 0, false
+	if pts := w.pathFor(e.mvPath); len(pts) > 0 {
+		e.Pos = pts[0]
+	}
+}
+
+// stepEscort is ESCORT's "moving King of the Hill": the payload rolls forward only
+// while an escort (team 0) is within its radius and no defender (team 1) contests
+// it, else it halts. The entity move step does the actual travel and emits
+// "arrived" at the goal; the win is resolved in checkEnd.
+func (w *World) stepEscort(dt float64) {
+	i := w.payloadEntity()
+	if i < 0 {
+		return
+	}
+	e := &w.entities[i]
+	rad := e.Payload.Radius
+	if rad <= 0 {
+		rad = payloadRadius
+	}
+	escortNear, defenderNear := false, false
+	for ti := range w.Tanks {
+		t := &w.Tanks[ti]
+		if t.Dead || t.gone {
+			continue
+		}
+		if dx, dz := t.Pos.X-e.Pos.X, t.Pos.Z-e.Pos.Z; dx*dx+dz*dz > rad*rad {
+			continue
+		}
+		if t.Team == 1 {
+			defenderNear = true
+		} else {
+			escortNear = true
+		}
+	}
+	e.mvOn = escortNear && !defenderNear
+}
+
+// payloadProgress is the payload's progress along its path, 0-100 (0 if no payload).
+func (w *World) payloadProgress() int {
+	i := w.payloadEntity()
+	if i < 0 {
+		return 0
+	}
+	pts := w.pathFor(w.entities[i].mvPath)
+	if len(pts) < 2 {
+		return 0
+	}
+	total := 0.0
+	for k := 1; k < len(pts); k++ {
+		total += math.Hypot(pts[k].X-pts[k-1].X, pts[k].Z-pts[k-1].Z)
+	}
+	if total <= 0 {
+		return 0
+	}
+	pct := int(w.entities[i].mvDist / total * 100)
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	return pct
+}
+
+// payloadDelivered reports whether the payload has reached its path's end.
+func (w *World) payloadDelivered() bool {
+	i := w.payloadEntity()
+	if i < 0 {
+		return false
+	}
+	e := &w.entities[i]
+	pts := w.pathFor(e.mvPath)
+	if len(pts) == 0 {
+		return false
+	}
+	_, done := pathAt(pts, e.mvDist)
+	return done
+}
+
 func pathAt(pts []V3, d float64) (V3, bool) {
 	if d <= 0 {
 		return pts[0], false
@@ -4890,7 +5053,15 @@ func (w *World) checkEnd() {
 	if !done {
 		return
 	}
-	if r.Teams == 2 {
+	if r.Objective == ObjEscort {
+		// Attackers win by delivering the payload; defenders win by running out the
+		// clock (no teamScore - the payload's arrival is the whole contest).
+		if w.payloadDelivered() {
+			w.winnerTeam = 0
+		} else {
+			w.winnerTeam = 1
+		}
+	} else if r.Teams == 2 {
 		switch {
 		case w.teamScore[0] > w.teamScore[1]:
 			w.winnerTeam = 0
@@ -4928,6 +5099,8 @@ func (w *World) winCondMet(wc WinCond) bool {
 				return true
 			}
 		}
+	case WinPayload:
+		return w.payloadDelivered()
 	}
 	return false
 }
@@ -5131,6 +5304,8 @@ func (w *World) simulate(dt float64, inputs map[int]Input) {
 		w.stepCTF(dt)
 	case ObjZone:
 		w.stepZones(dt)
+	case ObjEscort:
+		w.stepEscort(dt)
 	}
 	w.stepPickups(dt)
 	w.stepEntities(dt)
@@ -6271,6 +6446,23 @@ func (w *World) botObjectiveDest(i int) (dest V3, seek, hold bool) {
 			}
 		}
 		return z.Pos, true, false
+	case ObjEscort:
+		// ESCORT is moving KoTH: both teams converge on the payload - attackers to
+		// push it (presence advances it), defenders to contest it (presence stops
+		// it). On it -> hold and fight; otherwise head to its current position.
+		pi := w.payloadEntity()
+		if pi < 0 {
+			return V3{}, false, false
+		}
+		p := w.entities[pi].Pos
+		rad := w.entities[pi].Payload.Radius
+		if rad <= 0 {
+			rad = payloadRadius
+		}
+		if dx, dz := p.X-b.Pos.X, p.Z-b.Pos.Z; dx*dx+dz*dz <= rad*rad {
+			return V3{}, false, true
+		}
+		return p, true, false
 	case ObjNeutralFlags:
 		best, bestD := -1, math.MaxFloat64
 		for fi := range w.flags {

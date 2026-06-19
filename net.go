@@ -554,7 +554,7 @@ func (s *netSession) step(dt float64, in gm.Input) viewState {
 		mode: match.Mode, phase: match.Phase, timer: match.Timer, winnerID: match.WinnerID,
 		flags: flags, pickups: pickups, ents: ents, zones: zones, flagsLeft: match.FlagsLeft, flagsTotal: match.FlagsTotal, votes: match.Votes, lobbyReady: match.Ready,
 		pairings: pairings, kills: match.Kills, events: match.Events, mapIdx: match.MapIdx, wave: match.Wave, teamScore: match.TeamScore,
-		winnerTeam: match.WinnerTeam, myTeam: self.Team, gmap: cmap,
+		winnerTeam: match.WinnerTeam, payloadPct: match.PayloadPct, myTeam: self.Team, gmap: cmap,
 	}
 }
 

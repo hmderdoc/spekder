@@ -37,12 +37,13 @@ func MapHash(m gm.Map) uint32 {
 //	6: removed the wire vehicle byte and the CustomStats tail; HELLO/CHANGECHAR carry body + a publish flag (the chassis system retired).
 //	7: TankSnap gained the secondary gauge (reload2 + charge count) and a slip flag.
 //	8: EntitySnap can be self-describing (Spawned bit + kind/half/colour/maxhp) so runtime-spawned entities (crab turret) render without an authored template.
+//	9: MatchSnap gained PayloadPct (ESCORT payload progress) for the objective HUD.
 //
 // MsgBalance (0x46) was added WITHOUT bumping this: it is a server->client push
 // an older client silently drops (unknown type -> ignored), so it neither
 // half-talks nor corrupts state. Bumping would hard-reject every deployed client
 // - the opposite of the goal (deploy balance without a client wave).
-const ProtocolVersion = 8
+const ProtocolVersion = 9
 
 const (
 	MsgHello      = 0x01 // client->server: token, bbsid, handle, client version
@@ -1116,6 +1117,7 @@ func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.Sh
 	w.u16(m.TeamScore[0])
 	w.u16(m.TeamScore[1])
 	w.i16(m.WinnerTeam)
+	w.u8(byte(m.PayloadPct)) // ESCORT: payload progress 0-100
 	w.u8(byte(min255(len(m.Kills)))) // kill feed (this tick)
 	for _, k := range m.Kills {
 		w.i16(k.Killer)
@@ -1285,6 +1287,7 @@ func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, sh
 	m.TeamScore[0] = r.ru16()
 	m.TeamScore[1] = r.ru16()
 	m.WinnerTeam = r.ri16()
+	m.PayloadPct = int(r.ru8()) // ESCORT: payload progress 0-100
 	nk := int(r.ru8())
 	for i := 0; i < nk; i++ {
 		m.Kills = append(m.Kills, gm.KillEvent{Killer: r.ri16(), Victim: r.ri16(), Cause: gm.KillCause(r.ru8())})
