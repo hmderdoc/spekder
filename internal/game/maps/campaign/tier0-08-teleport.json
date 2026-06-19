@@ -1,0 +1,30 @@
+{
+  "version": 4,
+  "name": "WARP LINES",
+  "size": 22,
+  "tier": 0,
+  "obstacles": [
+    {"pos": [-11, 1.5, 14], "half": [3.2, 1.5, 0.5], "color": [0.42, 0.46, 0.54]},
+    {"pos": [-11, 1.5, 8],  "half": [3.2, 1.5, 0.5], "color": [0.42, 0.46, 0.54]},
+    {"pos": [-14, 1.5, 11], "half": [0.5, 1.5, 3.2], "color": [0.42, 0.46, 0.54]},
+    {"pos": [-8, 1.5, 11],  "half": [0.5, 1.5, 3.2], "color": [0.42, 0.46, 0.54]},
+    {"pos": [11, 2.0, 11],  "half": [2.5, 2.0, 2.5], "color": [0.42, 0.46, 0.54]}
+  ],
+  "ramps": null,
+  "scenery": [
+    {"kind": "diamond", "pos": [0, 4.0, 0], "h": 3.0, "color": [0.55, 0.45, 0.95], "spin": true}
+  ],
+  "spawns": [[0, -15]],
+  "entities": [
+    {"kind": "teleporter", "pos": [-2, 0.1, 2], "half": [1.4, 0.1, 1.4], "color": [0.40, 0.70, 0.95], "solid": false, "teleport": {"dest": [-11, 0.6, 9.5], "cooldown": 1.0}},
+    {"kind": "teleporter", "pos": [-11, 0.1, 13], "half": [1.4, 0.1, 1.4], "color": [0.95, 0.70, 0.40], "solid": false, "teleport": {"dest": [0, 0.6, 2], "cooldown": 1.0}},
+    {"kind": "teleporter", "pos": [4, 0.1, 2], "half": [1.4, 0.1, 1.4], "color": [0.40, 0.70, 0.95], "solid": false, "teleport": {"dest": [11, 4.5, 11], "cooldown": 1.0}},
+    {"kind": "flag", "pos": [-12, 0, 11], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [-10, 0, 12], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [11, 4, 11],  "flag": {"team": -1}},
+    {"kind": "flag", "pos": [14, 0, -10], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [-14, 0, -14], "flag": {"team": -1}}
+  ],
+  "rules": {"mode": -1, "timeLimit": 150, "target": -1, "lives": 1, "bots": 0},
+  "intro": {"body": 10, "tip": "Drive onto a teleporter to warp - one drops you inside the sealed vault (a pad warps you back out), another onto the high ledge. The OCTOPOD also blinks with {jump}."}
+}

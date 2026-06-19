@@ -1,0 +1,21 @@
+{
+  "version": 4,
+  "name": "KING OF THE HILL",
+  "size": 18,
+  "tier": 0,
+  "obstacles": [],
+  "ramps": null,
+  "scenery": [
+    {"kind": "diamond", "pos": [0, 3.2, 4], "h": 3.0, "color": [0.95, 0.82, 0.25], "spin": true},
+    {"kind": "spire",   "pos": [13, 0.5, 13], "h": 4.0, "color": [0.50, 0.55, 0.95], "spin": true}
+  ],
+  "spawns": [[0, -13]],
+  "entities": [
+    {"kind": "turret", "pos": [0, 1.2, 13], "half": [0.9, 1.2, 0.9], "color": [0.80, 0.30, 0.30], "solid": true, "turret": {"range": 18, "fireDelay": 1.1, "dmg": 12, "turnRate": 3.0}},
+    {"kind": "flag", "pos": [-9, 0, -2], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [9, 0, -2],  "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, 4],   "flag": {"team": -1, "dwell": 5}}
+  ],
+  "rules": {"mode": -1, "timeLimit": 160, "target": -1, "lives": 1, "bots": 0},
+  "intro": {"body": 13, "tip": "Grab the side flags, then take the center CAPTURE POINT - you must HOLD it (watch HOLD%). The turret pounds the point, so {jump} to shell up (invulnerable) and soak the fire until it's yours."}
+}

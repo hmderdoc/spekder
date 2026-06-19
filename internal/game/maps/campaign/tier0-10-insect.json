@@ -1,0 +1,26 @@
+{
+  "version": 4,
+  "name": "SCALE THE WALL",
+  "size": 18,
+  "tier": 0,
+  "obstacles": [
+    {"pos": [0, 1.4, 7],  "half": [3, 1.4, 0.5], "color": [0.42, 0.46, 0.54]},
+    {"pos": [0, 1.4, 1],  "half": [3, 1.4, 0.5], "color": [0.42, 0.46, 0.54]},
+    {"pos": [3, 1.4, 4],  "half": [0.5, 1.4, 3], "color": [0.42, 0.46, 0.54]},
+    {"pos": [-3, 1.4, 4], "half": [0.5, 1.4, 3], "color": [0.42, 0.46, 0.54]}
+  ],
+  "ramps": null,
+  "scenery": [
+    {"kind": "tetra", "pos": [13, 0.5, -10], "h": 3.0, "color": [0.40, 0.90, 0.55], "spin": true}
+  ],
+  "spawns": [[0, -11]],
+  "entities": [
+    {"kind": "flag", "pos": [0, 0, 4],   "flag": {"team": -1}},
+    {"kind": "flag", "pos": [-1.5, 0, 5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [1.5, 0, 3],  "flag": {"team": -1}},
+    {"kind": "flag", "pos": [-10, 0, 0],  "flag": {"team": -1}},
+    {"kind": "flag", "pos": [10, 0, 0],   "flag": {"team": -1}}
+  ],
+  "rules": {"mode": -1, "timeLimit": 140, "target": -1, "lives": 1, "bots": 0},
+  "intro": {"body": 3, "tip": "The INSECT climbs walls - drive into a wall and hold {forward} to scale it. Climb INTO the sealed vault for the inner flags, then climb back out."}
+}

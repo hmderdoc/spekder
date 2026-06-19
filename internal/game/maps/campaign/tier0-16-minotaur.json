@@ -1,0 +1,24 @@
+{
+  "version": 4,
+  "name": "BULL RUSH",
+  "size": 18,
+  "tier": 0,
+  "obstacles": [
+    {"pos": [4, 1.0, 6],  "half": [0.8, 1.0, 6], "color": [0.40, 0.44, 0.52]},
+    {"pos": [-4, 1.0, 6], "half": [0.8, 1.0, 6], "color": [0.40, 0.44, 0.52]}
+  ],
+  "ramps": null,
+  "scenery": [
+    {"kind": "cube", "pos": [12, 0.2, -11], "h": 2.5, "color": [0.70, 0.45, 0.35], "spin": true}
+  ],
+  "spawns": [[0, -12]],
+  "entities": [
+    {"kind": "hazard", "pos": [0, 0.05, -4], "half": [11, 0.1, 1.6], "color": [0.95, 0.40, 0.10], "solid": false, "hazard": {"dps": 25}},
+    {"kind": "wall", "pos": [0, 1.0, 2], "half": [3.2, 1.0, 0.6], "color": [0.72, 0.52, 0.22], "solid": true, "destruct": {"maxHp": 45}},
+    {"kind": "flag", "pos": [-9, 0, -8], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, 6],   "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, 10],  "flag": {"team": -1}}
+  ],
+  "rules": {"mode": -1, "timeLimit": 130, "target": -1, "lives": 1, "bots": 0},
+  "intro": {"body": 19, "tip": "The MINOTAUR long-jumps with {jump} (clear the fire) and smashes the barricade with its hammer ({fire}); {secondary} raises a shield."}
+}

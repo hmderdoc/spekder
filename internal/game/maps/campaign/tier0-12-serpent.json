@@ -1,0 +1,22 @@
+{
+  "version": 4,
+  "name": "VENOM TRAIL",
+  "size": 20,
+  "tier": 0,
+  "obstacles": [
+    {"pos": [-3, 0.9, 4], "half": [1.4, 0.9, 1.4], "color": [0.40, 0.44, 0.52]},
+    {"pos": [4, 0.9, 7],  "half": [1.4, 0.9, 1.4], "color": [0.40, 0.44, 0.52]}
+  ],
+  "ramps": null,
+  "scenery": [
+    {"kind": "octa", "pos": [13, 0.5, -11], "h": 3.0, "color": [0.45, 0.90, 0.30], "spin": true}
+  ],
+  "spawns": [[0, -14], [0, 12]],
+  "entities": [
+    {"kind": "flag", "pos": [-7, 0, 6], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [7, 0, 8],  "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, 11], "flag": {"team": -1}}
+  ],
+  "rules": {"mode": -1, "timeLimit": 150, "target": -1, "lives": 1, "bots": 2, "enemyBody": 3},
+  "intro": {"body": 6, "tip": "Two guards hold the far flags. The SERPENT's venom ({fire}) POISONS - they wither over a few seconds; {secondary} STRANGLES one in place. Hose them as they close, then collect."}
+}

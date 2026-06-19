@@ -1,0 +1,26 @@
+{
+  "version": 4,
+  "name": "ROLL OUT",
+  "size": 16,
+  "tier": 0,
+  "obstacles": [
+    {"pos": [4, 1.0, 0],  "half": [0.8, 1.0, 14], "color": [0.40, 0.44, 0.52]},
+    {"pos": [-4, 1.0, 0], "half": [0.8, 1.0, 14], "color": [0.40, 0.44, 0.52]}
+  ],
+  "ramps": null,
+  "scenery": [
+    {"kind": "diamond", "pos": [9, 0.5, -2], "h": 3.0, "color": [0.30, 0.80, 0.95], "spin": true},
+    {"kind": "cube",    "pos": [-9, 0.2, 5], "h": 2.0, "color": [0.95, 0.55, 0.20], "spin": true},
+    {"kind": "spire",   "pos": [9, 0.5, 8],  "h": 4.0, "color": [0.70, 0.40, 0.95], "spin": true}
+  ],
+  "spawns": [[0, -13]],
+  "entities": [
+    {"kind": "flag", "pos": [0, 0, -7], "half": [0.5, 0.5, 0.5], "color": [0, 0, 0], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, -2], "half": [0.5, 0.5, 0.5], "color": [0, 0, 0], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, 3],  "half": [0.5, 0.5, 0.5], "color": [0, 0, 0], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, 8],  "half": [0.5, 0.5, 0.5], "color": [0, 0, 0], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, 13], "half": [0.5, 0.5, 0.5], "color": [0, 0, 0], "flag": {"team": -1}}
+  ],
+  "rules": {"mode": -1, "timeLimit": 120, "target": -1, "lives": 1, "bots": 0},
+  "intro": {"body": 0, "tip": "Press {forward} to roll forward - hold {cruise} with it for cruise control."}
+}

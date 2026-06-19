@@ -1,0 +1,22 @@
+{
+  "version": 4,
+  "name": "CLAW & ORDER",
+  "size": 20,
+  "tier": 0,
+  "obstacles": [
+    {"pos": [-4, 0.9, 3], "half": [1.4, 0.9, 1.4], "color": [0.40, 0.44, 0.52]},
+    {"pos": [4, 0.9, 6],  "half": [1.4, 0.9, 1.4], "color": [0.40, 0.44, 0.52]}
+  ],
+  "ramps": null,
+  "scenery": [
+    {"kind": "diamond", "pos": [13, 0.5, -11], "h": 3.0, "color": [0.95, 0.55, 0.35], "spin": true}
+  ],
+  "spawns": [[0, -13], [0, 12]],
+  "entities": [
+    {"kind": "flag", "pos": [-7, 0, 5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [7, 0, 7],  "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, 10], "flag": {"team": -1}}
+  ],
+  "rules": {"mode": -1, "timeLimit": 150, "target": -1, "lives": 1, "bots": 2, "enemyBody": 10},
+  "intro": {"body": 9, "tip": "Two guards hold the flags. The CRAB deploys a TURRET that fights for it ({secondary}) - drop it facing them and let it work; SAND ({fire}) slows them down."}
+}

@@ -1,0 +1,23 @@
+{
+  "version": 4,
+  "name": "BREAK THROUGH",
+  "size": 16,
+  "tier": 0,
+  "obstacles": [
+    {"pos": [3, 1.0, 0],  "half": [0.8, 1.0, 9], "color": [0.40, 0.44, 0.52]},
+    {"pos": [-3, 1.0, 0], "half": [0.8, 1.0, 9], "color": [0.40, 0.44, 0.52]}
+  ],
+  "ramps": null,
+  "scenery": [
+    {"kind": "diamond", "pos": [8, 0.5, 0], "h": 3.0, "color": [0.95, 0.45, 0.40], "spin": true}
+  ],
+  "spawns": [[0, -11]],
+  "entities": [
+    {"kind": "wall", "pos": [0, 1.0, -4], "half": [2.3, 1.0, 0.6], "color": [0.72, 0.52, 0.22], "solid": true, "destruct": {"maxHp": 40}},
+    {"kind": "flag", "pos": [0, 0, 1], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, 5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, 9], "flag": {"team": -1}}
+  ],
+  "rules": {"mode": -1, "timeLimit": 120, "target": -1, "lives": 1, "bots": 0},
+  "intro": {"body": 0, "tip": "Hold {fire} to shoot - blast the cracked wall, then take the flags."}
+}

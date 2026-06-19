@@ -1,0 +1,23 @@
+{
+  "version": 4,
+  "name": "THICK SKIN",
+  "size": 16,
+  "tier": 0,
+  "obstacles": [
+    {"pos": [3.5, 1.0, 0],  "half": [0.8, 1.0, 10], "color": [0.40, 0.44, 0.52]},
+    {"pos": [-3.5, 1.0, 0], "half": [0.8, 1.0, 10], "color": [0.40, 0.44, 0.52]}
+  ],
+  "ramps": null,
+  "scenery": [
+    {"kind": "octa", "pos": [9, 0.5, 0], "h": 3.0, "color": [0.70, 0.70, 0.78], "spin": true}
+  ],
+  "spawns": [[0, -11]],
+  "entities": [
+    {"kind": "hazard", "pos": [0, 0.05, -2], "half": [2.7, 0.1, 3.0], "color": [0.95, 0.40, 0.10], "solid": false, "hazard": {"dps": 20}},
+    {"kind": "flag", "pos": [0, 0, 4],  "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, 8],  "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, 11], "flag": {"team": -1}}
+  ],
+  "rules": {"mode": -1, "timeLimit": 130, "target": -1, "lives": 1, "bots": 0},
+  "intro": {"body": 16, "tip": "The ELEPHANT shrugs off fire - just bull straight through the flames; tusks gore ({fire}), {secondary} shields allies."}
+}

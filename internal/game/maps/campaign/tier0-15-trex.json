@@ -1,0 +1,22 @@
+{
+  "version": 4,
+  "name": "SCORCHED",
+  "size": 18,
+  "tier": 0,
+  "obstacles": [
+    {"pos": [-5, 0.9, 3], "half": [1.4, 0.9, 1.4], "color": [0.40, 0.44, 0.52]},
+    {"pos": [5, 0.9, 5],  "half": [1.4, 0.9, 1.4], "color": [0.40, 0.44, 0.52]}
+  ],
+  "ramps": null,
+  "scenery": [
+    {"kind": "spire", "pos": [13, 0.5, -11], "h": 5.0, "color": [0.95, 0.45, 0.25], "spin": true}
+  ],
+  "spawns": [[0, -13], [0, 11]],
+  "entities": [
+    {"kind": "flag", "pos": [-7, 0, 6], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [7, 0, 8],  "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, 11], "flag": {"team": -1}}
+  ],
+  "rules": {"mode": -1, "timeLimit": 150, "target": -1, "lives": 1, "bots": 3, "enemyBody": 6},
+  "intro": {"body": 14, "tip": "A whole pack guards the flags. The T-REX breathes a WIDE cone of FLAME ({fire}) - roast the entire group at once as they close, then collect."}
+}

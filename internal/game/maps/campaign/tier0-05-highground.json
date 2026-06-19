@@ -1,0 +1,24 @@
+{
+  "version": 4,
+  "name": "HIGH GROUND",
+  "size": 18,
+  "tier": 0,
+  "obstacles": [
+    {"pos": [0, 1.0, 4.5], "half": [4, 1.0, 3.5], "color": [0.42, 0.46, 0.54]}
+  ],
+  "ramps": [
+    {"pos": [0, 0, -2], "half": [3, 0, 3], "h": 2.0, "dir": "+z", "color": [0.36, 0.40, 0.48]}
+  ],
+  "scenery": [
+    {"kind": "diamond", "pos": [12, 0.5, 9], "h": 3.0, "color": [0.35, 0.80, 0.95], "spin": true}
+  ],
+  "spawns": [[0, -13]],
+  "entities": [
+    {"kind": "flag", "pos": [-9, 0, -6], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 2, 2.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 2, 4.5], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 2, 6.5], "flag": {"team": -1}}
+  ],
+  "rules": {"mode": -1, "timeLimit": 130, "target": -1, "lives": 1, "bots": 0},
+  "intro": {"body": 0, "tip": "Drive up the ramp onto the deck and roll straight across the top to sweep the flags."}
+}

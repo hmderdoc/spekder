@@ -1,0 +1,27 @@
+{
+  "version": 4,
+  "name": "SPRING LOADED",
+  "size": 20,
+  "tier": 0,
+  "obstacles": [
+    {"pos": [0, 1.5, 8], "half": [5, 1.5, 3], "color": [0.42, 0.46, 0.54]}
+  ],
+  "ramps": null,
+  "scenery": [
+    {"kind": "diamond", "pos": [-9, 5.5, 1], "h": 2.5, "color": [0.30, 0.85, 0.55], "spin": true},
+    {"kind": "diamond", "pos": [9, 5.5, 1],  "h": 2.5, "color": [0.30, 0.85, 0.55], "spin": true},
+    {"kind": "spire",   "pos": [13, 0.5, 13], "h": 5.0, "color": [0.60, 0.50, 0.95], "spin": true}
+  ],
+  "spawns": [[0, -14]],
+  "entities": [
+    {"kind": "trampoline", "pos": [0, 0.2, 3],  "half": [1.6, 0.2, 1.6], "color": [0.30, 0.85, 0.55], "solid": false, "bounce": {"power": 20}},
+    {"kind": "trampoline", "pos": [-9, 0.2, 1], "half": [1.6, 0.2, 1.6], "color": [0.30, 0.85, 0.55], "solid": false, "bounce": {"power": 20}},
+    {"kind": "trampoline", "pos": [9, 0.2, 1],  "half": [1.6, 0.2, 1.6], "color": [0.30, 0.85, 0.55], "solid": false, "bounce": {"power": 20}},
+    {"kind": "flag", "pos": [0, 0, -10], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 3, 8],   "flag": {"team": -1}},
+    {"kind": "flag", "pos": [-9, 4.5, 1], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [9, 4.5, 1],  "flag": {"team": -1}}
+  ],
+  "rules": {"mode": -1, "timeLimit": 140, "target": -1, "lives": 1, "bots": 0},
+  "intro": {"body": 0, "tip": "Trampolines fling you straight UP - bounce onto the high deck and up to the floating flags. The map goes vertical."}
+}

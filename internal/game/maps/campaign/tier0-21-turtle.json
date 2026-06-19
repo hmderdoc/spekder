@@ -1,0 +1,20 @@
+{
+  "version": 4,
+  "name": "HOLD THE LINE",
+  "size": 18,
+  "tier": 0,
+  "obstacles": [],
+  "ramps": null,
+  "scenery": [
+    {"kind": "cube", "pos": [-12, 0.2, -12], "h": 2.5, "color": [0.40, 0.70, 0.50], "spin": true}
+  ],
+  "spawns": [[0, -13]],
+  "entities": [
+    {"kind": "turret", "pos": [0, 1.2, 12], "half": [0.9, 1.2, 0.9], "color": [0.80, 0.30, 0.30], "solid": true, "turret": {"range": 18, "fireDelay": 0.9, "dmg": 16, "turnRate": 3.0}},
+    {"kind": "flag", "pos": [-3, 0, 6], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [3, 0, 6],  "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, 8],  "flag": {"team": -1}}
+  ],
+  "rules": {"mode": -1, "timeLimit": 150, "target": -1, "lives": 1, "bots": 0, "allies": 1},
+  "intro": {"body": 13, "tip": "Your ally grabs the flags but the turret will cut it down. Push ahead and get BETWEEN them - {jump} shells up (invulnerable) so the turret hammers YOUR shell while your ally collects."}
+}

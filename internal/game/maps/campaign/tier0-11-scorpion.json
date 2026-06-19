@@ -1,0 +1,21 @@
+{
+  "version": 4,
+  "name": "STINGER",
+  "size": 22,
+  "tier": 0,
+  "obstacles": [],
+  "ramps": null,
+  "scenery": [
+    {"kind": "diamond", "pos": [13, 0.5, -12], "h": 3.0, "color": [0.85, 0.80, 0.30], "spin": true}
+  ],
+  "spawns": [[0, -15]],
+  "entities": [
+    {"kind": "turret", "pos": [0, 1.2, 5], "half": [0.9, 1.2, 0.9], "color": [0.80, 0.30, 0.30], "solid": true, "turret": {"range": 10, "fireDelay": 1.0, "dmg": 9, "turnRate": 2.5}, "destruct": {"maxHp": 50}},
+    {"kind": "flag", "pos": [-3, 0, 9],  "flag": {"team": -1}},
+    {"kind": "flag", "pos": [3, 0, 9],   "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, 12],  "flag": {"team": -1}},
+    {"kind": "flag", "pos": [-12, 0, -10], "flag": {"team": -1}}
+  ],
+  "rules": {"mode": -1, "timeLimit": 130, "target": -1, "lives": 1, "bots": 0},
+  "intro": {"body": 5, "tip": "The SCORPION is a glass sniper - {fire} the long laser to drop the turret from beyond its range, THEN move in. Rushing it gets you shot. Its sting POISONS up close."}
+}

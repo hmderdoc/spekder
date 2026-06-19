@@ -1,0 +1,21 @@
+{
+  "version": 4,
+  "name": "TAKE FLIGHT",
+  "size": 18,
+  "tier": 0,
+  "obstacles": [],
+  "ramps": null,
+  "scenery": [
+    {"kind": "spire",   "pos": [13, 0.5, 0], "h": 6.0, "color": [0.40, 0.70, 0.95], "spin": true},
+    {"kind": "diamond", "pos": [0, 7.5, 9],  "h": 2.5, "color": [0.55, 0.80, 0.95], "spin": true}
+  ],
+  "spawns": [[0, -13]],
+  "entities": [
+    {"kind": "flag", "pos": [0, 0, -7], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [-7, 3, 2], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [7, 5, 4],  "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 7, 9],  "flag": {"team": -1}}
+  ],
+  "rules": {"mode": -1, "timeLimit": 140, "target": -1, "lives": 1, "bots": 0},
+  "intro": {"body": 17, "tip": "Hold {jump} to FLY - the FALCON climbs while held and drifts down when released. Rise to each flag hanging in the sky."}
+}

@@ -1,0 +1,24 @@
+{
+  "version": 4,
+  "name": "BOUNDS",
+  "size": 20,
+  "tier": 0,
+  "obstacles": [
+    {"pos": [0, 1.0, 7], "half": [3, 1.0, 2], "color": [0.42, 0.46, 0.54]}
+  ],
+  "ramps": [
+    {"pos": [0, 0, 3], "half": [3, 0, 2], "h": 2.0, "dir": "+z", "color": [0.36, 0.40, 0.48]}
+  ],
+  "scenery": [
+    {"kind": "cube", "pos": [13, 0.2, -12], "h": 2.5, "color": [0.80, 0.55, 0.30], "spin": true}
+  ],
+  "spawns": [[0, -13], [0, 13]],
+  "entities": [
+    {"kind": "flag", "pos": [-9, 0, 2], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [9, 0, 2],  "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 2, 7],  "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, 12], "flag": {"team": -1}}
+  ],
+  "rules": {"mode": -1, "timeLimit": 150, "target": -1, "lives": 1, "bots": 2, "enemyBody": 12},
+  "intro": {"body": 15, "tip": "Two guards roam the field. The GORILLA bounds high ({jump}) onto the ledge for the top flag; POUND ({fire}) smashes foes around you, {secondary} drops a banana to trip one."}
+}

@@ -1,0 +1,21 @@
+{
+  "version": 4,
+  "name": "POUNCE",
+  "size": 18,
+  "tier": 0,
+  "obstacles": [],
+  "ramps": null,
+  "scenery": [
+    {"kind": "tetra", "pos": [12, 0.5, 12], "h": 3.0, "color": [0.95, 0.65, 0.25], "spin": true}
+  ],
+  "spawns": [[0, -13]],
+  "entities": [
+    {"kind": "hazard", "pos": [0, 0.05, -3], "half": [11, 0.1, 1.2], "color": [0.95, 0.40, 0.10], "solid": false, "hazard": {"dps": 40}},
+    {"kind": "flag", "pos": [-9, 0, 3], "flag": {"team": -1}},
+    {"kind": "flag", "pos": [9, 0, 3],  "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, 6],  "flag": {"team": -1}},
+    {"kind": "flag", "pos": [0, 0, 11], "flag": {"team": -1}}
+  ],
+  "rules": {"mode": -1, "timeLimit": 120, "target": -1, "lives": 1, "bots": 0},
+  "intro": {"body": 2, "tip": "The TIGER is fast and frail - {jump} pounces forward (leap clear of the lava); its claws leave a BLEED."}
+}
