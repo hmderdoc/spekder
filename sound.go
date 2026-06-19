@@ -10,13 +10,16 @@ import (
 
 // ANSI "music" (cterm / SyncTERM). A sound is the sequence
 //
-//	CSI | <music string> 0x0e 0x0f        i.e.  ESC [ | <MML> 0x0e 0x0f
+//	CSI | <music string> 0x0e        i.e.  ESC [ | <MML> 0x0e
 //
 // where the music string is a subset of GW-BASIC PLAY (MML). We prefix MB so it
 // plays in the BACKGROUND (MF would freeze the terminal until it finished). The
-// trailing 0x0f (shift-in) undoes 0x0e's shift-out so non-ANSI terminals aren't
-// garbled (cterm.txt insists on it). Spekder is a CP437 door, so the raw bytes
-// pass through untouched. The beeper is MONOPHONIC, so sounds interrupt one
+// 0x0e (^N) is the terminator: cterm plays the buffer and leaves music mode the
+// instant it sees it (cterm.c play_music). We used to append a 0x0f (shift-in)
+// as a guard for dumb VT terminals, but on cterm the 0x0e is consumed (never
+// acts as shift-out) so the lone 0x0f rendered as a stray CP437 sun glyph.
+// Spekder is a CP437 door, so the raw bytes pass through untouched. The beeper
+// is MONOPHONIC, so sounds interrupt one
 // another - hence in-game we use short event blips and the background music is
 // suspended while a match is active.
 //
@@ -31,13 +34,62 @@ import (
 var (
 	soundOn        atomic.Bool
 	musicSuspended atomic.Bool
+	sfxOn          atomic.Bool // in-game sound effects (master must also be on)
+	gameMusicOn    atomic.Bool // play the background music DURING gameplay in lieu of SFX
 )
 
-func init() { soundOn.Store(true) }
+func init() {
+	soundOn.Store(true)
+	sfxOn.Store(true)
+}
 
 // setSoundOn / suspendMusic are the UI-side controls.
 func setSoundOn(on bool)    { soundOn.Store(on) }
 func suspendMusic(v bool)   { musicSuspended.Store(v) }
+func setSfxOn(on bool)      { sfxOn.Store(on) }
+func setGameMusic(on bool)  { gameMusicOn.Store(on) }
+
+// songReq lets the SOUND TEST hand a specific song to the background loop to play
+// immediately (buffered 1; newest wins).
+var songReq = make(chan musSong, 1)
+
+func requestSong(s musSong) {
+	select {
+	case <-songReq: // drop a stale pending request
+	default:
+	}
+	select {
+	case songReq <- s:
+	default:
+	}
+}
+
+// The song the background loop is currently playing + when it started, so the
+// SOUND TEST visualizer can hook the live music (not just songs it generated).
+var (
+	musCurMu    sync.Mutex
+	musCurSong  musSong
+	musCurStart time.Time
+	musCurSet   bool
+)
+
+func setCurrentSong(s musSong, t time.Time) {
+	musCurMu.Lock()
+	musCurSong, musCurStart, musCurSet = s, t, true
+	musCurMu.Unlock()
+}
+
+// nowPlayingSong returns the loop's current song, its start time, and whether one
+// is playing.
+func nowPlayingSong() (musSong, time.Time, bool) {
+	musCurMu.Lock()
+	defer musCurMu.Unlock()
+	return musCurSong, musCurStart, musCurSet
+}
+
+// sfxEnabled reports whether in-game effects should play: master + SFX on, and
+// not overridden by in-game background music.
+func sfxEnabled() bool { return soundOn.Load() && sfxOn.Load() && !gameMusicOn.Load() }
 
 // lockedWriter serializes the music goroutine's writes with the UI's bufio
 // flushes so the two never interleave mid-escape-sequence. Each Write is one
@@ -63,7 +115,7 @@ func emitMusic(w io.Writer, body string) {
 	if !soundOn.Load() {
 		return
 	}
-	io.WriteString(w, "\x1b[|MB"+body+"\x0e\x0f")
+	io.WriteString(w, "\x1b[|MB"+body+"\x0e")
 }
 
 // sfxHit is a short, low, descending blip for when the local player takes damage.
@@ -104,7 +156,7 @@ func sfxBreak(w *bufio.Writer) { emitMusic(w, "T240O2L16ECO1L8G") }
 // cutMusic stops whatever is still queued on the terminal (a new note preempts
 // the queue - see the ANSI-music-stop reference). Always emitted, even with sound
 // "off", since its job is to silence.
-func cutMusic(w io.Writer) { io.WriteString(w, "\x1b[|MBT255L64O2C\x0e\x0f") }
+func cutMusic(w io.Writer) { io.WriteString(w, "\x1b[|MBT255L64O2C\x0e") }
 
 // startMusicLoop launches the background composer/player, writing through out
 // (the lockedWriter). Runs for the life of the process.
@@ -124,6 +176,7 @@ func startMusicLoop(out io.Writer) {
 			if len(song.levels) == 0 {
 				return
 			}
+			setCurrentSong(song, now)
 			emitMusic(out, song.levels[0][0])
 			next, playing = now.Add(song.durs[0][0]), true
 		}
@@ -133,6 +186,7 @@ func startMusicLoop(out io.Writer) {
 				sec, level = 0, level+1
 				if level >= len(song.levels) { // every variation played: compose a fresh song
 					level, song = 0, composeSong()
+					setCurrentSong(song, now)
 				}
 			}
 			emitMusic(out, song.levels[level][sec])
@@ -146,6 +200,17 @@ func startMusicLoop(out io.Writer) {
 					playing = false
 				}
 				continue
+			}
+			select {
+			case rs := <-songReq: // SOUND TEST asked for a specific song: play it at once
+				song, level, sec = rs, 0, 0
+				if len(song.levels) > 0 {
+					setCurrentSong(song, now)
+					emitMusic(out, song.levels[0][0])
+					next, playing = now.Add(song.durs[0][0]), true
+				}
+				continue
+			default:
 			}
 			switch {
 			case !playing:

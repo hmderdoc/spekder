@@ -1521,6 +1521,482 @@ func drawBin(w *bufio.Writer, data []byte, col0, row0 int) {
 // runSoundTest plays a short tune and asks a first-time user whether they heard
 // it, so sound only stays on for terminals that actually support ANSI music. The
 // result is persisted (see main), so this is shown once.
+// runSound is the OPTIONS -> SOUND submenu: the master switch, the in-game SFX
+// toggle, the in-game-music toggle (play the soundtrack during matches in lieu of
+// effects), and a sound test. Changes apply live and persist.
+func runSound(w *bufio.Writer, cols, rows int, ip *input, dropfile string, s *userSettings) {
+	const (
+		iMaster = iota
+		iGameAudio
+		iTest
+		iBack
+		nOpt
+	)
+	sel := 0
+	onOff := func(b bool) string {
+		if b {
+			return "ON"
+		}
+		return "OFF"
+	}
+	gaName := func() string {
+		switch s.gameAudio {
+		case gameAudioMusic:
+			return "MUSIC"
+		case gameAudioOff:
+			return "OFF"
+		}
+		return "SFX"
+	}
+	draw := func() {
+		w.WriteString("\x1b[2J\x1b[H")
+		title := "SOUND"
+		fmt.Fprintf(w, "\x1b[2;%dH\x1b[1;96m%s\x1b[0m", (cols-len(title))/2+1, title)
+		names := []string{
+			"SOUND: " + onOff(s.sound),
+			"IN-GAME AUDIO: " + gaName(),
+			"SOUND TEST",
+			"BACK",
+		}
+		blurbs := []string{
+			"Master switch for all music and effects.",
+			"During a match: SFX (hit/kill/pickup), the MUSIC soundtrack, or OFF.",
+			"Hear a sample of the effects.",
+			"",
+		}
+		for i, n := range names {
+			pre, sgr := "   ", "\x1b[0;37m"
+			if i == sel {
+				pre, sgr = " > ", "\x1b[1;30;47m"
+			}
+			line := pre + n + " "
+			fmt.Fprintf(w, "\x1b[%d;%dH%s%s\x1b[0m", 5+i*2, (cols-len(line))/2+1, sgr, line)
+		}
+		bl := blurbs[sel]
+		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;90m%s\x1b[0m", 5+nOpt*2+1, (cols-len(bl))/2+1, bl)
+		foot := "up/dn    ENTER toggle/select    Bksp back"
+		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;90m%s\x1b[0m", rows, (cols-len(foot))/2+1, foot)
+		w.Flush()
+	}
+	draw()
+	for {
+		select {
+		case <-ip.quitCh:
+			return
+		case k := <-ip.events:
+			switch k {
+			case mkUp:
+				sel = (sel - 1 + nOpt) % nOpt
+				draw()
+			case mkDown:
+				sel = (sel + 1) % nOpt
+				draw()
+			case mkBack, mkLeft:
+				return
+			case mkEnter:
+				switch sel {
+				case iMaster:
+					s.sound = !s.sound
+					s.soundTested = true
+					setSoundOn(s.sound)
+					saveUserSettings(dropfile, *s)
+					draw()
+				case iGameAudio:
+					s.gameAudio = (s.gameAudio + 1) % 3 // SFX -> MUSIC -> OFF
+					applyGameAudio(s.gameAudio)
+					saveUserSettings(dropfile, *s)
+					draw()
+				case iTest:
+					runSongTest(w, cols, rows, ip)
+					draw()
+				case iBack:
+					return
+				}
+			}
+		}
+	}
+}
+
+// pitchPalette colors the falling notes by pitch class (a 12-hue wheel).
+var pitchPalette = [12][3]int{
+	{255, 80, 80}, {255, 140, 50}, {255, 205, 40}, {200, 230, 50}, {120, 230, 60}, {50, 225, 130},
+	{40, 220, 210}, {60, 165, 255}, {95, 110, 255}, {160, 90, 255}, {220, 75, 230}, {255, 70, 150},
+}
+
+func pitchColor(p int) string {
+	c := pitchPalette[((p%12)+12)%12]
+	return fgEsc(byte(c[0]), byte(c[1]), byte(c[2]))
+}
+
+// cellID is the meaning of a visualizer sub-cell: -1 blank, 0..11 pitch class,
+// 12 now-line, 13 onset flash. idRGB maps it to a color.
+func idRGB(id int) (byte, byte, byte) {
+	switch id {
+	case 12:
+		return 90, 90, 90 // now-line (dim)
+	case 13:
+		return 255, 255, 255 // flash as the note sounds
+	case 14:
+		return 205, 205, 205 // white key (natural)
+	case 15:
+		return 55, 55, 55 // black key (sharp/flat)
+	default:
+		c := pitchPalette[((id%12)+12)%12]
+		return byte(c[0]), byte(c[1]), byte(c[2])
+	}
+}
+
+// isBlackKey reports whether a pitch sits on a piano black key (sharp/flat).
+func isBlackKey(p int) bool {
+	switch ((p % 12) + 12) % 12 {
+	case 1, 3, 6, 8, 10:
+		return true
+	}
+	return false
+}
+
+// halfCell composes one terminal cell from its upper and lower sub-cells using
+// the CP437 upper-half-block (0xDF: foreground paints the top, background the
+// bottom), so the visualizer has double the vertical resolution. Every cell sets
+// BOTH fg and bg explicitly (an absent half is black) - otherwise a single-color
+// cell would inherit the previous cell's leftover background in its empty half.
+func halfCell(top, bottom int) string {
+	if top < 0 && bottom < 0 {
+		return "\x1b[0m "
+	}
+	var tr, tg, tb, br, bg, bb byte
+	if top >= 0 {
+		tr, tg, tb = idRGB(top)
+	}
+	if bottom >= 0 {
+		br, bg, bb = idRGB(bottom)
+	}
+	return "\x1b[" + barCellSGR(tr, tg, tb, br, bg, bb) + "m\xdf"
+}
+
+// runSongTest is the SOUND TEST: a playground for the procedural song generator.
+// Pick a KEY / TEMPO / SCALE and GENERATE that song, or SHUFFLE a random one; the
+// background music loop plays the request immediately. Forces sound on for the
+// duration so it always plays, then restores the prior state.
+func runSongTest(w *bufio.Writer, cols, rows int, ip *input) {
+	prevOn, prevSusp := soundOn.Load(), musicSuspended.Load()
+	setSoundOn(true)
+	suspendMusic(false)
+	defer func() { setSoundOn(prevOn); suspendMusic(prevSusp) }()
+
+	key, tempo, scaleIdx := 0, 130, 0 // C, 130 BPM, first scale
+	progIdx, riffIdx := -1, -1        // -1 = AUTO (rolled fresh each generate)
+	// The visualizer follows whatever the background music loop is playing (the menu
+	// song on entry, or whatever GENERATE/SHUFFLE requests). timeline is rebuilt only
+	// when the loop's current song changes (detected via its start time).
+	var timeline []fallNote
+	var lastStart time.Time
+	minP, maxP := 36, 84   // the song's actual pitch range
+	dispLo, dispHi := 24, 84 // the keybed window shown (fills the grid width, >= the song)
+	nowDesc := ""
+	const (
+		rKey = iota
+		rTempo
+		rScale
+		rProg
+		rRiff
+		rGen
+		rShuffle
+		rBack
+		nRows
+	)
+	sel := 0
+	gen := func() {
+		requestSong(composeSongWith(songParams{scaleIdx: scaleIdx, root: 36 + key, tempo: tempo, progIdx: progIdx, riffIdx: riffIdx}))
+	}
+	shuf := func() {
+		requestSong(composeSongWith(songParams{scaleIdx: -1, progIdx: -1, riffIdx: -1}))
+	}
+	progLabel := func() string {
+		set := progsForScale(scaleIdx)
+		if progIdx < 0 || progIdx >= len(set) {
+			return "AUTO"
+		}
+		parts := make([]string, len(set[progIdx]))
+		for i, d := range set[progIdx] {
+			parts[i] = strconv.Itoa(d)
+		}
+		return strings.Join(parts, "-")
+	}
+	riffLabel := func() string {
+		if riffIdx < 0 {
+			return "AUTO"
+		}
+		return "#" + strconv.Itoa(riffIdx+1)
+	}
+	// Layout: the params run down the left; the falling-note grid fills the right.
+	gridLeft, gridRight := 32, cols-2
+	gridTop, gridBottom := 4, rows-2
+	if gridRight <= gridLeft {
+		gridRight = gridLeft + 1
+	}
+	// Cell buffer for a flicker-free delta render: -1 blank, 0..11 pitch class
+	// (colored block), 12 now-line, 13 onset flash. Each frame is diffed against
+	// the previous and only changed cells are emitted.
+	gh, gw := gridBottom-gridTop+1, gridRight-gridLeft+1
+	prevCells := make([][]int, gh)
+	for i := range prevCells {
+		prevCells[i] = make([]int, gw)
+		for j := range prevCells[i] {
+			prevCells[i][j] = -2 // sentinel: forces a full paint on the first frame
+		}
+	}
+	lastNowDesc := ""
+	// laneOff centers the song's pitch range in the grid - ONE COLUMN PER SEMITONE
+	// (a true piano grid), not the whole range stretched across the full width.
+	laneOff := func() int {
+		if rangeW := dispHi - dispLo + 1; rangeW < gw {
+			return (gw - rangeW) / 2
+		}
+		return 0
+	}
+	lane := func(p int) int {
+		c := gridLeft + laneOff() + (p - dispLo)
+		if c < gridLeft {
+			c = gridLeft
+		}
+		if c > gridRight {
+			c = gridRight
+		}
+		return c
+	}
+	drawParams := func() {
+		fmt.Fprintf(w, "\x1b[2;2H\x1b[1;96mSONG GENERATOR\x1b[0m")
+		txt := []string{
+			"KEY:         " + noteName(36+key),
+			"TEMPO:       " + strconv.Itoa(tempo),
+			"SCALE:       " + musScales[scaleIdx].name,
+			"PROGRESSION: " + progLabel(),
+			"RIFF:        " + riffLabel(),
+			"[ GENERATE ]",
+			"[ SHUFFLE ]",
+			"BACK",
+		}
+		for i, t := range txt {
+			pre, sgr := "  ", "\x1b[0;37m"
+			if i == sel {
+				pre, sgr = "> ", "\x1b[1;30;47m"
+			}
+			if len(t) > 26 { // never let a long scale name bleed into the grid
+				t = t[:26]
+			}
+			fmt.Fprintf(w, "\x1b[%d;2H%s%s%-26s\x1b[0m", 4+i*2, sgr, pre, t)
+		}
+		fmt.Fprintf(w, "\x1b[%d;2H\x1b[0;90mup/dn  L/R adjust  ENTER play  Bksp back\x1b[0m", rows)
+		w.Flush()
+	}
+	drawGrid := func() {
+		// Follow the live music: rebuild the timeline whenever the loop's song changes.
+		song, start, ok := nowPlayingSong()
+		if ok && !start.Equal(lastStart) {
+			lastStart = start
+			timeline = songTimeline(song)
+			nowDesc = song.desc
+			minP, maxP = 127, 0
+			for _, n := range timeline {
+				if n.pitch < minP {
+					minP = n.pitch
+				}
+				if n.pitch > maxP {
+					maxP = n.pitch
+				}
+			}
+			if maxP <= minP {
+				minP, maxP = 36, 84
+			}
+			// Keybed window: fill the grid width with keys (one column per semitone),
+			// capped at a full 88-key piano, centered on the song so the music sits
+			// in the middle. Always wide enough to contain the song.
+			keys := gw
+			if keys > 88 {
+				keys = 88
+			}
+			if keys < maxP-minP+1 {
+				keys = maxP - minP + 1
+			}
+			center := (minP + maxP) / 2
+			dispLo = center - keys/2
+			if dispLo < 0 {
+				dispLo = 0
+			}
+			dispHi = dispLo + keys - 1
+		}
+		// now-playing caption: repaint only when it changes (no per-frame flicker).
+		if nowDesc != lastNowDesc {
+			lastNowDesc = nowDesc
+			cap := "now playing: " + nowDesc
+			if len(cap) > gw {
+				cap = cap[:gw]
+			}
+			fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;95m%-*s\x1b[0m", gridTop-1, gridLeft, gw, cap)
+		}
+		// Build this frame's SUB-cell grid at 2x vertical resolution (two half-block
+		// sub-rows per terminal row) so fast notes don't collapse onto one row.
+		// -1 blank, 0..11 pitch, 12 now-line, 13 flash.
+		subH := 2 * gh
+		keybedSub := subH - 1 // bottom sub-row = the virtual piano keybed
+		landSub := subH - 2   // notes land here, one half-block above the keys
+		if landSub < 0 {
+			landSub = 0
+		}
+		sub := make([][]int, subH)
+		for i := range sub {
+			sub[i] = make([]int, gw)
+			for j := range sub[i] {
+				sub[i][j] = -1
+			}
+		}
+		// Virtual keybed along the bottom: one column per semitone (inverse of
+		// lane) - naturals white, sharps black, blank margins outside the range.
+		off := laneOff()
+		for c := 0; c < gw; c++ {
+			p := dispLo + (c - off) // inverse of lane()
+			if p < dispLo || p > dispHi {
+				continue // outside the keybed window: leave blank
+			}
+			id := 14
+			if isBlackKey(p) {
+				id = 15
+			}
+			sub[keybedSub][c] = id
+		}
+		if ok && len(timeline) > 0 {
+			elapsed := time.Since(start).Seconds()
+			const lookahead = 2.4
+			fallSpeed := float64(landSub) / lookahead // sub-rows per second
+			for _, n := range timeline {
+				startDt, endDt := n.at-elapsed, n.at+n.dur-elapsed
+				if endDt < -0.05 || startDt > lookahead {
+					continue
+				}
+				bottom := landSub - int(startDt*fallSpeed+0.5) // onset (leads, lowest)
+				top := landSub - int(endDt*fallSpeed+0.5)      // tail (highest)
+				if bottom > landSub {
+					bottom = landSub
+				}
+				if top < 0 {
+					top = 0
+				}
+				cls := ((n.pitch % 12) + 12) % 12
+				c := lane(n.pitch) - gridLeft
+				if c < 0 || c >= gw {
+					continue
+				}
+				playing := startDt <= 0.05 && endDt > -0.02 // sounding right now
+				for r := top; r <= bottom; r++ {
+					id := cls
+					if r == landSub && playing {
+						id = 13 // flash sits on top of the struck key
+					}
+					sub[r][c] = id
+				}
+			}
+		}
+		// Compose terminal cells from sub-row pairs; emit only what changed.
+		var b strings.Builder
+		for r := 0; r < gh; r++ {
+			for c := 0; c < gw; c++ {
+				top, bot := sub[2*r][c], sub[2*r+1][c]
+				enc := (top+2)*64 + (bot + 2) // ids -1..13 -> 1..15
+				if enc == prevCells[r][c] {
+					continue
+				}
+				prevCells[r][c] = enc
+				fmt.Fprintf(&b, "\x1b[%d;%dH%s", gridTop+r, gridLeft+c, halfCell(top, bot))
+			}
+		}
+		if b.Len() > 0 {
+			b.WriteString("\x1b[0m")
+			w.WriteString(b.String())
+			w.Flush()
+		}
+	}
+	adjust := func(d int) {
+		switch sel {
+		case rKey:
+			key = (key + d + 12) % 12
+		case rTempo:
+			tempo += d * 6
+			if tempo < 80 {
+				tempo = 80
+			}
+			if tempo > 200 {
+				tempo = 200
+			}
+		case rScale:
+			scaleIdx = (scaleIdx + d + len(musScales)) % len(musScales)
+			if progIdx >= len(progsForScale(scaleIdx)) {
+				progIdx = -1 // the progression pool changed with the scale's context
+			}
+		case rProg:
+			n := len(progsForScale(scaleIdx))
+			progIdx += d
+			if progIdx < -1 {
+				progIdx = n - 1
+			}
+			if progIdx >= n {
+				progIdx = -1
+			}
+		case rRiff:
+			riffIdx += d
+			if riffIdx < -1 {
+				riffIdx = len(riffs) - 1
+			}
+			if riffIdx >= len(riffs) {
+				riffIdx = -1
+			}
+		}
+		drawParams()
+	}
+	w.WriteString("\x1b[2J\x1b[H")
+	drawParams()
+	tick := time.NewTicker(70 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ip.quitCh:
+			return
+		case <-tick.C:
+			drawGrid()
+		case k := <-ip.events:
+			switch k {
+			case mkUp:
+				sel = (sel - 1 + nRows) % nRows
+				drawParams()
+			case mkDown:
+				sel = (sel + 1) % nRows
+				drawParams()
+			case mkLeft:
+				if sel <= rRiff {
+					adjust(-1)
+				}
+			case mkRight:
+				if sel <= rRiff {
+					adjust(1)
+				}
+			case mkBack:
+				return
+			case mkEnter:
+				switch sel {
+				case rShuffle:
+					shuf()
+					drawParams()
+				case rBack:
+					return
+				default: // KEY/TEMPO/SCALE/PROG/RIFF/GENERATE all generate the current settings
+					gen()
+					drawParams()
+				}
+			}
+		}
+	}
+}
+
 func runSoundTest(w *bufio.Writer, cols, rows int, ip *input) bool {
 	setSoundOn(true) // force the probe to emit regardless of the loaded default
 	w.WriteString("\x1b[2J\x1b[H")
@@ -2998,11 +3474,11 @@ func runOptions(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *inpu
 	draw := func() {
 		names[iDiff] = "DIFFICULTY: " + s.difficulty.String()
 		names[iAssist] = "AIM ASSIST: " + onOff(s.aimAssist)
-		names[iSound] = "SOUND: " + onOff(s.sound)
+		names[iSound] = "SOUND"
 		names[iColor] = "COLOR: " + colorModeName(s.colorMode)
 		blurbs[iDiff] = "Bot skill level."
 		blurbs[iAssist] = "Sticky aim: ease onto a target your reticle is near."
-		blurbs[iSound] = "Hit and kill sound effects (ANSI music; needs a supporting terminal)."
+		blurbs[iSound] = "Effects, in-game music, and a sound test (ANSI music; needs a supporting terminal)."
 		blurbs[iColor] = "TRUECOLOR looks best; 256 is lighter on slow links; 16 suits classic terminals."
 		drawListMenu(w, cols, rows, "OPTIONS", names, blurbs, dim, sel)
 	}
@@ -3042,10 +3518,7 @@ func runOptions(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *inpu
 					saveUserSettings(dropfile, *s)
 					draw()
 				case iSound:
-					s.sound = !s.sound
-					s.soundTested = true // a deliberate choice: don't re-prompt at next launch
-					setSoundOn(s.sound)  // live: the music goroutine picks it up next tick
-					saveUserSettings(dropfile, *s)
+					runSound(w, cols, rows, ip, dropfile, s)
 					draw()
 				case iColor:
 					s.colorMode = (s.colorMode + 1) % colorModes
@@ -4951,7 +5424,7 @@ func main() {
 		restore()
 		// Cut any still-queued music and restore the screen, through the locked
 		// writer so it can't collide with the music goroutine.
-		io.WriteString(lw, "\x1b[|MBT255L64O2C\x0e\x0f\x1b[?7h\x1b[0m\x1b[?25h\x1b[2J\x1b[H")
+		io.WriteString(lw, "\x1b[|MBT255L64O2C\x0e\x1b[?7h\x1b[0m\x1b[?25h\x1b[2J\x1b[H")
 	}
 	sigCh = make(chan os.Signal, 1)
 	signal.Notify(sigCh, shutdownSignals...)
@@ -5517,11 +5990,13 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 			}
 		}
 		lastPhase = v.phase
-		// Background music plays in the lobby/post-match, but not during active play
-		// (SFX own the mono beeper) or the countdown (so its beeps are clean).
-		suspendMusic(v.phase == gm.PhaseActive || v.phase == gm.PhaseCountdown)
+		// Background music normally pauses during active play (SFX own the mono
+		// beeper) and the countdown - UNLESS in-game music is on, where the
+		// soundtrack plays through the match in lieu of effects.
+		inMatch := v.phase == gm.PhaseActive || v.phase == gm.PhaseCountdown
+		suspendMusic(inMatch && !gameMusicOn.Load())
 		// Countdown beeps: a medium tick on 5..2, a high "GO" tone on 1.
-		if v.phase == gm.PhaseCountdown {
+		if v.phase == gm.PhaseCountdown && sfxEnabled() {
 			if n := int(math.Ceil(v.timer)); n != lastCount {
 				switch {
 				case n == 1:
@@ -5531,7 +6006,7 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 				}
 				lastCount = n
 			}
-		} else {
+		} else if v.phase != gm.PhaseCountdown {
 			lastCount = 0
 		}
 		lastSelfDead = v.self.Dead
@@ -5600,9 +6075,10 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 		}
 		p := v.self
 		// Sound FX (ANSI music): diff the local tank across frames. Death (-> kill cam)
-		// and frags take priority over the plain hit blip; emit is gated/rate-limited in
-		// the sfx helpers. Only while a match is live.
-		if v.phase == gm.PhaseActive {
+		// and frags take priority over the plain hit blip. Skipped when SFX are off or
+		// in-game music has the beeper (sfxEnabled); state below still updates so a
+		// later toggle doesn't fire a backlog.
+		if v.phase == gm.PhaseActive && sfxEnabled() {
 			switch {
 			case p.Dead && !lastSelfDeadSfx:
 				sfxDeath(w)

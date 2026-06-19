@@ -525,33 +525,188 @@ var lastMus struct {
 // held on a pitch axis (same tonal centre, sometimes a 4th/5th modulation) so the
 // hand-off is smooth. It renders once per variation step (the song repeats 3x
 // through its variation arc), and the final pass walks out to the tonic.
+// noteEv / fallNote feed the SOUND TEST's falling-note visualizer.
+type noteEv struct {
+	pitch     int // octave*12 + class
+	startTick int // sixteenth-ticks from the section start
+	dur       int
+}
+type fallNote struct {
+	pitch int
+	at    float64 // absolute seconds from the song's start (when it sounds)
+	dur   float64 // seconds it sustains (column height in the visualizer)
+}
+
+// parseMML extracts the (monophonic) note timeline from a composed MML line:
+// each note's pitch and its start/length in sixteenth-ticks. It tracks octave
+// (O<n>) and default length (L<n>), skips the mode/tempo controls, and advances
+// over rests (P) - matching what pitchMML/lenTok emit.
+func parseMML(mml string) (evs []noteEv, total int) {
+	octave, defLen := 4, 4
+	classOf := map[byte]int{'C': 0, 'D': 2, 'E': 4, 'F': 5, 'G': 7, 'A': 9, 'B': 11}
+	i := 0
+	num := func() int {
+		n, got := 0, false
+		for i < len(mml) && mml[i] >= '0' && mml[i] <= '9' {
+			n, got, i = n*10+int(mml[i]-'0'), true, i+1
+		}
+		if !got {
+			return -1
+		}
+		return n
+	}
+	dur := func() int {
+		ln := num()
+		if ln <= 0 {
+			ln = defLen
+		}
+		t := 16 / ln
+		if t < 1 {
+			t = 1
+		}
+		for i < len(mml) && mml[i] == '.' {
+			t += t / 2
+			i++
+		}
+		return t
+	}
+	for i < len(mml) {
+		c := mml[i]
+		switch {
+		case c == 'O':
+			i++
+			if v := num(); v >= 0 {
+				octave = v
+			}
+		case c == 'L':
+			i++
+			if v := num(); v > 0 {
+				defLen = v
+			}
+		case c == 'T' || c == 'M':
+			// Body controls: T<tempo> and the leading "ML" (legato). NOTE: 'B' and
+			// 'F' are note letters here, not the MB/MF mode flags - those are only
+			// prepended at emit time, never present in the stored song body.
+			i++
+			num() // consume any trailing value
+		case c == '<':
+			octave--
+			i++
+		case c == '>':
+			octave++
+			i++
+		case c >= 'A' && c <= 'G':
+			cls := classOf[c]
+			i++
+			for i < len(mml) && (mml[i] == '#' || mml[i] == '+' || mml[i] == '-') {
+				if mml[i] == '-' {
+					cls--
+				} else {
+					cls++
+				}
+				i++
+			}
+			t := dur()
+			evs = append(evs, noteEv{pitch: octave*12 + cls, startTick: total, dur: t})
+			total += t
+		case c == 'P' || c == 'R':
+			i++
+			total += dur()
+		default:
+			i++
+		}
+	}
+	return
+}
+
+// songTimeline flattens a composed song into absolutely-timed notes for the
+// visualizer (each section's relative ticks scaled by its real duration).
+func songTimeline(song musSong) []fallNote {
+	var tl []fallNote
+	t := 0.0
+	for li := range song.levels {
+		for si := range song.levels[li] {
+			evs, total := parseMML(song.levels[li][si])
+			d := song.durs[li][si].Seconds()
+			if total > 0 {
+				sx := d / float64(total)
+				for _, e := range evs {
+					tl = append(tl, fallNote{pitch: e.pitch, at: t + float64(e.startTick)*sx, dur: float64(e.dur) * sx})
+				}
+			}
+			t += d
+		}
+	}
+	return tl
+}
+
+// noteName is the pitch class of a MIDI-ish root (for the song generator display).
+func noteName(root int) string {
+	notes := []string{"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"}
+	return notes[((root%12)+12)%12]
+}
+
+// songParams pins parts of a song for the SOUND TEST generator; a zero/negative
+// field means "pick it the usual (random) way".
+type songParams struct {
+	scaleIdx int // index into musScales; <0 = random
+	root     int // MIDI root pitch; <=0 = random
+	tempo    int // BPM; <=0 = random
+	progIdx  int // index into the scale's progression set; <0 = random
+	riffIdx  int // index into riffs (the lead motif); <0 = random
+}
+
+// composeSong builds a fresh random song (the background loop's default).
 func composeSong() musSong {
-	// Mode: change from last song (big feel shift; smooth because the root holds).
-	si := rand.Intn(len(musScales))
-	for tries := 0; lastMus.have && si == lastMus.scaleIdx && tries < 8; tries++ {
+	return composeSongWith(songParams{scaleIdx: -1, progIdx: -1, riffIdx: -1})
+}
+
+// progsForScale returns the chord-progression pool a scale draws from (bright vs
+// minor context). The SOUND TEST uses it to size the progression picker.
+func progsForScale(scaleIdx int) [][]int {
+	if scaleIdx >= 0 && scaleIdx < len(musScales) && musScales[scaleIdx].minorish() {
+		return progsMinorCtx
+	}
+	return progsMajorCtx
+}
+
+// composeSongWith builds a song, honoring any pinned params (the rest random).
+func composeSongWith(p songParams) musSong {
+	// Mode: pinned, else change from last song (big feel shift; root holds).
+	si := p.scaleIdx
+	if si < 0 || si >= len(musScales) {
 		si = rand.Intn(len(musScales))
+		for tries := 0; lastMus.have && si == lastMus.scaleIdx && tries < 8; tries++ {
+			si = rand.Intn(len(musScales))
+		}
 	}
 	s := musScales[si]
 
-	// Key (pitch axis): keep the previous tonal centre, sometimes modulate a 4th/5th.
-	root := 36 + rand.Intn(13) // C3..C4 for the first song
-	if lastMus.have {
-		root = lastMus.root
-		if rand.Intn(2) == 0 {
-			root += []int{5, 7, -5, -7}[rand.Intn(4)]
-		}
-		for root < 33 {
-			root += 12
-		}
-		for root > 50 {
-			root -= 12
+	// Key (pitch axis): pinned, else keep the previous centre, sometimes modulate.
+	root := p.root
+	if root <= 0 {
+		root = 36 + rand.Intn(13) // C3..C4 for the first song
+		if lastMus.have {
+			root = lastMus.root
+			if rand.Intn(2) == 0 {
+				root += []int{5, 7, -5, -7}[rand.Intn(4)]
+			}
+			for root < 33 {
+				root += 12
+			}
+			for root > 50 {
+				root -= 12
+			}
 		}
 	}
 
-	// Tempo: noticeably different from last.
-	tempo := 116 + rand.Intn(34)
-	for tries := 0; lastMus.have && absInt(tempo-lastMus.tempo) < 12 && tries < 8; tries++ {
+	// Tempo: pinned, else noticeably different from last.
+	tempo := p.tempo
+	if tempo <= 0 {
 		tempo = 116 + rand.Intn(34)
+		for tries := 0; lastMus.have && absInt(tempo-lastMus.tempo) < 12 && tries < 8; tries++ {
+			tempo = 116 + rand.Intn(34)
+		}
 	}
 
 	progSet := progsMajorCtx
@@ -561,16 +716,21 @@ func composeSong() musSong {
 	// Progression: blues is distinctive, so play it only occasionally (~1 in 6) and
 	// never back-to-back; otherwise pick a non-blues progression that differs from
 	// the last song. The bridge (B) is never blues.
-	playBlues := !(lastMus.have && progIsBlues(lastMus.progA)) && rand.Intn(6) == 0
 	var progA []int
-	if playBlues {
-		progA = bluesIn(progSet)
-	} else {
+	switch {
+	case p.progIdx >= 0 && p.progIdx < len(progSet):
+		progA = progSet[p.progIdx] // pinned by the song generator
+	case !(lastMus.have && progIsBlues(lastMus.progA)) && rand.Intn(6) == 0:
+		progA = bluesIn(progSet) // blues only ~1 in 6, never back-to-back
+	default:
 		progA = pickProg(progSet, true, lastMus.progA)
 	}
 	progB := pickProg(progSet, true, progA)
 
 	rA, rB := pickRiffs(2), pickRiffs(2)
+	if p.riffIdx >= 0 && p.riffIdx < len(riffs) {
+		rA = []riff{riffs[p.riffIdx], riffs[p.riffIdx]} // pin the lead motif (A sections)
+	}
 	plan := makePlan()
 	blues := progIsBlues(progA)
 	// Groove: one section may run a walking bass instead of arpeggios (so songs get
@@ -603,5 +763,5 @@ func composeSong() musSong {
 		}
 	}
 	lastMus.scaleIdx, lastMus.root, lastMus.tempo, lastMus.progA, lastMus.have = si, root, tempo, progA, true
-	return musSong{desc: s.name, levels: levels, durs: durs}
+	return musSong{desc: noteName(root) + " " + s.name + " T" + strconv.Itoa(tempo), levels: levels, durs: durs}
 }

@@ -16,8 +16,9 @@ import (
 type userSettings struct {
 	difficulty   gm.Difficulty
 	aimAssist    bool
-	sound        bool // ANSI-music sound effects + music; opt-out
+	sound        bool // master: ANSI-music sound effects + music; opt-out
 	soundTested  bool // whether the first-run sound check has been done (else: ask)
+	gameAudio    int  // in-game audio: gameAudioSFX (default) / gameAudioMusic / gameAudioOff (mutually exclusive - one mono beeper)
 	colorMode    int  // colorTrue/color256/color16 (see color.go)
 	campaignBest int  // highest campaign level cleared (0 = never)
 	flagTier     int  // highest FLAG RUN tier unlocked (0 = onboarding; 1 = competitive...)
@@ -28,8 +29,21 @@ type userSettings struct {
 	keyBinds map[int]byte
 }
 
+// In-game audio modes (the mono beeper plays one of these during a match).
+const (
+	gameAudioSFX   = iota // hit/kill/pickup effects (default)
+	gameAudioMusic        // the soundtrack plays through the match
+	gameAudioOff          // silent matches
+)
+
+// applyGameAudio syncs the live emit gates to an in-game audio mode.
+func applyGameAudio(mode int) {
+	setSfxOn(mode == gameAudioSFX)
+	setGameMusic(mode == gameAudioMusic)
+}
+
 func defaultSettings() userSettings {
-	return userSettings{difficulty: gm.DiffNormal, aimAssist: true, sound: true, colorMode: colorTrue, keyBinds: map[int]byte{}}
+	return userSettings{difficulty: gm.DiffNormal, aimAssist: true, sound: true, gameAudio: gameAudioSFX, colorMode: colorTrue, keyBinds: map[int]byte{}}
 }
 
 // sanitizeKey reduces a handle to a safe, stable filename fragment.
@@ -111,6 +125,14 @@ func loadUserSettings(dropfile string) userSettings {
 	case "on", "true", "1", "yes":
 		s.soundTested = true
 	}
+	switch strings.ToLower(ini["gameaudio"]) {
+	case "music":
+		s.gameAudio = gameAudioMusic
+	case "off":
+		s.gameAudio = gameAudioOff
+	case "sfx":
+		s.gameAudio = gameAudioSFX
+	}
 	if bs := ini["binds"]; bs != "" {
 		s.keyBinds = map[int]byte{}
 		for _, entry := range strings.Split(bs, ",") {
@@ -128,7 +150,8 @@ func loadUserSettings(dropfile string) userSettings {
 			}
 		}
 	}
-	setSoundOn(s.sound) // sync the emit gate to the loaded preference
+	setSoundOn(s.sound) // sync the emit gates to the loaded preferences
+	applyGameAudio(s.gameAudio)
 	return s
 }
 
@@ -162,7 +185,14 @@ func saveUserSettings(dropfile string, s userSettings) {
 	if s.soundTested {
 		stested = "on"
 	}
-	body := fmt.Sprintf("difficulty = %s\naimassist = %s\nsound = %s\nsoundtested = %s\ncolormode = %s\n", s.difficulty.String(), aa, snd, stested, colorModeSlug(s.colorMode))
+	ga := "sfx"
+	switch s.gameAudio {
+	case gameAudioMusic:
+		ga = "music"
+	case gameAudioOff:
+		ga = "off"
+	}
+	body := fmt.Sprintf("difficulty = %s\naimassist = %s\nsound = %s\nsoundtested = %s\ngameaudio = %s\ncolormode = %s\n", s.difficulty.String(), aa, snd, stested, ga, colorModeSlug(s.colorMode))
 	if s.campaignBest > 0 {
 		body += fmt.Sprintf("campaignbest = %d\n", s.campaignBest)
 	}
