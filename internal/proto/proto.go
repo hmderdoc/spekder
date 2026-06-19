@@ -577,6 +577,12 @@ func EncodeInput(in gm.Input) []byte {
 	if in.Ready {
 		b2 |= 32
 	}
+	if in.WaitVote {
+		b2 |= 64
+	}
+	if in.HumansOnly {
+		b2 |= 128
+	}
 	return []byte{MsgInput, b, vote, b2}
 }
 
@@ -598,7 +604,9 @@ func DecodeInput(p []byte) (gm.Input, bool) {
 		TurretL: b&16 != 0, TurretR: b&32 != 0, Fire: b&64 != 0, Jump: b&128 != 0,
 		Recenter: b2&1 != 0, Fire2: b2&2 != 0, Drop: b2&4 != 0,
 		StrafeL: b2&8 != 0, StrafeR: b2&16 != 0, Ready: b2&32 != 0,
-		Vote: vote,
+		WaitVote:   b2&64 != 0,
+		HumansOnly: b2&128 != 0,
+		Vote:       vote,
 	}, true
 }
 
@@ -937,25 +945,32 @@ type ChatMessage struct {
 	BBSID  string
 	Handle string
 	Text   string
+	Party  string // "" = global chat; otherwise the party this message is scoped to
 }
 
-func EncodeStatusQuery(token string) []byte {
+func EncodeStatusQuery(token, party string) []byte {
 	w := &cursor{}
 	w.u8(MsgStatusQ)
 	w.str(token)
+	w.str(party) // querier's party, so the server can route party-scoped chat (additive)
 	return w.b
 }
 
-func DecodeStatusQuery(p []byte) (string, bool) {
+// DecodeStatusQuery returns the token and the querier's party ("" if absent: an
+// older door, or a solo caller).
+func DecodeStatusQuery(p []byte) (token, party string, ok bool) {
 	if len(p) == 0 || p[0] != MsgStatusQ {
-		return "", false
+		return "", "", false
 	}
 	r := &cursor{b: p, i: 1}
-	token := r.rstr()
+	token = r.rstr()
 	if r.err {
-		return "", false
+		return "", "", false
 	}
-	return token, true
+	if len(r.b)-r.i >= 1 {
+		party = r.rstr()
+	}
+	return token, party, true
 }
 
 func EncodeStatus(st ArenaStatus) []byte {
@@ -990,6 +1005,12 @@ func EncodeStatus(st ArenaStatus) []byte {
 	w.u16(len(st.Presence))
 	for _, p := range st.Presence {
 		w.str(p.Party)
+	}
+	// Chat scope tail (parallel to Chat, by index) - same additive pattern, so an
+	// older client that stops after the presence-party tail still decodes chat.
+	w.u16(len(st.Chat))
+	for _, m := range st.Chat {
+		w.str(m.Party)
 	}
 	return w.b
 }
@@ -1042,6 +1063,15 @@ func DecodeStatus(p []byte) (ArenaStatus, bool) {
 			name := r.rstr()
 			if idx := len(st.Presence) - int(i); idx >= 0 && idx < len(st.Presence) {
 				st.Presence[idx].Party = name
+			}
+		}
+	}
+	// Optional chat-scope tail (parallel to Chat, by index).
+	if len(r.b)-r.i >= 2 {
+		for i := r.ru16(); i > 0; i-- {
+			name := r.rstr()
+			if idx := len(st.Chat) - int(i); idx >= 0 && idx < len(st.Chat) {
+				st.Chat[idx].Party = name
 			}
 		}
 	}
@@ -1115,6 +1145,7 @@ func EncodeChat(token string, m ChatMessage) []byte {
 	w.str(m.BBSID)
 	w.str(m.Handle)
 	w.str(m.Text)
+	w.str(m.Party) // scope (additive: an older server ignores it -> treats as global)
 	return w.b
 }
 
@@ -1131,6 +1162,9 @@ func DecodeChat(p []byte) (token string, m ChatMessage, ok bool) {
 	}
 	if r.err {
 		return "", ChatMessage{}, false
+	}
+	if len(r.b)-r.i >= 1 { // optional scope tail (absent from an older door)
+		m.Party = r.rstr()
 	}
 	return token, m, true
 }

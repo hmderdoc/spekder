@@ -952,20 +952,22 @@ const (
 )
 
 const (
-	countdownTime = 4.0   // sec of "get ready" before a match
-	matchTime     = 180.0 // sec per match
-	DMFragLimit   = 20    // deathmatch ends at this many kills
-	endTime       = 7.0   // sec the scoreboard lingers before the next match
-	lobbyTime     = 30.0  // sec of mode-vote lobby between matches (server only)
-	lobbyFastFwd  = 1.5   // sec the lobby holds once every player has locked (ENTER)
-	flagCount     = 8     // flags scattered in Flag Run
-	flagPickupRad  = 1.9  // how close you must drive to grab a flag
-	flagHoldRadius = 4.0  // a hold-to-claim flag is a small hill you stand in
-	flagVertRad    = 1.6  // vertical reach: a flag on a platform isn't grabbed from the ground below it
-	tankHitFlash  = 0.15  // sec a tank flashes white after taking a hit
-	stepUp        = 0.6   // max ledge/step a tank can mount without jumping
-	survivalLives = 3     // Survival: lives per human
-	survivalPool  = 12    // Survival: bot pool size for waves
+	countdownTime   = 4.0   // sec of "get ready" before a match
+	matchTime       = 180.0 // sec per match
+	DMFragLimit     = 20    // deathmatch ends at this many kills
+	endTime         = 7.0   // sec the scoreboard lingers before the next match
+	lobbyTime       = 30.0  // sec of mode-vote lobby between matches (server only)
+	lobbyFastFwd    = 1.5   // sec the lobby holds once every player has locked (ENTER), 2+ humans
+	lobbySoloFloor  = 12.0  // sec floor a lone ready human still waits (last call for joiners)
+	maxLobbyExtends = 3     // max times a WAIT vote can re-arm the full lobby timer
+	flagCount       = 8     // flags scattered in Flag Run
+	flagPickupRad   = 1.9   // how close you must drive to grab a flag
+	flagHoldRadius  = 4.0   // a hold-to-claim flag is a small hill you stand in
+	flagVertRad     = 1.6   // vertical reach: a flag on a platform isn't grabbed from the ground below it
+	tankHitFlash    = 0.15  // sec a tank flashes white after taking a hit
+	stepUp          = 0.6   // max ledge/step a tank can mount without jumping
+	survivalLives   = 3     // Survival: lives per human
+	survivalPool    = 12    // Survival: bot pool size for waves
 	// Survival per-wave enemy HP multiplier (replaces the old chassis-tier ramp).
 	// FIRST-PASS values - tune against play/balancesim.
 	survivalHPPerWave = 0.12 // +12% enemy HP per wave past the first
@@ -1192,6 +1194,8 @@ type Input struct {
 	Drop                                                          bool // CTF: drop the carried flag where you stand
 	Vote                                                          int
 	Ready                                                         bool // lobby: this player has locked their vote (ENTER)
+	WaitVote                                                      bool // lobby: vote to WAIT for more players (holds/extends the lobby)
+	HumansOnly                                                    bool // lobby: vote to play this match without CPU bots
 }
 
 type Tank struct {
@@ -1263,23 +1267,25 @@ type Tank struct {
 	dotLeechFrac         float64 // fraction of a leeching DoT the shooter heals back (0 -> 1.0)
 	dotCause             KillCause
 
-	regenDebt  float64 // passive HP regen: fractional carry between ticks
-	regenPause float64 // sec until regen resumes after taking damage
-	hpScale    float64 // survival wave HP multiplier (0/1 = none); see spawnWave
-	respawn    float64
-	guard      float64
-	vy         float64 // vertical velocity (jump/gravity)
-	hitFlash   float64 // brief flash timer after taking damage
-	vote       int     // lobby vote: map index, or -1 for none
-	ready      bool    // lobby: locked their vote (ENTER) -> counts toward fast-forward
-	lives      int     // Survival: respawns remaining (humans)
-	Team       int     // CTF: 0 or 1 (-1 = none in non-team modes)
-	Party      string  // party name (client team-grouping hint; "" = solo)
-	Carrying   int     // CTF: index of the enemy flag being carried, or -1
-	shieldT    float64 // power-up: invulnerability remaining (sec)
-	rapidT     float64 // power-up: rapid-fire remaining (sec)
-	cloakT     float64 // power-up: cloak/invisibility remaining (sec)
-	gone       bool    // player left; slot inert and reusable
+	regenDebt      float64 // passive HP regen: fractional carry between ticks
+	regenPause     float64 // sec until regen resumes after taking damage
+	hpScale        float64 // survival wave HP multiplier (0/1 = none); see spawnWave
+	respawn        float64
+	guard          float64
+	vy             float64 // vertical velocity (jump/gravity)
+	hitFlash       float64 // brief flash timer after taking damage
+	vote           int     // lobby vote: map index, or -1 for none
+	ready          bool    // lobby: locked their vote (ENTER) -> counts toward fast-forward
+	waitVote       bool    // lobby: voted to WAIT for more players (holds/extends the lobby)
+	humansOnlyVote bool    // lobby: voted to play without CPU bots
+	lives          int     // Survival: respawns remaining (humans)
+	Team           int     // CTF: 0 or 1 (-1 = none in non-team modes)
+	Party          string  // party name (client team-grouping hint; "" = solo)
+	Carrying       int     // CTF: index of the enemy flag being carried, or -1
+	shieldT        float64 // power-up: invulnerability remaining (sec)
+	rapidT         float64 // power-up: rapid-fire remaining (sec)
+	cloakT         float64 // power-up: cloak/invisibility remaining (sec)
+	gone           bool    // player left; slot inert and reusable
 
 	hazardDebt float64 // hazard-trait: fractional HP damage carried between ticks
 	teleT      float64 // teleporter debounce remaining (sec); 0 = can teleport
@@ -1349,8 +1355,8 @@ type TankSnap struct {
 	Pickups                int
 	DmgDealt               int
 	HealDone               int
-	KillsHuman, KillsBot   int     // kills split by victim type (K/D breakdown)
-	Captures               int     // flags captured (CTF) / collected (FLAG RUN)
+	KillsHuman, KillsBot   int // kills split by victim type (K/D breakdown)
+	Captures               int // flags captured (CTF) / collected (FLAG RUN)
 	Lives                  int
 	Team                   int     // CTF team (-1 in non-team modes)
 	Carrying               bool    // CTF: carrying an enemy flag
@@ -1637,7 +1643,7 @@ const (
 var Weapons = []WeaponDef{
 	{Name: "CANNON", Delivery: DeliverBolt, Damage: 24, Cost: 1, Effect: Effect{Kind: EffDamage}, Affects: TargetFoes, Glyph: 'o'},                                   // tank-only now; nerfed from the implicit projDmg (34) that made every cannon body top-tier
 	{Name: "SLOWER", Delivery: DeliverBolt, Damage: 12, Cooldown: 1.0, Cost: 2, Effect: Effect{Kind: EffSlow, Mag: 0.55, Dur: 2.5}, Affects: TargetFoes, Glyph: '~'}, // octopod primary: chip + slow (first-pass dmg, tune in sim)
-	{Name: "MEDIC", Delivery: DeliverBolt, Damage: 8, Cooldown: 1.2, Cost: 2, Effect: Effect{Kind: EffHeal, Mag: 35}, Affects: TargetAllies, Glyph: '+'}, // heal 25->35 (+40%)
+	{Name: "MEDIC", Delivery: DeliverBolt, Damage: 8, Cooldown: 1.2, Cost: 2, Effect: Effect{Kind: EffHeal, Mag: 35}, Affects: TargetAllies, Glyph: '+'},             // heal 25->35 (+40%)
 	{Name: "KNOCKER", Delivery: DeliverBolt, Cooldown: 1.1, Cost: 2, Effect: Effect{Kind: EffKnockback, Mag: 4}, Affects: TargetFoes, Glyph: '*'},
 	{Name: "BUSTER", Delivery: DeliverBolt, Cooldown: 1.5, Cost: 2, Effect: Effect{Kind: EffShieldBust}, Affects: TargetFoes, Glyph: 'x'},
 	{Name: "GRENADE", Delivery: DeliverLob, Damage: 32, Speed: 20, Arc: lobGravity, Blast: 4, Cooldown: 5.0, Cost: 3, Effect: Effect{Kind: EffDamage}, Affects: TargetFoes, Glyph: 'g'}, // long cooldown: a committed burst, not a spam-lob
@@ -1684,7 +1690,7 @@ var Weapons = []WeaponDef{
 	{Name: "SAND", Delivery: DeliverCone, Damage: 7, Blast: 8, Cooldown: 0.5, Cost: 1, Effect: Effect{Kind: EffSlow, Mag: 0.55, Dur: 2.5}, Affects: TargetFoes, Glyph: ':'},                                              // chip + slow cone: kite while the deployed turret does the heavy lifting
 	{Name: "STRANGLE", Delivery: DeliverMelee, Damage: 14, Blast: 2.8, Cooldown: 1.5, Cost: 2, Effect: Effect{Kind: EffStrangle, Dur: 2.5}, Affects: TargetFoes, Glyph: '*', Cause: CauseMelee},                          // serpent: coil + root; victim can't flee (escape via melee/knockback/3rd-party hit on the serpent)
 	{Name: "STAB", Delivery: DeliverMelee, Damage: 12, Blast: 3.2, Cooldown: 0.5, Cost: 1, BackstabMul: 3.0, Effect: Effect{Kind: EffDamage}, Affects: TargetFoes, Glyph: '*', Cause: CauseMelee},                        // octopod spy: short stab (wider reach so it connects); 3x from the rear arc
-	{Name: "RALLY", Delivery: DeliverMelee, Damage: 8, Blast: 6.5, Cooldown: 8.0, Cost: 3, Effect: Effect{Kind: EffHeal, Mag: 54}, Affects: TargetAllies, FoeKnock: 6, Glyph: '+', Cause: CauseMelee}, // stag battle-medic: big radial heal (30->54, +80%) for kin + a hard shove that boots foes off the point
+	{Name: "RALLY", Delivery: DeliverMelee, Damage: 8, Blast: 6.5, Cooldown: 8.0, Cost: 3, Effect: Effect{Kind: EffHeal, Mag: 54}, Affects: TargetAllies, FoeKnock: 6, Glyph: '+', Cause: CauseMelee},                    // stag battle-medic: big radial heal (30->54, +80%) for kin + a hard shove that boots foes off the point
 }
 
 // Flag is a Flag Run pickup, or (in CTF) a team flag that can be carried,
@@ -1829,18 +1835,20 @@ func (w *World) Match() MatchSnap {
 }
 
 type World struct {
-	Tanks    []Tank
-	Shots    []Projectile
-	Mode     Mode
-	Phase    Phase
-	Timer    float64 // seconds left in the current phase
-	WinnerID int     // tank index of the match winner (-1 = none/tie), valid in PhaseEnded
-	flags    []Flag  // Flag Run pickups / CTF team flags
-	Lobby    bool    // server arenas enable the between-match vote lobby + rotation
-	rotIdx   int     // rotation cursor (fallback when no votes)
-	MapIdx   int     // active map (index into Maps)
-	wave     int     // Survival: current wave number
-	pinned   bool    // map locked (no rotation) - offline testing/preview
+	Tanks        []Tank
+	Shots        []Projectile
+	Mode         Mode
+	Phase        Phase
+	Timer        float64 // seconds left in the current phase
+	WinnerID     int     // tank index of the match winner (-1 = none/tie), valid in PhaseEnded
+	flags        []Flag  // Flag Run pickups / CTF team flags
+	Lobby        bool    // server arenas enable the between-match vote lobby + rotation
+	lobbyExtends int     // lobby holds taken so far via the WAIT vote (capped, so it can't stall)
+	humansOnly   bool    // the next/current match drops bots (voted in the lobby)
+	rotIdx       int     // rotation cursor (fallback when no votes)
+	MapIdx       int     // active map (index into Maps)
+	wave         int     // Survival: current wave number
+	pinned       bool    // map locked (no rotation) - offline testing/preview
 
 	teamScore  [2]int // CTF: captures per team
 	winnerTeam int    // CTF: winning team set at match end (-1 none)
@@ -2748,6 +2756,96 @@ func (w *World) AddPlayer(color [3]float64, name string, body int) int {
 	return i
 }
 
+// JoinPlayer adds a connecting human. MID-MATCH (PhaseActive) it takes over a CPU
+// slot - a fresh respawn that lands the joiner on their PARTY's team (so they drop
+// in WITH their party, not against it); a solo joiner just takes a free bot on its
+// own team so the head-count stays even. In the lobby/countdown, or if no bot is
+// free, it adds a normal player slot (AddPlayer), which the next startMatch teams up.
+func (w *World) JoinPlayer(color [3]float64, name, party string, body int) int {
+	if w.Phase == PhaseActive {
+		preferred := w.partyTeam(party) // the team this joiner's party is on, or -1
+		if pick := w.pickBotSlot(preferred); pick >= 0 {
+			w.takeOverBot(pick, color, name, body, preferred)
+			return pick
+		}
+	}
+	return w.AddPlayer(color, name, body)
+}
+
+// partyTeam returns the team an already-present party member is on (-1 if the
+// joiner is solo or no party-mate is here yet).
+func (w *World) partyTeam(party string) int {
+	if party == "" {
+		return -1
+	}
+	for i := range w.Tanks {
+		t := &w.Tanks[i]
+		if !t.Bot && !t.gone && t.Party == party && t.Team >= 0 {
+			return t.Team
+		}
+	}
+	return -1
+}
+
+// pickBotSlot chooses a bot to take over, preferring one already on the wanted
+// team (so balance holds), and among those a downed/benched one (no live tank
+// vanishes mid-fight). team < 0 = no preference. Returns -1 if there are no bots.
+func (w *World) pickBotSlot(team int) int {
+	best, score := -1, -1
+	for i := range w.Tanks {
+		t := &w.Tanks[i]
+		if !t.Bot {
+			continue
+		}
+		s := 0
+		if team < 0 || t.Team == team {
+			s += 2 // on the wanted team (or caller has no preference)
+		}
+		if t.Dead || t.gone {
+			s++ // not actively fighting
+		}
+		if s > score {
+			score, best = s, i
+		}
+	}
+	return best
+}
+
+// takeOverBot turns a CPU slot into a freshly-spawned human. team >= 0 forces the
+// joiner onto that team (their party's side, even if it means moving the slot);
+// team < 0 keeps the bot's team. Team modes tint by team; FFA uses the joiner's color.
+func (w *World) takeOverBot(i int, color [3]float64, name string, body, team int) {
+	if name == "" {
+		name = "PLAYER"
+	}
+	if team < 0 {
+		team = w.Tanks[i].Team // no party preference: keep the bot's team
+	}
+	eff := VehBody(body)
+	t := Tank{HP: eff.MaxHP, ammo: eff.AmmoMax, Name: name, guard: spawnGuardTime, vote: -1, body: body, lives: survivalLives, Team: team, Carrying: -1, weapon2: defaultSecondary(body)}
+	if r := w.rules(); r.Lives > 0 {
+		t.lives = r.Lives
+	}
+	if w.rules().Teams == 2 && team >= 0 {
+		shade := 0 // a per-member brightness, like assignTeams
+		for j := range w.Tanks {
+			if j != i && !w.Tanks[j].gone && w.Tanks[j].Team == team {
+				shade++
+			}
+		}
+		t.Color = teamColor(team, shade)
+	} else {
+		t.Color = w.freeColor(color)
+	}
+	if body == BodyMinotaur {
+		t.shieldHP = minoShieldMax
+	}
+	t.bufferHP = exoMax(body)
+	w.Tanks[i] = t
+	w.Tanks[i].Pos = w.spawnPoint(i)
+	w.Tanks[i].HullYaw = w.faceTarget(i)
+}
+
 // SetPlayerLoadout swaps a human tank's character (body/color/secondary).
 // The body-derived fields take effect on the next respawn (respawns() refreshes
 // HP/ammo from the new body), so the natural use is to change while dead. It
@@ -3541,10 +3639,25 @@ func (w *World) Update(dt float64, inputs map[int]Input) {
 		return // frozen scoreboard
 	case PhaseLobby:
 		w.applyVotes(inputs)
-		if w.lobbyAllReady() && w.Timer > lobbyFastFwd {
-			w.Timer = lobbyFastFwd // everyone locked in: skip the rest of the wait
+		if w.lobbyAllReady() {
+			// Everyone locked a launch vote (nobody waiting): fast-forward. With a
+			// crowd that's near-instant; a lone human still gets a last-call window
+			// so a joiner can slip in instead of starting solo-vs-bots immediately.
+			floor := lobbyFastFwd
+			if w.HumanCount() < 2 {
+				floor = lobbySoloFloor
+			}
+			if w.Timer > floor {
+				w.Timer = floor
+			}
 		}
 		if w.Timer <= 0 {
+			if w.waitWins() && w.lobbyExtends < maxLobbyExtends { // WAIT holds the lobby (capped)
+				w.lobbyExtends++
+				w.Timer = lobbyTime
+				return
+			}
+			w.humansOnly = w.humansOnlyWins() // lock the bots-or-not choice for this match
 			mapIdx, mode := w.pickNextPairing()
 			w.startCountdownMap(mode, mapIdx)
 		}
@@ -3558,10 +3671,14 @@ func (w *World) Update(dt float64, inputs map[int]Input) {
 // lobby; offline/solo just counts in the same mode again.
 func (w *World) afterEnded() {
 	if w.Lobby {
+		w.unbenchBots() // restore the CPU pool a humans-only match may have benched
 		for i := range w.Tanks {
 			w.Tanks[i].vote = -1
 			w.Tanks[i].ready = false
+			w.Tanks[i].waitVote = false
+			w.Tanks[i].humansOnlyVote = false
 		}
+		w.lobbyExtends, w.humansOnly = 0, false
 		w.Phase, w.Timer = PhaseLobby, lobbyTime
 		return
 	}
@@ -3814,7 +3931,49 @@ func (w *World) applyVotes(inputs map[int]Input) {
 			}
 		}
 		t.ready = in.Ready
+		t.waitVote = in.WaitVote
+		t.humansOnlyVote = in.HumansOnly
 	}
+}
+
+// humansOnlyWins reports whether a majority of present humans voted to drop the
+// bots (and there are at least two humans - one player "humans only" is just a
+// solo match). Decides whether the next match benches the CPU pool.
+func (w *World) humansOnlyWins() bool {
+	humans, yes := 0, 0
+	for i := range w.Tanks {
+		t := &w.Tanks[i]
+		if t.Bot || t.gone {
+			continue
+		}
+		humans++
+		if t.humansOnlyVote {
+			yes++
+		}
+	}
+	return humans >= 2 && yes*2 > humans
+}
+
+// waitWins reports whether more humans voted WAIT than backed the leading map - so
+// the lobby should hold for more players rather than launch.
+func (w *World) waitWins() bool {
+	waiters, best := 0, 0
+	tally := map[int]int{}
+	for i := range w.Tanks {
+		t := &w.Tanks[i]
+		if t.Bot || t.gone {
+			continue
+		}
+		if t.waitVote {
+			waiters++
+		} else if t.vote >= 0 {
+			tally[t.vote]++
+			if tally[t.vote] > best {
+				best = tally[t.vote]
+			}
+		}
+	}
+	return waiters > best
 }
 
 // lobbyAllReady reports whether every present human has locked a valid vote, so
@@ -3827,7 +3986,7 @@ func (w *World) lobbyAllReady() bool {
 			continue
 		}
 		humans++
-		if !t.ready || t.vote < 0 {
+		if t.waitVote || !t.ready || t.vote < 0 { // a waiter is not "ready to launch"
 			return false
 		}
 	}
@@ -3864,10 +4023,14 @@ func (w *World) ForceLobby() {
 	if !w.Lobby || w.Phase != PhaseActive {
 		return
 	}
+	w.unbenchBots()
 	for i := range w.Tanks {
 		w.Tanks[i].vote = -1
 		w.Tanks[i].ready = false
+		w.Tanks[i].waitVote = false
+		w.Tanks[i].humansOnlyVote = false
 	}
+	w.lobbyExtends, w.humansOnly = 0, false
 	w.Phase, w.Timer = PhaseLobby, lobbyTime
 }
 
@@ -3885,6 +4048,7 @@ func (w *World) startMatch() {
 	} else if r.SoloTeam {
 		w.assignSoloTeams() // Flag Run: player vs all bots
 	}
+	w.benchBotsHumansOnly(r) // humans-only vote: drop the CPU pool (after teams are set)
 	for i := range w.Tanks {
 		t := &w.Tanks[i]
 		if t.gone {
@@ -3947,6 +4111,69 @@ func (w *World) startMatch() {
 			if w.Tanks[i].Bot && w.Tanks[i].Team == 1 {
 				w.SetBotBody(i, m.Rules.EnemyBody)
 			}
+		}
+	}
+}
+
+// benchBotsHumansOnly drops the CPU pool for a humans-only match (set gone, so
+// the reset loop and everything downstream skip them). In a two-team mode with an
+// odd human count it keeps ONE bot on the short side as a substitute so the teams
+// stay even. Survival (wave bots) is exempt - the waves ARE the game. afterEnded
+// un-benches the pool. No-op unless the humans-only vote carried with 2+ humans.
+func (w *World) benchBotsHumansOnly(r Ruleset) {
+	if !w.humansOnly || r.Bots == BotWaves || w.HumanCount() < 2 {
+		return
+	}
+	if r.Teams != 2 { // FFA-style: just drop every bot, humans fight each other
+		for i := range w.Tanks {
+			if w.Tanks[i].Bot {
+				w.Tanks[i].gone = true
+			}
+		}
+		return
+	}
+	// Team mode: split the humans evenly across both teams (humans-only overrides the
+	// co-op-vs-bots default), then drop the bots - keeping ONE as a substitute on the
+	// short side (team 1) when the human count is odd, so the sides stay even.
+	hi := 0
+	for i := range w.Tanks {
+		t := &w.Tanks[i]
+		if t.gone || t.Bot {
+			continue
+		}
+		t.Team = hi % 2 // team 0 takes the odd extra; team 1 is the short side
+		hi++
+	}
+	odd, keptSub := hi%2 == 1, false
+	for i := range w.Tanks {
+		t := &w.Tanks[i]
+		if !t.Bot {
+			continue
+		}
+		if odd && !keptSub {
+			t.Team, keptSub = 1, true // one substitute on the short team
+			continue
+		}
+		t.gone = true
+	}
+	// Recolor by team (the re-split changed assignments; mirror assignTeams' tinting).
+	var shade [2]int
+	for i := range w.Tanks {
+		t := &w.Tanks[i]
+		if t.gone || t.Team < 0 {
+			continue
+		}
+		t.Color = teamColor(t.Team, shade[t.Team])
+		shade[t.Team]++
+	}
+}
+
+// unbenchBots restores the CPU pool after a humans-only match (bots are only ever
+// gone via benchBotsHumansOnly), so it's available to fill the next one.
+func (w *World) unbenchBots() {
+	for i := range w.Tanks {
+		if w.Tanks[i].Bot {
+			w.Tanks[i].gone = false
 		}
 	}
 }

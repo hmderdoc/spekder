@@ -7,9 +7,9 @@ import (
 )
 
 func TestStatusRoundTrip(t *testing.T) {
-	token, ok := DecodeStatusQuery(EncodeStatusQuery("secret"))
-	if !ok || token != "secret" {
-		t.Fatalf("status query round-trip: got %q %v", token, ok)
+	token, party, ok := DecodeStatusQuery(EncodeStatusQuery("secret", "derdok"))
+	if !ok || token != "secret" || party != "derdok" {
+		t.Fatalf("status query round-trip: got %q %q %v", token, party, ok)
 	}
 
 	want := ArenaStatus{

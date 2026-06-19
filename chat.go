@@ -19,7 +19,9 @@ type chatToast struct {
 type chatUI struct {
 	active     bool
 	cmd        bool // compose is a slash-command (/) line, not a chat message
+	party      bool // compose is a PARTY message (\), scoped to your party
 	transcript bool
+	partyView  bool // transcript shows only party messages (| opened it)
 	input      string
 	seenSeq    uint32
 	messages   []proto.ChatMessage
@@ -100,7 +102,7 @@ func (c *chatUI) prune() bool {
 }
 
 func (c *chatUI) appendRune(r rune) {
-	if r < 0x20 || r == 0x7f || r == '`' || r == '~' {
+	if r < 0x20 || r == 0x7f || r == '`' || r == '~' || r == '\\' || r == '|' {
 		return
 	}
 	if c.cmd && c.input == "" && r == '/' {
@@ -122,17 +124,22 @@ func (c *chatUI) backspace() {
 
 func (c *chatUI) submit(dropfile string) string {
 	text := strings.TrimSpace(c.input)
-	wasCmd := c.cmd
+	wasCmd, wasParty := c.cmd, c.party
 	c.input = ""
-	c.active = false
-	c.cmd = false
+	c.active, c.cmd, c.party = false, false, false
 	if wasCmd {
 		return dispatchCommand(text, dropfile)
 	}
 	if text == "" {
 		return ""
 	}
-	if err := sendChat(dropfile, text); err != nil {
+	scope := "" // global
+	if wasParty {
+		if scope = getParty(); scope == "" {
+			return "You're not in a party."
+		}
+	}
+	if err := sendChat(dropfile, text, scope); err != nil {
 		return "Chat failed: " + err.Error()
 	}
 	return ""
@@ -208,9 +215,16 @@ func drawChatToasts(w *bufio.Writer, cols, rows int, c *chatUI, mark func(row, c
 	if width < 20 {
 		return
 	}
-	var lines []string
+	type tline struct{ text, style string }
+	var lines []tline
 	for _, t := range c.toasts {
-		lines = append(lines, wrapText(chatLine(t.msg), width)...)
+		style := "\x1b[1;37;40m" // global: bright white
+		if t.msg.Party != "" {
+			style = "\x1b[1;95;40m" // party: bright magenta
+		}
+		for _, wl := range wrapText(chatLine(t.msg), width) {
+			lines = append(lines, tline{wl, style})
+		}
 	}
 	maxLines := 5
 	if c.active {
@@ -226,8 +240,8 @@ func drawChatToasts(w *bufio.Writer, cols, rows int, c *chatUI, mark func(row, c
 	if start < 1 {
 		start = 1
 	}
-	for i, line := range lines {
-		fmt.Fprintf(w, "\x1b[%d;2H\x1b[1;37;40m%-*s\x1b[0m", start+i, width, clip(line, width))
+	for i, ln := range lines {
+		fmt.Fprintf(w, "\x1b[%d;2H%s%-*s\x1b[0m", start+i, ln.style, width, clip(ln.text, width))
 		if mark != nil {
 			mark(start+i, 2, width)
 		}
@@ -240,8 +254,11 @@ func drawChatInput(w *bufio.Writer, cols, rows int, c *chatUI, mark func(row, co
 		width = 76
 	}
 	prefix, color := "` ", "\x1b[1;30;46m" // chat: black on cyan
-	if c.cmd {
+	switch {
+	case c.cmd:
 		prefix, color = "/", "\x1b[1;30;42m" // command: black on green
+	case c.party:
+		prefix, color = "\\ ", "\x1b[1;30;45m" // party: black on magenta
 	}
 	prompt := prefix + c.input
 	if len(prompt) > width-1 {
@@ -278,7 +295,12 @@ func drawChatTranscript(w *bufio.Writer, cols, rows int, c *chatUI, mark func(ro
 	}
 	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;36;40m%s%s%s\x1b[0m", top+bh-1, left, string([]byte{0xC0}), hline, string([]byte{0xD9}))
 	title := " CHAT TRANSCRIPT  (~ closes, ` compose) "
-	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;30;46m%s\x1b[0m", top, left+2, clip(title, inner-2))
+	titleColor := "\x1b[1;30;46m"
+	if c.partyView {
+		title = " PARTY CHAT  (| closes, \\ compose) "
+		titleColor = "\x1b[1;30;45m"
+	}
+	fmt.Fprintf(w, "\x1b[%d;%dH%s%s\x1b[0m", top, left+2, titleColor, clip(title, inner-2))
 	row := top + 1
 	if c.who != "" { // connected-roster strip: a couple of rows + a divider
 		wl := wrapText(c.who, inner-2)
@@ -292,9 +314,19 @@ func drawChatTranscript(w *bufio.Writer, cols, rows int, c *chatUI, mark func(ro
 		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;36;40m%s%s%s\x1b[0m", row, left, string([]byte{0xC3}), hline, string([]byte{0xB4}))
 		row++
 	}
-	var lines []string
+	type tline struct{ text, style string }
+	var lines []tline
 	for _, msg := range c.messages {
-		lines = append(lines, wrapText(chatLine(msg), inner-2)...)
+		if c.partyView && msg.Party == "" {
+			continue // party view: only party-scoped messages
+		}
+		style := "\x1b[0;37;40m"
+		if msg.Party != "" {
+			style = "\x1b[1;95;40m" // party message: magenta, even in the global view
+		}
+		for _, wl := range wrapText(chatLine(msg), inner-2) {
+			lines = append(lines, tline{wl, style})
+		}
 	}
 	max := top + bh - 2 - row // leave the bottom inner row for the compose prompt
 	if max < 1 {
@@ -303,12 +335,15 @@ func drawChatTranscript(w *bufio.Writer, cols, rows int, c *chatUI, mark func(ro
 	if len(lines) > max {
 		lines = lines[len(lines)-max:]
 	}
-	for i, line := range lines {
-		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;37;40m%-*s\x1b[0m", row+i, left+1, inner, clip(line, inner))
+	for i, ln := range lines {
+		fmt.Fprintf(w, "\x1b[%d;%dH%s%-*s\x1b[0m", row+i, left+1, ln.style, inner, clip(ln.text, inner))
 	}
 	if c.active {
-		prompt := "` " + c.input + "_"
-		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;30;46m%-*s\x1b[0m", top+bh-2, left+1, inner, clip(prompt, inner))
+		prompt, pc := "` "+c.input+"_", "\x1b[1;30;46m"
+		if c.party {
+			prompt, pc = "\\ "+c.input+"_", "\x1b[1;30;45m"
+		}
+		fmt.Fprintf(w, "\x1b[%d;%dH%s%-*s\x1b[0m", top+bh-2, left+1, pc, inner, clip(prompt, inner))
 	}
 	if mark != nil { // the box is opaque: mask the whole rectangle
 		for r := 0; r < bh; r++ {

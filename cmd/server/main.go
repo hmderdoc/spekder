@@ -80,14 +80,15 @@ type server struct {
 	board       map[string][]proto.ScoreRow
 	players     map[string]*proto.PlayerRow // keyed by Name@BBS (playerKey)
 
-	mu       sync.Mutex // guards world + clients + presence + the map pool (all mutation here)
-	world    *gm.World
-	clients  map[int]*client
-	presence map[string]presenceEntry
-	kicks    map[string]time.Time // party\x00handle -> expiry: members an owner has booted
-	chat     []proto.ChatMessage
-	nextChat uint32
-	nextID   int
+	mu        sync.Mutex // guards world + clients + presence + the map pool (all mutation here)
+	world     *gm.World
+	clients   map[int]*client
+	presence  map[string]presenceEntry
+	kicks     map[string]time.Time // party\x00handle -> expiry: members an owner has booted
+	chat      []proto.ChatMessage
+	nextChat  uint32
+	nextID    int
+	announced map[string]time.Time // handle -> last "is online" notice (debounce reconnect flaps)
 }
 
 type presenceEntry struct {
@@ -102,12 +103,12 @@ func (s *server) handle(conn net.Conn) {
 	if err != nil {
 		return
 	}
-	if token, ok := proto.DecodeStatusQuery(hello); ok {
+	if token, party, ok := proto.DecodeStatusQuery(hello); ok {
 		if token != s.token {
 			log.Printf("rejected %v (bad status token)", conn.RemoteAddr())
 			return
 		}
-		s.handleStatus(conn)
+		s.handleStatus(conn, party)
 		return
 	}
 	if token, pr, ok := proto.DecodePresence(hello); ok {
@@ -191,8 +192,8 @@ func (s *server) handle(conn net.Conn) {
 	if s.isKickedLocked(party, handle) {
 		party = "" // booted from that party: they join solo, not on the owner's side
 	}
-	tank := s.world.AddPlayer(color, handle, body) // dedups to a free color
-	s.world.SetPlayerParty(tank, party)            // team-grouping hint
+	tank := s.world.JoinPlayer(color, handle, party, body) // mid-match: take over a bot slot (on the party's team)
+	s.world.SetPlayerParty(tank, party)                    // record party for future joiners + next teaming
 	id := s.nextID
 	s.nextID++
 	c := &client{id: id, tank: tank, conn: conn}
@@ -249,18 +250,26 @@ func (s *server) handle(conn net.Conn) {
 	log.Printf("leave: tank %d (%d online)", tank, len(s.clients))
 }
 
-func (s *server) handleStatus(conn net.Conn) {
+func (s *server) handleStatus(conn net.Conn, party string) {
 	s.mu.Lock()
 	s.prunePresenceLocked(time.Now())
 	match := s.world.Match()
 	curMap := s.world.ActiveMap()
+	// Route chat: global messages go to everyone; a party-scoped message only to
+	// sessions in that party (so party chat stays within the party, Spekder-wide).
+	var chat []proto.ChatMessage
+	for _, m := range s.chat {
+		if m.Party == "" || m.Party == party {
+			chat = append(chat, m)
+		}
+	}
 	st := proto.ArenaStatus{
 		Humans:   s.world.HumanCount(),
 		Phase:    match.Phase,
 		Mode:     match.Mode,
 		Map:      curMap.Name,
 		Presence: s.presenceListLocked(),
-		Chat:     append([]proto.ChatMessage(nil), s.chat...),
+		Chat:     chat,
 		// The server and the matching client release ship together, so this
 		// build's version is also the client version the arena recommends.
 		ServerVersion: version,
@@ -290,8 +299,19 @@ func (s *server) setPresenceLocked(pr proto.Presence) {
 	if s.isKickedLocked(pr.Party, pr.Handle) {
 		pr.Party = "" // booted from that party: report (and treat) them as solo
 	}
+	// First sighting of a NAMED session => a "X is online" toast (anonymous skipped,
+	// debounced per handle so a heartbeat flap / quick reconnect doesn't spam).
+	if _, seen := s.presence[pr.Session]; !seen && namedHandle(pr.Handle) {
+		if last, ok := s.announced[pr.Handle]; !ok || now.Sub(last) > 90*time.Second {
+			s.announced[pr.Handle] = now
+			s.appendSystemChatLocked(pr.Handle + " is online.")
+		}
+	}
 	s.presence[pr.Session] = presenceEntry{rec: pr, at: now}
 }
+
+// namedHandle reports whether a handle is a real login (not the anonymous default).
+func namedHandle(h string) bool { return h != "" && h != "player" }
 
 func kickKey(party, handle string) string { return party + "\x00" + handle }
 
@@ -335,6 +355,11 @@ func (s *server) prunePresenceLocked(now time.Time) {
 	for k, exp := range s.kicks {
 		if now.After(exp) {
 			delete(s.kicks, k)
+		}
+	}
+	for k, at := range s.announced { // past the debounce window, the record is dead weight
+		if now.Sub(at) > 5*time.Minute {
+			delete(s.announced, k)
 		}
 	}
 }
@@ -554,6 +579,7 @@ func main() {
 		presence:    make(map[string]presenceEntry),
 		kicks:       make(map[string]time.Time),
 		chat:        make([]proto.ChatMessage, 0, 50),
+		announced:   make(map[string]time.Time),
 	}
 	s.loadScores()
 	go s.run(*tickHz)

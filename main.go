@@ -584,7 +584,9 @@ const (
 	mkChatToggle
 	mkCmdToggle // '/': open the slash-command compose line
 	mkTranscriptToggle
-	mkChangeChar // 'v': swap your character (online, while dead or in the lobby)
+	mkPartyChatToggle       // '\': open the PARTY chat compose line
+	mkPartyTranscriptToggle // '|': open the PARTY chat transcript
+	mkChangeChar            // 'v': swap your character (online, while dead or in the lobby)
 	// Cruise-control keys (uppercase W/A/S/D, Q/E): latch auto-movement.
 	mkCruiseF
 	mkCruiseB
@@ -932,6 +934,10 @@ func (in *input) reader(t Term) {
 				in.pushKey(mkCmdToggle)
 			case '~':
 				in.pushKey(mkTranscriptToggle)
+			case '\\':
+				in.pushKey(mkPartyChatToggle)
+			case '|':
+				in.pushKey(mkPartyTranscriptToggle)
 			case 'v', 'V': // change character (online: while dead or in the lobby)
 				in.pushKey(mkChangeChar)
 			case 0x7f, 0x08: // Backspace: back / exit a screen
@@ -1691,7 +1697,7 @@ func runSongTest(w *bufio.Writer, cols, rows int, ip *input) {
 	// when the loop's current song changes (detected via its start time).
 	var timeline []fallNote
 	var lastStart time.Time
-	minP, maxP := 36, 84   // the song's actual pitch range
+	minP, maxP := 36, 84     // the song's actual pitch range
 	dispLo, dispHi := 24, 84 // the keybed window shown (fills the grid width, >= the song)
 	nowDesc := ""
 	const (
@@ -3447,7 +3453,8 @@ func runMenu(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 			fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;37;40m%-*s\x1b[0m", blurbRow+j, descCol, descW, line)
 		}
 		if items[sel].single { // recolor the mode selector over the plain line
-			spName, _ := spCarousel(spMode, campBlurb); drawSPMode(w, descCol, blurbRow, spName, spMode, shimmerPhase)
+			spName, _ := spCarousel(spMode, campBlurb)
+			drawSPMode(w, descCol, blurbRow, spName, spMode, shimmerPhase)
 		}
 		noteTxt := ""
 		if note != "" {
@@ -3539,15 +3546,16 @@ func runMenu(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 			// transcript box overlays the center of the screen.
 			if items[sel].single && !chat.transcript {
 				shimmerPhase++
-				spName, _ := spCarousel(spMode, campBlurb); drawSPMode(w, descCol, blurbRow, spName, spMode, shimmerPhase)
+				spName, _ := spCarousel(spMode, campBlurb)
+				drawSPMode(w, descCol, blurbRow, spName, spMode, shimmerPhase)
 				w.Flush()
 			}
 		case k := <-ip.events:
 			lastActive = time.Now()
 			if chat.active {
 				switch k {
-				case mkChatToggle:
-					chat.active, chat.cmd = false, false
+				case mkChatToggle, mkPartyChatToggle:
+					chat.active, chat.cmd, chat.party = false, false, false
 					chat.input = ""
 					draw()
 				case mkTranscriptToggle:
@@ -3567,11 +3575,14 @@ func runMenu(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 			}
 			if chat.transcript {
 				switch k {
-				case mkTranscriptToggle:
-					chat.transcript = false
+				case mkTranscriptToggle, mkPartyTranscriptToggle:
+					chat.transcript, chat.partyView = false, false
 					draw()
 				case mkChatToggle:
 					chat.active = true
+					draw()
+				case mkPartyChatToggle:
+					chat.active, chat.party = true, true
 					draw()
 				}
 				continue
@@ -3586,6 +3597,16 @@ func runMenu(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 				draw()
 			case mkCmdToggle:
 				chat.active, chat.cmd, chat.input = true, true, ""
+				draw()
+			case mkPartyChatToggle:
+				if getParty() == "" {
+					note = "Join a party first to use party chat."
+				} else {
+					chat.active, chat.cmd, chat.party, chat.input = true, false, true, ""
+				}
+				draw()
+			case mkPartyTranscriptToggle:
+				chat.transcript, chat.partyView = !chat.transcript, true
 				draw()
 			case mkTranscriptToggle:
 				chat.transcript = !chat.transcript
@@ -5034,10 +5055,15 @@ func lobbyModes(pairs []proto.LobbyEntry) []gm.Mode {
 	return modes
 }
 
-// lobbyView returns the pairing indices visible under the given filter.
+// lobbyWaitVote is the synthetic "WAIT FOR PLAYERS" entry that leads the vote
+// list - selecting + locking it sends Input.WaitVote instead of a map vote.
+const lobbyWaitVote = -2
+
+// lobbyView returns the selectable entries under the given filter: the WAIT
+// pseudo-entry first, then the pairing indices that match the filter.
 func lobbyView(pairs []proto.LobbyEntry, filter int) []int {
 	modes := lobbyModes(pairs)
-	var view []int
+	view := []int{lobbyWaitVote}
 	for i, p := range pairs {
 		if filter <= 0 || (filter-1 < len(modes) && p.Mode == modes[filter-1]) {
 			view = append(view, i)
@@ -5078,6 +5104,11 @@ func lobbyMoveFilter(pairs []proto.LobbyEntry, filter, dir int) (newFilter, newV
 	nf := 1 + len(lobbyModes(pairs))
 	newFilter = (filter + dir + nf) % nf
 	if view := lobbyView(pairs, newFilter); len(view) > 0 {
+		for _, idx := range view { // snap to the first real map, not the WAIT entry
+			if idx != lobbyWaitVote {
+				return newFilter, idx
+			}
+		}
 		return newFilter, view[0]
 	}
 	return newFilter, 0
@@ -5085,7 +5116,7 @@ func lobbyMoveFilter(pairs []proto.LobbyEntry, filter, dir int) (newFilter, newV
 
 // drawLobby overlays the between-match vote lobby: the votable map+mode pairings
 // with live tallies, your pick, the roster, and a countdown to the next match.
-func drawLobby(w *bufio.Writer, cols, rows int, v viewState, voteMode int) {
+func drawLobby(w *bufio.Writer, cols, rows int, v viewState, voteMode int, humansOnly bool) {
 	if f, ok := tdf.Fit("LOBBY", cols-2, "union", "untx", "block"); ok {
 		w.WriteString(f.RenderCentered("LOBBY", cols, 1, tdf.RenderOpts{Recolor: true, FG: 11, Transparent: true}))
 	}
@@ -5126,6 +5157,15 @@ func drawLobby(w *bufio.Writer, cols, rows int, v viewState, voteMode int) {
 	row := rows/2 - winRows/2 - 1
 	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;1;37m%s\x1b[0m", row, (cols-len(hdr))/2+1, hdr)
 	row += 2
+	{ // WAIT pseudo-entry leads the list (matches the 3D lobby)
+		marker, style := "  ", "\x1b[1;33m"
+		if voteMode == lobbyWaitVote {
+			marker, style = "> ", "\x1b[1;30;46m"
+		}
+		line := marker + "WAIT FOR PLAYERS"
+		fmt.Fprintf(w, "\x1b[%d;%dH%s%s\x1b[0m", row, (cols-len(line))/2+1, style, line)
+		row++
+	}
 	for i := top; i < top+winRows && i < len(pairs); i++ {
 		marker, style := "  ", "\x1b[0;36m"
 		if i == voteMode {
@@ -5154,7 +5194,12 @@ func drawLobby(w *bufio.Writer, cols, rows int, v viewState, voteMode int) {
 	row++
 	nm := fmt.Sprintf("NEXT MATCH IN %d", int(math.Ceil(v.timer)))
 	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;1;32m%s\x1b[0m", row, (cols-len(nm))/2+1, nm)
-	foot := "</> or arrows to vote"
+	if humansOnly {
+		row++
+		ho := "HUMANS ONLY \xfb"
+		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;93m%s\x1b[0m", row, (cols-len(ho))/2+1, ho)
+	}
+	foot := "arrows vote   ENTER lock   H humans-only"
 	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;90m%s\x1b[0m", rows-1, (cols-len(foot))/2+1, foot)
 }
 
@@ -5191,29 +5236,30 @@ func splitCapTag(name string) (disp, capStr string) {
 // repaints under the static text. The preview map is fetched on demand and cached;
 // while a chat/confirm modal is up the rotation freezes so those overlays sit over
 // a static frame (no flicker), and the modal text is drawn on top.
-func renderLobbyFrame(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ns *netSession, v viewState, voteMode, voteCommit, voteFilter int, voteReady bool, dt float64, chat *chatUI, escConfirm bool, lv *lobbyPreview) {
+func renderLobbyFrame(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ns *netSession, v viewState, voteMode, voteCommit, voteFilter int, voteReady, humansOnly bool, dt float64, chat *chatUI, escConfirm bool, lv *lobbyPreview) {
 	pairs := v.pairings
-	selIdx := voteMode
-	if selIdx < 0 || selIdx >= len(pairs) {
-		selIdx = 0
+	selIdx := voteMode // the highlighted entry; may be lobbyWaitVote (-2)
+	previewIdx := selIdx
+	if previewIdx < 0 || previewIdx >= len(pairs) {
+		previewIdx = 0 // WAIT / out-of-range: keep spinning a real map's preview
 	}
-	view := lobbyView(pairs, voteFilter) // pairing indices visible under the mode filter
+	view := lobbyView(pairs, voteFilter) // selectable entries (WAIT first) under the mode filter
 	filterLabel := lobbyFilterLabel(pairs, voteFilter)
 	// Lazy + async: ask for the selected map, but keep showing (and spinning) the
 	// last map we have until the new geometry arrives, then swap. Never blank or
 	// freeze the pane - that's what read as "broken". geomIdx is what's DISPLAYED;
 	// haveSel means it matches the selection (so the SIZE/metadata are accurate).
 	if len(pairs) > 0 {
-		ns.ensurePreview(selIdx) // disk cache first, else fire-and-forget network fetch
-		if lv.geomIdx != selIdx {
-			if m, ok := ns.preview(selIdx); ok {
+		ns.ensurePreview(previewIdx) // disk cache first, else fire-and-forget network fetch
+		if lv.geomIdx != previewIdx {
+			if m, ok := ns.preview(previewIdx); ok {
 				lv.tris, lv.size = mapTris(m)
-				lv.geomIdx = selIdx
+				lv.geomIdx = previewIdx
 			}
 		}
 	}
-	haveAny := lv.geomIdx >= 0      // something to render (else first-load black)
-	haveSel := lv.geomIdx == selIdx // the selected map's geometry is up
+	haveAny := lv.geomIdx >= 0          // something to render (else first-load black)
+	haveSel := lv.geomIdx == previewIdx // the previewed map's geometry is up
 	// Keep the highlighted row inside the scrolling window (list starts at row 3).
 	// scroll/positions are over the FILTERED view, not raw pairing indices.
 	listH := rows - 4
@@ -5257,8 +5303,8 @@ func renderLobbyFrame(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ns
 		fmt.Fprintf(&cs, "%d,", chat.toasts[i].seqKey)
 	}
 	chatSig := fmt.Sprintf("%t%t%t%q|%s", chat.active, chat.transcript, escConfirm, chat.input, cs.String())
-	sig := fmt.Sprintf("%d|%d|%d|%t|%d|%d|%d|%v|%t|%t|%d|%d|%s",
-		selIdx, voteCommit, voteFilter, voteReady, v.lobbyReady, lv.scroll, int(math.Ceil(v.timer)), v.votes, haveSel, escConfirm, players, len(view), chatSig)
+	sig := fmt.Sprintf("%d|%d|%d|%t|%t|%d|%d|%d|%v|%t|%t|%d|%d|%s",
+		selIdx, voteCommit, voteFilter, voteReady, humansOnly, v.lobbyReady, lv.scroll, int(math.Ceil(v.timer)), v.votes, haveSel, escConfirm, players, len(view), chatSig)
 	dirty := sig != lv.sig
 	lv.sig = sig
 
@@ -5270,7 +5316,7 @@ func renderLobbyFrame(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ns
 	}
 	if dirty {
 		lv.prev = blitPanel(w, rnd, nil, 1, 1) // full repaint wipes the old overlay
-		drawLobbyOverlay(w, cols, rows, v, selIdx, voteCommit, voteReady, lv.size, haveSel, lv.scroll, lv.mask, view, filterLabel)
+		drawLobbyOverlay(w, cols, rows, v, selIdx, voteCommit, voteReady, humansOnly, lv.size, haveSel, lv.scroll, lv.mask, view, filterLabel)
 		// Chat rides on top and adds its cells to the mask so the spinning map
 		// never repaints under it. drawn after the overlay reset, so it accretes.
 		mark := func(row, col, vis int) {
@@ -5293,7 +5339,7 @@ func renderLobbyFrame(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ns
 // drawLobbyOverlay paints the glyph-only lobby overlays and records their cells
 // in mask. Layout mirrors the SP picker: votable maps + tallies on the left,
 // selected-map metadata bottom-right, countdown + players top-right.
-func drawLobbyOverlay(w *bufio.Writer, cols, rows int, v viewState, selIdx, committed int, ready bool, size float64, haveGeom bool, scroll int, mask []bool, view []int, filterLabel string) {
+func drawLobbyOverlay(w *bufio.Writer, cols, rows int, v viewState, selIdx, committed int, ready, humansOnly bool, size float64, haveGeom bool, scroll int, mask []bool, view []int, filterLabel string) {
 	for i := range mask {
 		mask[i] = false
 	}
@@ -5315,9 +5361,14 @@ func drawLobbyOverlay(w *bufio.Writer, cols, rows int, v viewState, selIdx, comm
 	title := "VOTE  NEXT  MAP"
 	fmt.Fprintf(w, "\x1b[1;%dH\x1b[1;96;40m%s\x1b[0m", (cols-len(title))/2+1, title)
 	markRun(1, (cols-len(title))/2+1, len(title))
-	foot := "up/dn vote   </> filter   ENTER lock   C chat   ESC leave"
+	foot := "up/dn vote   </> filter   ENTER lock   H humans-only   ` chat   ESC leave"
 	fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;90;40m%s\x1b[0m", rows, (cols-len(foot))/2+1, foot)
 	markRun(rows, (cols-len(foot))/2+1, len(foot))
+	if humansOnly { // your vote to drop the bots this match
+		ho := "HUMANS ONLY \xfb"
+		fmt.Fprintf(w, "\x1b[4;%dH\x1b[1;93;40m%s\x1b[0m", cols-len(ho), ho)
+		markRun(4, cols-len(ho), len(ho))
+	}
 
 	pairs := v.pairings
 	if len(pairs) == 0 {
@@ -5372,8 +5423,26 @@ func drawLobbyOverlay(w *bufio.Writer, cols, rows int, v viewState, selIdx, comm
 		if p >= len(view) {
 			continue
 		}
-		i := view[p] // real pairing index
+		i := view[p] // real pairing index, or lobbyWaitVote
 		row := listTop + r
+		if i == lobbyWaitVote { // the synthetic "WAIT FOR PLAYERS" entry
+			line := "WAIT FOR PLAYERS"
+			if i == committed {
+				if ready {
+					line += " \xfb"
+				} else {
+					line += " \xfa"
+				}
+			}
+			if i == selIdx {
+				fmt.Fprintf(w, "\x1b[%d;2H\x1b[1;30;46m> %s \x1b[0m", row, line)
+				markRun(row, 2, len(line)+3)
+			} else {
+				fmt.Fprintf(w, "\x1b[%d;2H\x1b[1;33;40m  %s\x1b[0m", row, line) // amber: distinct from maps
+				markRun(row, 2, len(line)+2)
+			}
+			continue
+		}
 		disp, _ := splitCapTag(pairs[i].Name)
 		line := clip(disp, 15)
 		if nv := votesOf(i); nv > 0 {
@@ -5402,7 +5471,24 @@ func drawLobbyOverlay(w *bufio.Writer, cols, rows int, v viewState, selIdx, comm
 			markRun(row, 2, len(line)+2)
 		}
 	}
-	// Bottom-right: selected map metadata (dim label / bright value) + blurb.
+	// Bottom-right: selected map metadata (dim label / bright value) + blurb. With
+	// WAIT selected there's no map - show what locking it does instead.
+	if selIdx == lobbyWaitVote {
+		note := []string{"WAIT FOR PLAYERS", "", "Lock this to hold the lobby", "open for more people to join", "before the match starts."}
+		row := rows - 1 - len(note)
+		if row < listTop {
+			row = listTop
+		}
+		for i, ln := range note {
+			style := "\x1b[0;90;40m"
+			if i == 0 {
+				style = "\x1b[1;93;40m"
+			}
+			rightAt(row, len(ln), style+ln)
+			row++
+		}
+		return
+	}
 	disp, capStr := splitCapTag(pairs[selIdx].Name)
 	mode := pairs[selIdx].Mode.String()
 	meta := [][2]string{{"MODE", mode}}
@@ -5875,8 +5961,8 @@ var lastMatchScore int
 func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, sess session, dropfile, presenceState, presenceDetail string, oneShot, forgiving bool, pickChar func() (int, [3]float64, bool)) (bool, bool) {
 	ip.setEscMenu(true) // in-game Esc = exit confirm, not instant quit
 	defer ip.setEscMenu(false)
-	defer suspendMusic(false) // resume menu/lobby music when we leave the match
-	lastMatchScore = 0        // reset; set on a completed match, read by the tier runner
+	defer suspendMusic(false)            // resume menu/lobby music when we leave the match
+	lastMatchScore = 0                   // reset; set on a completed match, read by the tier runner
 	netSess, _ := sess.(*netSession)     // non-nil only for an online arena match
 	offSess, _ := sess.(*offlineSession) // non-nil only for a local single-player match
 	escConfirm := false                  // the small "leave match?" banner
@@ -5909,6 +5995,7 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 	voteCommit := -1                                               // the pairing LOCKED with ENTER (sent as Input.Vote); -1 = not yet
 	voteReady := false                                             // ENTER pressed and not since changed: counts toward fast-forward
 	voteFilter := 0                                                // lobby game-type filter (0=ALL); </> cycles it
+	humansOnlyVote := false                                        // lobby: H toggles a vote to drop the bots
 	var lobbyPairings []proto.LobbyEntry                           // latest votable pairings (for filter/nav math)
 	lobbyN := 0                                                    // number of votable pairings (from the server's MsgLobby)
 	lv := lobbyPreview{geomIdx: -1, mask: make([]bool, rows*cols)} // online lobby map preview
@@ -6030,8 +6117,8 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 			case k := <-ip.events:
 				if chat.active {
 					switch k {
-					case mkChatToggle:
-						chat.active, chat.cmd = false, false
+					case mkChatToggle, mkPartyChatToggle:
+						chat.active, chat.cmd, chat.party = false, false, false
 						chat.input = ""
 						prev = nil
 					case mkTranscriptToggle:
@@ -6057,11 +6144,14 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 				}
 				if chat.transcript {
 					switch k {
-					case mkTranscriptToggle, mkEsc:
-						chat.transcript = false
+					case mkTranscriptToggle, mkPartyTranscriptToggle, mkEsc:
+						chat.transcript, chat.partyView = false, false
 						prev = nil
 					case mkChatToggle:
 						chat.active = true
+						prev = nil
+					case mkPartyChatToggle:
+						chat.active, chat.party = true, true
 						prev = nil
 					}
 					continue
@@ -6083,6 +6173,16 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 					prev = nil
 				case k == mkTranscriptToggle:
 					chat.transcript = !chat.transcript
+					prev = nil
+				case k == mkPartyChatToggle:
+					if getParty() == "" {
+						chat.toasts = append(chat.toasts, chatToast{msg: proto.ChatMessage{Handle: "system", Text: "Join a party (PARTY menu) to use party chat."}, until: time.Now().Add(6 * time.Second)})
+					} else {
+						chat.active, chat.cmd, chat.party, chat.input = true, false, true, ""
+					}
+					prev = nil
+				case k == mkPartyTranscriptToggle:
+					chat.transcript, chat.partyView = !chat.transcript, true
 					prev = nil
 				case k == mkTab:
 					topdown = !topdown
@@ -6117,7 +6217,7 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 					voteFilter, voteMode = lobbyMoveFilter(lobbyPairings, voteFilter, +1)
 					voteReady = false
 				case lastPhase == gm.PhaseLobby && k == mkEnter:
-					if voteMode >= 0 { // lock this pick in (ENTER); all locked -> fast-forward
+					if voteMode >= 0 || voteMode == lobbyWaitVote { // lock the pick (map or WAIT)
 						voteCommit, voteReady = voteMode, true
 					}
 				case k == mkCruiseF: // Shift+W/A/S/D latches auto-movement in that direction
@@ -6149,6 +6249,8 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 				case escConfirm && (r == 'n' || r == 'N'):
 					escConfirm = false
 					prev = nil
+				case lastPhase == gm.PhaseLobby && (r == 'h' || r == 'H'):
+					humansOnlyVote = !humansOnlyVote // vote to drop the bots this match
 				case r == 'i' || r == 'I':
 					infoPanel = !infoPanel
 					prev = nil // full repaint adds/clears the strip cleanly
@@ -6165,8 +6267,14 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 		}
 		// Lobby vote is the map you've LOCKED with ENTER (voteCommit), not the one
 		// you're previewing (voteMode); voteReady drives the all-locked fast-forward.
-		gin.Vote = voteCommit
-		gin.Ready = voteReady
+		// A locked WAIT sends WaitVote instead (and clears the map vote / ready).
+		if voteCommit == lobbyWaitVote {
+			gin.WaitVote, gin.Vote, gin.Ready = true, -1, false
+		} else {
+			gin.Vote = voteCommit
+			gin.Ready = voteReady
+		}
+		gin.HumansOnly = humansOnlyVote      // orthogonal to the map vote
 		gin.Drop, dropFlag = dropFlag, false // one-shot
 
 		// Cruise control: disengage on an opposing-axis manual press, else latch the
@@ -6259,7 +6367,7 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 			// fresh, so a held lock can't carry over and instant-fast-forward the
 			// between-rounds vote (which skips the 30s map pick). Cleared here, before
 			// the lobby begins, so no stale Ready/Vote leaks on its first tick.
-			voteCommit, voteReady = -1, false
+			voteCommit, voteReady, humansOnlyVote = -1, false, false
 		}
 		if !v.ready { // no view yet (awaiting first STATE from the server)
 			// Handshake succeeded but no usable STATE has arrived. Normally a
@@ -6307,7 +6415,7 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 			if voteMode < 0 && lobbyN > 0 {
 				voteMode = 0 // default the highlight to the first map so there's a preview
 			}
-			renderLobbyFrame(w, cols, rows, rows3d, rnd, ns, v, voteMode, voteCommit, voteFilter, voteReady, dt, chat, escConfirm, &lv)
+			renderLobbyFrame(w, cols, rows, rows3d, rnd, ns, v, voteMode, voteCommit, voteFilter, voteReady, humansOnlyVote, dt, chat, escConfirm, &lv)
 			prev = nil // leaving the lobby forces a full game-view repaint
 			if d := frameBudget - time.Since(now); d > 0 {
 				time.Sleep(d)
@@ -6557,7 +6665,7 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 		case gm.PhaseEnded:
 			drawScoreboard(w, cols, rows, v, lastResult, resultRank, forgiving)
 		case gm.PhaseLobby:
-			drawLobby(w, cols, rows, v, voteMode)
+			drawLobby(w, cols, rows, v, voteMode, humansOnlyVote)
 		default:
 			if !topdown {
 				drawRadarCorners(w, cols)

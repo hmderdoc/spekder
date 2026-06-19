@@ -41,7 +41,7 @@ func arenaStatus() (proto.ArenaStatus, error) {
 		return proto.ArenaStatus{}, err
 	}
 	defer conn.Close()
-	if err := proto.WriteMsg(conn, proto.EncodeStatusQuery(ini["token"])); err != nil {
+	if err := proto.WriteMsg(conn, proto.EncodeStatusQuery(ini["token"], getParty())); err != nil {
 		return proto.ArenaStatus{}, err
 	}
 	conn.SetReadDeadline(time.Now().Add(750 * time.Millisecond))
@@ -56,7 +56,7 @@ func arenaStatus() (proto.ArenaStatus, error) {
 	return st, nil
 }
 
-func sendChat(dropfile, text string) error {
+func sendChat(dropfile, text, party string) error {
 	ini := loadINI(defaultINIPath())
 	host := ini["server"]
 	if host == "" {
@@ -77,6 +77,7 @@ func sendChat(dropfile, text string) error {
 		BBSID:  bbsid,
 		Handle: handle,
 		Text:   text,
+		Party:  party,
 	}))
 }
 
