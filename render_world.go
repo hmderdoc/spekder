@@ -196,20 +196,63 @@ func appendRamp(dst []Tri, r gm.Ramp) []Tri {
 	return dst
 }
 
-// appendProp builds decorative scenery (an "obelisk"/pyramid). yawAnim spins
-// about the world origin, so only center-placed obelisks animate (others static).
+// appendProp builds decorative scenery as a wireframe polyhedron. Kind selects the
+// shape (obelisk/pyramid, spire, cube, tetra, diamond, prism); Spin (or a legacy
+// origin obelisk) makes it rotate about its OWN center, so any placement animates -
+// eye candy that shows off the vector renderer without colliding with anything.
 func appendProp(dst []Tri, p gm.Prop) []Tri {
-	const base = 1.0
-	apex := V3{p.Pos.X, p.Pos.Y + p.H, p.Pos.Z}
-	y0 := p.Pos.Y + 0.2
-	c := []V3{
-		{p.Pos.X - base, y0, p.Pos.Z - base}, {p.Pos.X + base, y0, p.Pos.Z - base},
-		{p.Pos.X + base, y0, p.Pos.Z + base}, {p.Pos.X - base, y0, p.Pos.Z + base},
+	anim := p.Spin || (p.Kind == "obelisk" && p.Pos.X == 0 && p.Pos.Z == 0)
+	tri := func(a, b, c V3) Tri {
+		return Tri{v: [3]V3{a, b, c}, col: p.Color, wire: true, yawAnim: anim, pivot: p.Pos}
 	}
-	anim := p.Kind == "obelisk" && p.Pos.X == 0 && p.Pos.Z == 0
-	for i := 0; i < 4; i++ {
-		a, b := c[i], c[(i+1)%4]
-		dst = append(dst, Tri{v: [3]V3{a, b, apex}, col: p.Color, wire: true, yawAnim: anim})
+	h := p.H
+	if h <= 0 {
+		h = 2.0
+	}
+	x, z, y0 := p.Pos.X, p.Pos.Z, p.Pos.Y+0.2
+	switch p.Kind {
+	case "cube":
+		b := 1.0
+		y1 := y0 + 2*b
+		c := [8]V3{{x - b, y0, z - b}, {x + b, y0, z - b}, {x + b, y0, z + b}, {x - b, y0, z + b},
+			{x - b, y1, z - b}, {x + b, y1, z - b}, {x + b, y1, z + b}, {x - b, y1, z + b}}
+		for _, q := range [6][4]int{{0, 1, 2, 3}, {4, 5, 6, 7}, {0, 1, 5, 4}, {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}} {
+			dst = append(dst, tri(c[q[0]], c[q[1]], c[q[2]]), tri(c[q[0]], c[q[2]], c[q[3]]))
+		}
+	case "tetra":
+		b := 1.1
+		apex := V3{x, y0 + h, z}
+		a, bb, cc := V3{x - b, y0, z - b}, V3{x + b, y0, z - b}, V3{x, y0, z + b}
+		dst = append(dst, tri(a, bb, cc), tri(a, bb, apex), tri(bb, cc, apex), tri(cc, a, apex))
+	case "diamond", "octa":
+		b := 1.0
+		cy := y0 + h/2
+		top, bot := V3{x, y0 + h, z}, V3{x, y0, z}
+		r := [4]V3{{x - b, cy, z}, {x, cy, z - b}, {x + b, cy, z}, {x, cy, z + b}}
+		for i := 0; i < 4; i++ {
+			n := r[(i+1)%4]
+			dst = append(dst, tri(r[i], n, top), tri(n, r[i], bot))
+		}
+	case "prism":
+		b := 1.0
+		y1 := y0 + h
+		aB, bB, tB := V3{x - b, y0, z - b}, V3{x + b, y0, z - b}, V3{x, y1, z - b}
+		aF, bF, tF := V3{x - b, y0, z + b}, V3{x + b, y0, z + b}, V3{x, y1, z + b}
+		dst = append(dst, tri(aB, bB, tB), tri(aF, bF, tF)) // triangular end caps
+		quad := func(a, b2, c2, d V3) { dst = append(dst, tri(a, b2, c2), tri(a, c2, d)) }
+		quad(aB, bB, bF, aF)
+		quad(bB, tB, tF, bF)
+		quad(tB, aB, aF, tF)
+	default: // obelisk / pyramid / spire
+		b := 1.0
+		if p.Kind == "spire" {
+			b, h = 0.5, h*1.5
+		}
+		apex := V3{x, y0 + h, z}
+		c := [4]V3{{x - b, y0, z - b}, {x + b, y0, z - b}, {x + b, y0, z + b}, {x - b, y0, z + b}}
+		for i := 0; i < 4; i++ {
+			dst = append(dst, tri(c[i], c[(i+1)%4], apex))
+		}
 	}
 	return dst
 }

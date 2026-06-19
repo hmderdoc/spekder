@@ -22,7 +22,7 @@ func helpPages(cols int) []docPage {
 			"direction so you can let go and keep rolling (tap the key again to stop).",
 			"",
 			"# AIMING & FIRING",
-			"**,** / **.** swing the turret left and right.  **up** / **dn** raise and",
+			"The **left** / **right** arrows swing the turret;  **up** / **dn** raise and",
 			"lower the gun.  **C** snaps the turret back to center.",
 			"**SPACE** fires your `primary`.  **B** fires your `secondary`.",
 			"The arrow keys always aim, whatever your movement binds are.",

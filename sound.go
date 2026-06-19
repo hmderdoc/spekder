@@ -86,6 +86,14 @@ func sfxDeath(w *bufio.Writer) { emitMusic(w, "T120O3L8GED+O2L4A+") }
 func sfxTick(w *bufio.Writer) { emitMusic(w, "T240L16O4C") }
 func sfxGo(w *bufio.Writer)   { emitMusic(w, "T200L8O5C") }
 
+// sfxFlag is the flag-pickup jingle: a bright, rising major arpeggio that resolves
+// up an octave - a cheerful "got it!" distinct from the lower kill arpeggio.
+func sfxFlag(w *bufio.Writer) { emitMusic(w, "T220O5L16CEGE>L8C") }
+
+// sfxBreak is a low, short descending "crunch" for a destructible wall/item
+// shattering - down in the bass so it reads as rubble, not a tune.
+func sfxBreak(w *bufio.Writer) { emitMusic(w, "T240O2L16ECO1L8G") }
+
 // --- background music --------------------------------------------------------
 // A single goroutine composes and plays music on its own clock, so it keeps
 // playing across ANY non-gameplay screen (menus, submenus, the online lobby, the

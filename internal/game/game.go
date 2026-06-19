@@ -32,10 +32,11 @@ type Box struct {
 	Color     [3]float64
 }
 type Prop struct {
-	Kind  string
+	Kind  string // shape: obelisk/pyramid (default), cube, tetra, diamond, prism, spire, star
 	Pos   V3
 	H     float64
 	Color [3]float64
+	Spin  bool // spin about the prop's own center (eye candy); legacy origin obelisks spin too
 }
 type Ramp struct {
 	Pos   V3
@@ -143,7 +144,8 @@ type BounceTrait struct {
 // pickup; 0/1 is a CTF team flag homed at this spot. The entity itself is an
 // inert placement marker - it doesn't render or collide; the runtime flag does.
 type FlagTrait struct {
-	Team int
+	Team  int
+	Dwell float64 // Flag Run: seconds you must HOLD the spot to claim it (0 = grab on touch). Teaches KoTH inside Flag Run.
 }
 
 // ZoneTrait marks a King-of-the-Hill control zone spawn. Capture is the seconds
@@ -185,6 +187,17 @@ type Map struct {
 	Logic     []Behavior     // map-level "director" rules (source = world, -1)
 	Paths     []Path         // named waypoint paths (for the move action / escort)
 	Actors    []Actor        // named tank templates with behaviors (mobile bosses)
+	Intro     *MapIntro      // TIER 0 onboarding: forced body + one teaching tooltip (nil = none)
+	Tier      int            // FLAG RUN tier: 0 = onboarding (forgiving), 1+ = competitive gauntlet
+}
+
+// MapIntro is a TIER 0 tutorial presentation. Body forces the player into a
+// specific character for the level (so it can teach one kit at a time); Tip is a
+// single hint whose {action} placeholders the door resolves to the player's LIVE
+// key bindings at display time (e.g. "{jump} to leap"), so remaps stay correct.
+type MapIntro struct {
+	Body int    // forced character (a Body* index)
+	Tip  string // one-line hint with {forward}/{fire}/{jump}/{aim}... placeholders
 }
 
 // Path is a named ordered list of waypoints an entity can be moved along (the
@@ -224,6 +237,8 @@ type MapRules struct {
 	Lives      int     // -1 = default; 0 = infinite; >0 = lives per tank
 	Bots       int     // -1 = default/session count; >=0 = exact fill-bot count (scripted maps)
 	MaxPlayers int     // <=0 = uncapped; else the most combatants (humans+bots) the map is sized for
+	Allies     int     // Flag Run: allied CPU collectors on the player's side (team 0); the rest of Bots are enemies. Protect them: if all die, the level fails.
+	EnemyBody  int     // Flag Run: force enemy fill-bots to this Body* (a favorable matchup for the level's pilot); -1 = random roster
 }
 
 // MapCapacity returns a map's combatant cap (0 = uncapped). Rotation, votes,
@@ -292,6 +307,7 @@ type jprop struct {
 	Pos   [3]float64 `json:"pos"`
 	H     float64    `json:"h"`
 	Color [3]float64 `json:"color"`
+	Spin  bool       `json:"spin,omitempty"`
 }
 type jramp struct {
 	Pos   [3]float64 `json:"pos"`
@@ -323,7 +339,8 @@ type jbounce struct {
 	Power float64 `json:"power"`
 }
 type jflag struct {
-	Team int `json:"team"`
+	Team  int     `json:"team"`
+	Dwell float64 `json:"dwell,omitempty"` // seconds to hold the spot to claim it (0 = grab on touch)
 }
 type jzone struct {
 	Capture float64 `json:"capture"`
@@ -384,6 +401,14 @@ type jmap struct {
 	Logic     []Behavior     `json:"logic,omitempty"`
 	Paths     []jpath        `json:"paths,omitempty"`
 	Actors    []jactor       `json:"actors,omitempty"`
+	Intro     *jintro        `json:"intro,omitempty"`
+	Tier      *int           `json:"tier,omitempty"` // nil = 1 (competitive); 0 = onboarding
+}
+
+// jintro is the JSON form of MapIntro (TIER 0 onboarding).
+type jintro struct {
+	Body int    `json:"body"`
+	Tip  string `json:"tip"`
 }
 
 // jpickup is a v3 typed pickup spot. Kind < 0 = any (random); Weapon is the
@@ -401,6 +426,8 @@ type jrules struct {
 	Lives      int     `json:"lives"`
 	Bots       *int    `json:"bots,omitempty"`       // pointer: absent (old maps) = default (-1)
 	MaxPlayers int     `json:"maxPlayers,omitempty"` // 0/absent = uncapped
+	Allies     int     `json:"allies,omitempty"`     // Flag Run: allied CPU collectors (team 0); rest of bots are enemies
+	EnemyBody  *int    `json:"enemyBody,omitempty"`  // Flag Run: force enemy bots to this body (favorable matchup); nil = random
 }
 
 func (je jentity) toEntity() Entity {
@@ -424,7 +451,7 @@ func (je jentity) toEntity() Entity {
 		e.Bounce = &BounceTrait{Power: je.Bounce.Power}
 	}
 	if je.Flag != nil {
-		e.Flag = &FlagTrait{Team: je.Flag.Team}
+		e.Flag = &FlagTrait{Team: je.Flag.Team, Dwell: je.Flag.Dwell}
 	}
 	if je.Zone != nil {
 		e.Zone = &ZoneTrait{Capture: je.Zone.Capture}
@@ -573,7 +600,7 @@ func (jm jmap) toMap() Map {
 		m.Ramps = append(m.Ramps, Ramp{Pos: v3(r.Pos), Half: v3(r.Half), H: r.H, Dir: rampDir(r.Dir), Color: r.Color})
 	}
 	for _, p := range jm.Scenery {
-		m.Scenery = append(m.Scenery, Prop{Kind: p.Kind, Pos: v3(p.Pos), H: p.H, Color: p.Color})
+		m.Scenery = append(m.Scenery, Prop{Kind: p.Kind, Pos: v3(p.Pos), H: p.H, Color: p.Color, Spin: p.Spin})
 	}
 	for _, s := range jm.Spawns {
 		m.Spawns = append(m.Spawns, v3xz(s))
@@ -592,9 +619,20 @@ func (jm jmap) toMap() Map {
 		if jm.Rules.Bots != nil {
 			bots = *jm.Rules.Bots
 		}
-		m.Rules = &MapRules{Mode: jm.Rules.Mode, TimeLimit: jm.Rules.TimeLimit, Target: jm.Rules.Target, Lives: jm.Rules.Lives, Bots: bots, MaxPlayers: jm.Rules.MaxPlayers}
+		enemyBody := -1
+		if jm.Rules.EnemyBody != nil {
+			enemyBody = *jm.Rules.EnemyBody
+		}
+		m.Rules = &MapRules{Mode: jm.Rules.Mode, TimeLimit: jm.Rules.TimeLimit, Target: jm.Rules.Target, Lives: jm.Rules.Lives, Bots: bots, MaxPlayers: jm.Rules.MaxPlayers, Allies: jm.Rules.Allies, EnemyBody: enemyBody}
 	}
 	m.Vars, m.Logic = jm.Vars, jm.Logic
+	if jm.Intro != nil {
+		m.Intro = &MapIntro{Body: jm.Intro.Body, Tip: jm.Intro.Tip}
+	}
+	m.Tier = 1 // default: competitive
+	if jm.Tier != nil {
+		m.Tier = *jm.Tier
+	}
 	for _, p := range jm.Paths {
 		pts := make([]V3, len(p.Points))
 		for i, wp := range p.Points {
@@ -645,7 +683,7 @@ func (e Entity) toJEntity() jentity {
 		je.Bounce = &jbounce{Power: e.Bounce.Power}
 	}
 	if e.Flag != nil {
-		je.Flag = &jflag{Team: e.Flag.Team}
+		je.Flag = &jflag{Team: e.Flag.Team, Dwell: e.Flag.Dwell}
 	}
 	if e.Zone != nil {
 		je.Zone = &jzone{Capture: e.Zone.Capture}
@@ -673,7 +711,7 @@ func (m Map) toJmap() jmap {
 		jm.Ramps = append(jm.Ramps, jramp{Pos: j3(r.Pos), Half: j3(r.Half), H: r.H, Dir: rampDirName(r.Dir), Color: r.Color})
 	}
 	for _, p := range m.Scenery {
-		jm.Scenery = append(jm.Scenery, jprop{Kind: p.Kind, Pos: j3(p.Pos), H: p.H, Color: p.Color})
+		jm.Scenery = append(jm.Scenery, jprop{Kind: p.Kind, Pos: j3(p.Pos), H: p.H, Color: p.Color, Spin: p.Spin})
 	}
 	for _, s := range m.Spawns {
 		jm.Spawns = append(jm.Spawns, j2(s))
@@ -685,13 +723,20 @@ func (m Map) toJmap() jmap {
 		jm.Entities = append(jm.Entities, e.toJEntity())
 	}
 	if m.Rules != nil {
-		jm.Rules = &jrules{Mode: m.Rules.Mode, TimeLimit: m.Rules.TimeLimit, Target: m.Rules.Target, Lives: m.Rules.Lives, MaxPlayers: m.Rules.MaxPlayers}
+		jm.Rules = &jrules{Mode: m.Rules.Mode, TimeLimit: m.Rules.TimeLimit, Target: m.Rules.Target, Lives: m.Rules.Lives, MaxPlayers: m.Rules.MaxPlayers, Allies: m.Rules.Allies}
 		if m.Rules.Bots >= 0 {
 			b := m.Rules.Bots
 			jm.Rules.Bots = &b
 		}
 	}
 	jm.Vars, jm.Logic = m.Vars, m.Logic
+	if m.Intro != nil {
+		jm.Intro = &jintro{Body: m.Intro.Body, Tip: m.Intro.Tip}
+	}
+	if m.Tier != 1 { // 1 is the implied default; only emit onboarding/other tiers
+		t := m.Tier
+		jm.Tier = &t
+	}
 	for _, p := range m.Paths {
 		wps := make([][2]float64, len(p.Points))
 		for i, pt := range p.Points {
@@ -823,6 +868,7 @@ type Ruleset struct {
 	Objective ObjKind
 	Win       []WinCond
 	CoOp      bool // no per-tank winner (result = progress/wave reached)
+	SoloTeam  bool // bots coordinate as ONE side vs the player(+allies): teamed targeting / no friendly fire, but NOT team scoring (Flag Run)
 }
 
 // Rulesets is the mode table, indexed by Mode. Server and door must share the
@@ -833,7 +879,7 @@ var Rulesets = []Ruleset{
 		Win: []WinCond{{WinFrags, DMFragLimit}}},
 	ModeFlagRun: {Name: "FLAG RUN", Desc: "Solo vs bots: grab every flag before the clock runs out.",
 		Teams: 0, TimeLimit: matchTime, Bots: BotFill, Objective: ObjNeutralFlags,
-		Win: []WinCond{{WinCollectAll, 0}}},
+		Win: []WinCond{{WinCollectAll, 0}}, SoloTeam: true}, // bots gang up on the player, not each other
 	ModeCTF: {Name: "CAPTURE THE FLAG", Desc: "Team up vs bots: steal their flag, defend yours.",
 		Teams: 2, TimeLimit: matchTime, Bots: BotFill, Objective: ObjTeamFlags,
 		Win: []WinCond{{WinCaptures, ctfCaptureLimit}}},
@@ -913,7 +959,9 @@ const (
 	lobbyTime     = 30.0  // sec of mode-vote lobby between matches (server only)
 	lobbyFastFwd  = 1.5   // sec the lobby holds once every player has locked (ENTER)
 	flagCount     = 8     // flags scattered in Flag Run
-	flagPickupRad = 1.9   // how close you must drive to grab a flag
+	flagPickupRad  = 1.9  // how close you must drive to grab a flag
+	flagHoldRadius = 4.0  // a hold-to-claim flag is a small hill you stand in
+	flagVertRad    = 1.6  // vertical reach: a flag on a platform isn't grabbed from the ground below it
 	tankHitFlash  = 0.15  // sec a tank flashes white after taking a hit
 	stepUp        = 0.6   // max ledge/step a tank can mount without jumping
 	survivalLives = 3     // Survival: lives per human
@@ -1648,15 +1696,22 @@ type Flag struct {
 	Carrier   int     // tank index carrying it, or -1
 	atHome    bool    // currently sitting at its base
 	dropTimer float64 // sec until a dropped flag auto-returns home
+
+	// Flag Run hold-to-claim (KoTH-style): DwellReq>0 means a collector must stand
+	// on it for that many seconds (an enemy on it pauses the count). dwellT is the
+	// progress so far.
+	DwellReq float64
+	dwellT   float64
 }
 
 // FlagSnap is the renderable/transmittable view of a flag. Team is -1 for
 // neutral Flag Run pickups; Carried marks a CTF flag being carried.
 type FlagSnap struct {
-	Pos     V3
-	Home    V3
-	Team    int
-	Carried bool
+	Pos      V3
+	Home     V3
+	Team     int
+	Carried  bool
+	DwellPct int // hold-to-claim progress 0-100 (0 = plain flag or untouched)
 }
 
 // Zone is a King-of-the-Hill control zone (runtime). Owner is the controlling
@@ -2816,6 +2871,11 @@ func (w *World) foeInRange(i int, r float64) bool {
 
 const lungeSpeed = 16.0 // forward leap speed for melee chargers (decays via stepLunge)
 
+// jumpHopSpeed is the gentle forward carry a NON-leap body gets when it jumps, so a
+// plain jump moves in the facing direction (telnet can't hold forward + jump at
+// once). Much softer than a leaper's lungeSpeed charge.
+const jumpHopSpeed = 6.5
+
 const (
 	blinkCD          = 3.5  // octopod: sec between blinks (teleport-jump)
 	octoUncloakSpeed = 1.4  // octopod: move-speed multiplier while NOT cloaked (the fight-mode bonus)
@@ -2936,7 +2996,7 @@ func (w *World) areaHit(s *Projectile, ti int, dx, dz, dist float64) {
 	// the radial shove to any non-teammate caught in it.
 	if s.foeKnock > 0 && dist > 0.01 {
 		t := &w.Tanks[ti]
-		teammate := w.rules().Teams == 2 && s.owner >= 0 && s.owner < len(w.Tanks) && w.Tanks[s.owner].Team == t.Team
+		teammate := w.teamed() && s.owner >= 0 && s.owner < len(w.Tanks) && w.Tanks[s.owner].Team == t.Team
 		if !teammate {
 			if shove := s.foeKnock * resistMul(t.body, ResKnock); shove > 0 {
 				t.Pos.X += dx / dist * shove
@@ -3006,6 +3066,44 @@ func (w *World) coneStrike(s *Projectile, dir V3) {
 		w.spawnSprayFX(at, fx, fz) // support plume: sparks, not fire
 	} else {
 		w.spawnFlameFX(at, fx, fz)
+	}
+	w.chipDestructibles(s, o.Pos, rng, fx, fz, cosHalf) // melt breakable walls in the arc (flame, venom spray)
+}
+
+// chipDestructibles damages breakable map entities a melee/cone strike overlaps -
+// those AOE deliveries scan only tanks, so without this flame/hammer/tusks can't
+// break a wall. cosHalf>-1 applies the forward-cone arc test (fx,fz = facing);
+// pass cosHalf<=-1 for a radial melee (no angle).
+func (w *World) chipDestructibles(s *Projectile, origin V3, rng, fx, fz, cosHalf float64) {
+	if s.affects == TargetAllies {
+		return
+	}
+	dmg := s.dmg
+	if dmg <= 0 {
+		dmg = projDmg
+	}
+	for i := range w.entities {
+		e := &w.entities[i]
+		if e.Dead || e.Destruct == nil {
+			continue
+		}
+		dx, dz := e.Pos.X-origin.X, e.Pos.Z-origin.Z
+		d2 := dx*dx + dz*dz
+		if d2 > rng*rng {
+			continue
+		}
+		if cosHalf > -1 {
+			dist := math.Sqrt(d2)
+			if dist < 0.01 {
+				dist = 0.01
+			}
+			if (dx*fx+dz*fz)/dist < cosHalf {
+				continue
+			}
+		}
+		if e.HP -= dmg; e.HP <= 0 {
+			w.destroyEntity(e)
+		}
 	}
 }
 
@@ -3114,6 +3212,7 @@ func (w *World) meleeStrike(s *Projectile) {
 	if connected && s.affects != TargetAllies && s.owner >= 0 && s.owner < len(w.Tanks) {
 		w.Tanks[s.owner].shotsHit++
 	}
+	w.chipDestructibles(s, o.Pos, rng, 0, 0, -2) // radial: smash breakable walls in reach (hammer, pound, tusks)
 	w.spawnBlastFX(V3{o.Pos.X, o.Pos.Y + 0.3, o.Pos.Z})
 }
 
@@ -3131,7 +3230,7 @@ func (w *World) leapLand(i int) {
 		if j == i || v.Dead || v.gone || v.guard > 0 || v.shieldT > 0 || v.shellT > 0 {
 			continue
 		}
-		if w.rules().Teams == 2 && v.Team == t.Team {
+		if w.teamed() && v.Team == t.Team {
 			continue
 		}
 		dx, dz := v.Pos.X-t.Pos.X, v.Pos.Z-t.Pos.Z
@@ -3162,7 +3261,7 @@ func (w *World) shellRam(i int) {
 		if j == i || v.Dead || v.gone || v.guard > 0 || v.shieldT > 0 || v.shellT > 0 || v.cloakT > 0 {
 			continue
 		}
-		if w.rules().Teams == 2 && v.Team == t.Team {
+		if w.teamed() && v.Team == t.Team {
 			continue
 		}
 		dx, dz := v.Pos.X-t.Pos.X, v.Pos.Z-t.Pos.Z
@@ -3202,7 +3301,7 @@ func (w *World) goreCharge(i int) {
 		if j == i || v.Dead || v.gone || v.guard > 0 || v.shieldT > 0 || v.shellT > 0 || v.cloakT > 0 {
 			continue
 		}
-		if w.rules().Teams == 2 && v.Team == t.Team {
+		if w.teamed() && v.Team == t.Team {
 			continue // no goring teammates
 		}
 		dx, dz := v.Pos.X-t.Pos.X, v.Pos.Z-t.Pos.Z
@@ -3780,6 +3879,8 @@ func (w *World) startMatch() {
 	w.teamScore, w.winnerTeam = [2]int{}, -1
 	if r.Teams == 2 {
 		w.assignTeams() // teams first, so spawnPoint can use the team bases
+	} else if r.SoloTeam {
+		w.assignSoloTeams() // Flag Run: player vs all bots
 	}
 	for i := range w.Tanks {
 		t := &w.Tanks[i]
@@ -3836,6 +3937,15 @@ func (w *World) startMatch() {
 	if r.Bots == BotWaves {
 		w.setupSurvival()
 	}
+	// Force enemy bots to a favorable matchup for the level's pilot, if the map asks
+	// (teams are assigned above, so the enemies are team 1).
+	if m := w.ActiveMap(); m.Rules != nil && m.Rules.EnemyBody >= 0 {
+		for i := range w.Tanks {
+			if w.Tanks[i].Bot && w.Tanks[i].Team == 1 {
+				w.SetBotBody(i, m.Rules.EnemyBody)
+			}
+		}
+	}
 }
 
 // ctfBase returns the home/base position for a CTF team (opposite Z ends).
@@ -3855,6 +3965,67 @@ func (w *World) SetPlayerParty(i int, party string) {
 	if i >= 0 && i < len(w.Tanks) {
 		w.Tanks[i].Party = party
 	}
+}
+
+// teamed reports whether targeting and friendly-fire should be team-aware: true
+// for two-team modes AND Flag Run's solo-vs-bots (so bots treat each other as
+// allies and gang up on the player). It does NOT imply team scoring.
+func (w *World) teamed() bool {
+	r := w.rules()
+	return r.Teams == 2 || r.SoloTeam
+}
+
+// assignSoloTeams puts the player(s) on team 0 and bots on team 1, so a SoloTeam
+// mode (Flag Run) reads as one coordinated bot side vs the player. A map may also
+// field allied collectors (Rules.Allies): the first that-many bots join the
+// player on team 0. No base/spawn split (that stays a Teams==2 concern).
+func (w *World) assignSoloTeams() {
+	allies := 0
+	if m := w.ActiveMap(); m.Rules != nil {
+		allies = m.Rules.Allies
+	}
+	for i := range w.Tanks {
+		t := &w.Tanks[i]
+		if t.gone {
+			continue
+		}
+		if !t.Bot || i == w.demoHero {
+			t.Team = 0 // the player - or, in the attract demo, the flag-collecting stand-in
+			continue
+		}
+		if allies > 0 {
+			t.Team = 0 // allied collector
+			allies--
+		} else {
+			t.Team = 1 // enemy
+		}
+	}
+}
+
+// allyCollector reports whether tank i is a CPU ally that collects flags for the
+// player's side (a team-0 bot in a SoloTeam mode).
+func (w *World) allyCollector(i int) bool {
+	t := &w.Tanks[i]
+	return t.Bot && t.Team == 0 && w.rules().SoloTeam
+}
+
+// alliesLost reports whether a protect-the-collectors map has lost all its allies
+// (every allied collector permanently down) - the player has failed the level.
+func (w *World) alliesLost() bool {
+	m := w.ActiveMap()
+	if m.Rules == nil || m.Rules.Allies <= 0 {
+		return false
+	}
+	for i := range w.Tanks {
+		t := &w.Tanks[i]
+		if t.gone || !w.allyCollector(i) {
+			continue
+		}
+		if !t.Dead || t.lives > 0 {
+			return false // an ally is still in the fight
+		}
+	}
+	return true
 }
 
 func (w *World) assignTeams() {
@@ -3941,7 +4112,14 @@ func teamColor(team, k int) [3]float64 {
 func (w *World) setupNeutralFlags() {
 	for _, e := range w.ActiveMap().Entities {
 		if e.Flag != nil && e.Flag.Team < 0 {
-			w.flags = append(w.flags, Flag{Pos: V3{e.Pos.X, 0, e.Pos.Z}, Team: -1, Carrier: -1})
+			// Lift a flag that sits in/under geometry up onto the surface (so a deck
+			// flag rides the deck, not the ground beneath it) - but leave a flag
+			// authored ABOVE the surface floating, so sky flags stay in the air.
+			y := e.Pos.Y
+			if g := w.ground(e.Pos.X, e.Pos.Z, e.Pos.Y+0.5); g > y {
+				y = g
+			}
+			w.flags = append(w.flags, Flag{Pos: V3{e.Pos.X, y, e.Pos.Z}, Team: -1, Carrier: -1, DwellReq: e.Flag.Dwell})
 		}
 	}
 	if len(w.flags) > 0 {
@@ -3950,7 +4128,7 @@ func (w *World) setupNeutralFlags() {
 	for i := 0; i < flagCount; i++ {
 		x := (rand.Float64()*2 - 1) * (w.half() - 2)
 		z := (rand.Float64()*2 - 1) * (w.half() - 2)
-		w.flags = append(w.flags, Flag{Pos: V3{x, 0, z}, Team: -1, Carrier: -1})
+		w.flags = append(w.flags, Flag{Pos: V3{x, w.ground(x, z, 1), z}, Team: -1, Carrier: -1})
 	}
 }
 
@@ -4209,24 +4387,50 @@ func (w *World) activeBots() int {
 	return n
 }
 
-// collectFlags lets live human tanks grab nearby untaken flags (Flag Run).
-// In the attract demo the designated hero bot collects instead - one player
-// stand-in running the level, exactly as a human would.
-func (w *World) collectFlags() {
-	for ti := range w.Tanks {
-		t := &w.Tanks[ti]
-		if (t.Bot && ti != w.demoHero) || t.Dead || t.gone {
+// collectFlags advances Flag Run pickups. A plain flag is grabbed the instant a
+// collector (the player, the attract-demo hero, or an allied bot) touches it. A
+// hold-to-claim flag (DwellReq>0) is a mini KoTH: a collector must STAND on the
+// spot for DwellReq seconds, and an enemy on the spot pauses the count (contest).
+// Enemy bots can never take a flag - they only guard/contest.
+func (w *World) collectFlags(dt float64) {
+	for fi := range w.flags {
+		f := &w.flags[fi]
+		if f.Taken {
 			continue
 		}
-		for fi := range w.flags {
-			f := &w.flags[fi]
-			if f.Taken {
+		rad := flagPickupRad
+		if f.DwellReq > 0 {
+			rad = flagHoldRadius // a "hill" you stand in, not a touch grab
+		}
+		collectorOn, enemyOn := false, false
+		for ti := range w.Tanks {
+			t := &w.Tanks[ti]
+			if t.Dead || t.gone {
 				continue
 			}
 			dx, dz := f.Pos.X-t.Pos.X, f.Pos.Z-t.Pos.Z
-			if dx*dx+dz*dz < flagPickupRad*flagPickupRad {
-				f.Taken = true
+			if dx*dx+dz*dz >= rad*rad {
+				continue
 			}
+			if dy := f.Pos.Y - t.Pos.Y; dy*dy >= flagVertRad*flagVertRad {
+				continue // 3D: must be on the flag's level, not below/above it (platform vs ground)
+			}
+			if !t.Bot || ti == w.demoHero || w.allyCollector(ti) {
+				collectorOn = true
+			} else {
+				enemyOn = true
+			}
+		}
+		switch {
+		case f.DwellReq > 0:
+			if collectorOn && !enemyOn {
+				f.dwellT += dt
+				if f.dwellT >= f.DwellReq {
+					f.Taken = true
+				}
+			}
+		case collectorOn:
+			f.Taken = true
 		}
 	}
 }
@@ -4812,7 +5016,7 @@ func (w *World) stepTurret(e *Entity, dt float64) {
 		if t.Dead || t.gone || t.guard > 0 || t.cloakT > 0 {
 			continue
 		}
-		if e.Owner >= 0 && (ti == e.Owner || (w.rules().Teams == 2 && w.Tanks[ti].Team == w.Tanks[e.Owner].Team)) {
+		if e.Owner >= 0 && (ti == e.Owner || (w.teamed() && w.Tanks[ti].Team == w.Tanks[e.Owner].Team)) {
 			continue // a deployed turret never targets its deployer or allies
 		}
 		dx, dz := t.Pos.X-e.Pos.X, t.Pos.Z-e.Pos.Z
@@ -5049,6 +5253,9 @@ func (w *World) checkEnd() {
 		if w.winCondMet(wc) {
 			done = true
 		}
+	}
+	if w.alliesLost() {
+		done = true // protect-the-collectors map: every ally is down -> the level fails
 	}
 	if !done {
 		return
@@ -5299,7 +5506,7 @@ func (w *World) simulate(dt float64, inputs map[int]Input) {
 	r := w.rules()
 	switch r.Objective {
 	case ObjNeutralFlags:
-		w.collectFlags()
+		w.collectFlags(dt)
 	case ObjTeamFlags:
 		w.stepCTF(dt)
 	case ObjZone:
@@ -5423,7 +5630,7 @@ func (w *World) lockPoint(i int) (V3, bool) {
 		if e.Dead || e.gone || e.cloakT > 0 {
 			return V3{}, false
 		}
-		if w.rules().Teams == 2 && e.Team == t.Team {
+		if w.teamed() && e.Team == t.Team {
 			return V3{}, false
 		}
 		p = V3{e.Pos.X, e.Pos.Y + turretAimHeight, e.Pos.Z}
@@ -5435,7 +5642,7 @@ func (w *World) lockPoint(i int) (V3, bool) {
 		if e.Dead || e.Destruct == nil {
 			return V3{}, false
 		}
-		if e.Owner == i || (w.rules().Teams == 2 && e.Owner >= 0 && e.Owner < len(w.Tanks) && w.Tanks[e.Owner].Team == t.Team) {
+		if e.Owner == i || (w.teamed() && e.Owner >= 0 && e.Owner < len(w.Tanks) && w.Tanks[e.Owner].Team == t.Team) {
 			return V3{}, false // dropped: don't hold a lock on your own / a teammate's turret
 		}
 		p = e.Pos
@@ -5645,9 +5852,16 @@ func (w *World) applyInput(i int, in Input, dt float64) {
 		if bd.jump > 0 {
 			jumpV = bd.jump // per-character jump (a gorilla bounds, a turtle barely hops)
 		}
-		if bd.leap && jump && t.Pos.Y <= support+0.0001 && t.vy <= 0 { // leap forward into the fray
+		if jump && t.Pos.Y <= support+0.0001 && t.vy <= 0 {
+			// Carry the jump FORWARD in the facing direction. Leapers get their full
+			// melee charge; everyone else gets a modest hop - over telnet you press
+			// one key at a time (can't hold forward AND jump), so without this every
+			// jump is a dead vertical bob that can't clear a gap.
 			f := fwd(t.HullYaw)
-			lv := leapVel(bd)
+			lv := jumpHopSpeed
+			if bd.leap {
+				lv = leapVel(bd)
+			}
 			t.lungeVX, t.lungeVZ = f.X*lv, f.Z*lv
 		}
 		wasAir := t.Pos.Y > support+0.05
@@ -6478,8 +6692,8 @@ func (w *World) botObjectiveDest(i int) (dest V3, seek, hold bool) {
 		if best < 0 {
 			return V3{}, false, false
 		}
-		if i == w.demoHero {
-			// The demo's player stand-in plays the level: drive onto the
+		if i == w.demoHero || w.allyCollector(i) {
+			// The demo stand-in and allied collectors PLAY the level: drive onto the
 			// flag and take it, exactly as a human collector would.
 			return w.flags[best].Pos, true, false
 		}
@@ -6669,7 +6883,7 @@ func (w *World) botSpyTarget(i int) int {
 		if j == i || t.Dead || t.gone || t.cloakT > 0 {
 			continue
 		}
-		if w.rules().Teams == 2 && t.Team == b.Team {
+		if w.teamed() && t.Team == b.Team {
 			continue
 		}
 		dx, dz := t.Pos.X-b.Pos.X, t.Pos.Z-b.Pos.Z
@@ -7054,7 +7268,7 @@ func (w *World) nearestEnemy(self int) int {
 		if j == self || t.Dead || t.gone || t.cloakT > 0 {
 			continue // cloaked tanks can't be targeted by bots
 		}
-		if w.rules().Teams == 2 && t.Team == w.Tanks[self].Team {
+		if w.teamed() && t.Team == w.Tanks[self].Team {
 			continue
 		}
 		d := t.Pos.Sub(w.Tanks[self].Pos)
@@ -7333,7 +7547,7 @@ func (w *World) shotCanAffect(s *Projectile, ti int) bool {
 	if ti == s.owner || t.Dead || t.gone {
 		return false
 	}
-	teammate := w.rules().Teams == 2 && s.owner >= 0 && s.owner < len(w.Tanks) && w.Tanks[s.owner].Team == t.Team
+	teammate := w.teamed() && s.owner >= 0 && s.owner < len(w.Tanks) && w.Tanks[s.owner].Team == t.Team
 	if s.affects == TargetAllies && !teammate && s.dmg <= 0 {
 		return false // pure support: teammates only (a stinging medic bolt passes)
 	}
@@ -7558,7 +7772,7 @@ func (w *World) applyShotHit(s *Projectile, ti int) {
 	}
 	switch s.eff {
 	case EffHeal:
-		teammate := w.rules().Teams == 2 && s.owner >= 0 && s.owner < len(w.Tanks) && w.Tanks[s.owner].Team == t.Team
+		teammate := w.teamed() && s.owner >= 0 && s.owner < len(w.Tanks) && w.Tanks[s.owner].Team == t.Team
 		if !teammate && s.dmg > 0 {
 			// The medic bolt stings anyone who isn't kin - so a butterfly is
 			// never a zero-damage character (it just isn't much of one).
@@ -7578,7 +7792,7 @@ func (w *World) applyShotHit(s *Projectile, ti int) {
 		}
 		t.hitFlash = tankHitFlash // brief blink as feedback
 	case EffSlow:
-		teammate := w.rules().Teams == 2 && s.owner >= 0 && s.owner < len(w.Tanks) && w.Tanks[s.owner].Team == t.Team
+		teammate := w.teamed() && s.owner >= 0 && s.owner < len(w.Tanks) && w.Tanks[s.owner].Team == t.Team
 		if !teammate && s.dmg > 0 { // chip on top of the slow (octopod SLOWER, serpent SPRAY); pure-utility slows carry Damage 0
 			w.hurt(ti, s.dmg, s.owner, s.cause)
 		}
@@ -7617,7 +7831,7 @@ func (w *World) applyShotHit(s *Projectile, ti int) {
 		}
 		t.hitFlash = tankHitFlash
 	case EffSpeed:
-		teammate := w.rules().Teams == 2 && s.owner >= 0 && s.owner < len(w.Tanks) && w.Tanks[s.owner].Team == t.Team
+		teammate := w.teamed() && s.owner >= 0 && s.owner < len(w.Tanks) && w.Tanks[s.owner].Team == t.Team
 		if !teammate && s.dmg > 0 { // the swift bolt stings anyone who isn't kin (medic pattern)
 			w.hurt(ti, s.dmg, s.owner, s.cause)
 			return
@@ -7795,6 +8009,27 @@ func (w *World) spawnPoint(self int) V3 {
 		w.collide(&p)
 		return p
 	}
+	// SoloTeam (Flag Run with enemies): keep the player's side and the bot side
+	// apart so you never spawn in the enemies' lap. Team 0 (you/allies) starts at
+	// the first authored spawn; team 1 (enemies) at the last - author the two ends.
+	if w.rules().SoloTeam && self >= 0 && self < len(w.Tanks) {
+		if sp := w.ActiveMap().Spawns; len(sp) > 0 {
+			base := sp[0]
+			if w.Tanks[self].Team == 1 && len(sp) > 1 {
+				base = sp[len(sp)-1]
+			}
+			jit := 3.0
+			if !w.Tanks[self].Bot {
+				jit = 0 // the player spawns dead-on its mark, so it faces straight down the level
+			}
+			lim := w.half() - 1
+			x := math.Max(-lim, math.Min(lim, base.X+(rand.Float64()*2-1)*jit))
+			z := math.Max(-lim, math.Min(lim, base.Z+(rand.Float64()*2-1)*jit))
+			p := V3{x, 0, z}
+			w.collide(&p)
+			return p
+		}
+	}
 	clear := func(x, z float64) bool {
 		for j := range w.Tanks {
 			if j == self || w.Tanks[j].Dead || w.Tanks[j].gone {
@@ -7848,12 +8083,35 @@ func (w *World) faceTarget(self int) float64 {
 		}
 	}
 	var d V3
-	if best >= 0 {
+	switch {
+	case best >= 0:
 		d = w.Tanks[best].Pos.Sub(w.Tanks[self].Pos)
-	} else {
-		d = V3{}.Sub(w.Tanks[self].Pos)
+	default:
+		// No foe in sight (e.g. a flag-run tutorial): face the objective - the flag
+		// centroid - so you start looking down the hall of flags, not at the origin.
+		if c, ok := w.flagCentroid(); ok {
+			d = c.Sub(w.Tanks[self].Pos)
+		} else {
+			d = V3{}.Sub(w.Tanks[self].Pos)
+		}
 	}
 	return math.Atan2(d.X, d.Z)
+}
+
+// flagCentroid is the average position of the map's authored flags (read from the
+// map, so it's valid even before the runtime flags are placed at match start).
+func (w *World) flagCentroid() (V3, bool) {
+	var sum V3
+	n := 0
+	for _, e := range w.ActiveMap().Entities {
+		if e.Flag != nil {
+			sum, n = sum.Add(e.Pos), n+1
+		}
+	}
+	if n == 0 {
+		return V3{}, false
+	}
+	return V3{X: sum.X / float64(n), Z: sum.Z / float64(n)}, true
 }
 
 // Snapshot returns the flat, renderable view of the world: live tanks (gone
@@ -7934,7 +8192,11 @@ func (w *World) Snapshot() ([]TankSnap, []ShotSnap, []FlagSnap, []PickupSnap) {
 		if f.Taken { // Flag Run: collected flags vanish
 			continue
 		}
-		fl = append(fl, FlagSnap{Pos: f.Pos, Home: f.Home, Team: f.Team, Carried: f.Carrier >= 0})
+		dwellPct := 0
+		if f.DwellReq > 0 {
+			dwellPct = int(100 * f.dwellT / f.DwellReq)
+		}
+		fl = append(fl, FlagSnap{Pos: f.Pos, Home: f.Home, Team: f.Team, Carried: f.Carrier >= 0, DwellPct: dwellPct})
 	}
 	var pk []PickupSnap
 	for i := range w.pickups {

@@ -69,7 +69,8 @@ type Tri struct {
 	v       [3]V3      // world-space vertices, CCW from the lit side
 	col     [3]float64 // base color 0..1
 	wire    bool       // draw the silhouette edges (the "vector" look)
-	yawAnim bool       // spin this tri about its centroid over time (demo)
+	yawAnim bool       // spin this tri about pivot over time (scenery eye candy)
+	pivot   V3         // spin center for yawAnim (the prop's own position)
 }
 
 // arena holds the static world geometry (floor, walls, obstacles, scenery).
@@ -393,12 +394,14 @@ func (r *Renderer) drawEdge(ax, ay, aiz, bx, by, biz float64, col [3]float64) {
 // the static arena and the dynamic entities. yawAnim tris spin about the world
 // origin using t.
 func (r *Renderer) drawTris(cam Cam, tris []Tri, t float64) {
-	sy, cy := math.Sin(t*0.8), math.Cos(t*0.8) // obelisk spin (yawAnim tris)
+	sy, cy := math.Sin(t*0.8), math.Cos(t*0.8) // scenery spin (yawAnim tris)
 	for _, tri := range tris {
 		v := tri.v
-		if tri.yawAnim {
+		if tri.yawAnim { // spin about the prop's own center, so any placement animates
+			p := tri.pivot
 			for i := range v {
-				v[i] = V3{v[i].X*cy - v[i].Z*sy, v[i].Y, v[i].X*sy + v[i].Z*cy}
+				x, z := v[i].X-p.X, v[i].Z-p.Z
+				v[i] = V3{p.X + x*cy - z*sy, v[i].Y, p.Z + x*sy + z*cy}
 			}
 		}
 		// flat shading from the world-space normal (double-sided: no black faces)
@@ -1009,18 +1012,23 @@ func drawHPBar(w *bufio.Writer, p *gm.TankSnap) {
 	if hp < 0 {
 		hp = 0
 	}
+	maxHP := gm.VehBody(p.Body).MaxHP // scale to THIS character's max, not a fixed 100
+	if maxHP <= 0 {
+		maxHP = 100
+	}
 	const barLen = 18
-	fill := hp * barLen / 100
+	fill := hp * barLen / maxHP
 	if fill > barLen {
 		fill = barLen
 	}
+	pct := hp * 100 / maxHP
 	fillCol := fgEsc(70, 200, 90) // green
 	switch {
 	case p.Cloak:
 		fillCol = fgEsc(180, 110, 220) // purple while cloaked
-	case hp <= 30:
+	case pct <= 30:
 		fillCol = fgEsc(210, 70, 70) // red
-	case hp <= 60:
+	case pct <= 60:
 		fillCol = fgEsc(220, 200, 60) // yellow
 	}
 	var b strings.Builder
@@ -1174,6 +1182,15 @@ func drawStatus(w *bufio.Writer, cols int, v viewState, p *gm.TankSnap) {
 	}
 	if r.Objective == gm.ObjNeutralFlags {
 		fmt.Fprintf(&b, "  FLAGS %d/%d", v.flagsTotal-v.flagsLeft, v.flagsTotal)
+		hold := 0 // hold-to-claim (KoTH) flag in progress: show the claim %
+		for i := range v.flags {
+			if p := v.flags[i].DwellPct; p > hold && p < 100 {
+				hold = p
+			}
+		}
+		if hold > 0 {
+			fmt.Fprintf(&b, "  \x1b[1;93mHOLD %d%%\x1b[0;37m", hold)
+		}
 	}
 	if r.Objective == gm.ObjEscort { // ESCORT: your role + payload progress, not a kill score
 		role, color := "ESCORT", "92" // team 0 pushes the payload (green)
@@ -2290,6 +2307,14 @@ func runDemo(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 	// advances the demo to the next one.
 	campLevel := 0 // demo campaign progression
 	campIdx := -1  // campaign level temporarily appended to gm.Maps (-1 = none)
+	// The demo plays only COMPETITIVE campaign maps - TIER 0 onboarding (forced
+	// character, no/scripted enemies) isn't representative of the game.
+	var demoCamp []gm.Map
+	for _, m := range gm.CampaignMaps {
+		if m.Tier >= 1 {
+			demoCamp = append(demoCamp, m)
+		}
+	}
 	clearCamp := func() {
 		if campIdx >= 0 && campIdx == len(gm.Maps)-1 {
 			gm.Maps = gm.Maps[:campIdx]
@@ -2300,8 +2325,8 @@ func runDemo(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 	randMode := func() gm.Mode { return modes[rand.Intn(len(modes))] }
 	newWorld := func(mode gm.Mode) *gm.World {
 		clearCamp()
-		if mode == gm.ModeFlagRun && len(gm.CampaignMaps) > 0 {
-			m := gm.CampaignMaps[campLevel%len(gm.CampaignMaps)]
+		if mode == gm.ModeFlagRun && len(demoCamp) > 0 {
+			m := demoCamp[campLevel%len(demoCamp)]
 			campIdx = len(gm.Maps) // the campaign runner's append-play-truncate pattern
 			gm.Maps = append(gm.Maps, m)
 			enemies := 3
@@ -4734,7 +4759,7 @@ func drawResultBanner(w *bufio.Writer, cols, rows int, res *matchResult, rank sc
 	center(rows-2, "\x1b[0;90m", scoreBreakdown(*res))
 }
 
-func drawScoreboard(w *bufio.Writer, cols, rows int, v viewState, res *matchResult, rank scoreRank) {
+func drawScoreboard(w *bufio.Writer, cols, rows int, v viewState, res *matchResult, rank scoreRank, forgiving bool) {
 	rs := gm.RulesetFor(v.mode)
 	won := v.winnerID == v.me
 	title, fg := "GAME OVER", 4 // CGA red
@@ -4749,6 +4774,8 @@ func drawScoreboard(w *bufio.Writer, cols, rows int, v viewState, res *matchResu
 		}
 	} else if won {
 		title, fg = "VICTORY", 10 // green
+	} else if forgiving {
+		title, fg = "TRY AGAIN", 14 // gentle: TIER 0 is for learning, not a hard loss
 	} else if v.mode == gm.ModeFlagRun {
 		title = "TIME UP"
 	}
@@ -5024,6 +5051,11 @@ func main() {
 			vbody, vcolor = gm.BodyTank, gm.SelectColors[0]
 			drawCenterNote(w, cols, rows, "Your party is in the arena - joining...")
 			time.Sleep(1200 * time.Millisecond)
+		} else if choice.campaign {
+			// FLAG RUN owns its own flow (tier picker + per-tier character handling):
+			// TIER 0 forces a character per level, competitive tiers pick one inside
+			// runFlagRun. These are just placeholders for that call.
+			vbody, vcolor = gm.BodyTank, gm.SelectColors[0]
 		} else {
 			updatePresence(dropfile, "vehicle select", "")
 			var vback, vquit bool
@@ -5038,7 +5070,7 @@ func main() {
 			}
 		}
 		if choice.campaign {
-			if runCampaign(w, cols, rows, rows3d, rnd, ip, dropfile, &settings, vbody, vcolor, playerName) {
+			if runFlagRun(w, cols, rows, rows3d, rnd, ip, dropfile, &settings, vbody, vcolor, playerName) {
 				cleanup()
 				return
 			}
@@ -5107,7 +5139,7 @@ func main() {
 			bod, col, back, quit := runVehicleMenuSimple(w, cols, rows, ip, &settings, dropfile)
 			return bod, col, !back && !quit
 		}
-		quit, joinArena := playMatch(w, cols, rows, rows3d, rnd, ip, sess, dropfile, state, detail, false, pickChar)
+		quit, joinArena := playMatch(w, cols, rows, rows3d, rnd, ip, sess, dropfile, state, detail, false, false, pickChar)
 		sess.close()
 		if quit {
 			cleanup()
@@ -5130,7 +5162,7 @@ func main() {
 // reaches its Ended phase). Both false = backed out to the menu (Backspace).
 // Shared by the main game and the editor's playtest. oneShot (the campaign runner)
 // makes it return after a single match.
-func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, sess session, dropfile, presenceState, presenceDetail string, oneShot bool, pickChar func() (int, [3]float64, bool)) (bool, bool) {
+func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, sess session, dropfile, presenceState, presenceDetail string, oneShot, forgiving bool, pickChar func() (int, [3]float64, bool)) (bool, bool) {
 	ip.setEscMenu(true) // in-game Esc = exit confirm, not instant quit
 	defer ip.setEscMenu(false)
 	defer suspendMusic(false) // resume menu/lobby music when we leave the match
@@ -5193,6 +5225,8 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 	lastSelfHP := -1         // local HP last frame: a drop = we took a hit (SFX). -1 = unset
 	lastSelfKills := -1      // local kills last frame: a rise = we scored a frag (SFX)
 	lastSelfDeadSfx := false // local dead state last frame: false->true = death stinger
+	lastFlagsLeft := -1      // flags remaining last frame: a drop = a flag was collected (pickup jingle)
+	var entDead []bool       // per-entity Dead state last frame: a false->true = a breakable just shattered
 	lastCount := 0           // last countdown number beeped (0 = not counting down)
 	matchStart := time.Now() // reset when a match goes Active; used for stats duration
 	_, statName := door32Identity(dropfile)
@@ -5577,7 +5611,24 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 			case lastSelfHP >= 0 && p.HP < lastSelfHP:
 				sfxHit(w, now)
 			}
+			if lastFlagsLeft >= 0 && v.flagsLeft < lastFlagsLeft {
+				sfxFlag(w) // a flag was just collected (by you or an ally): cheerful jingle
+			}
+			for i := range v.ents { // a destructible just shattered (alive -> dead)
+				if i < len(entDead) && !entDead[i] && v.ents[i].Dead {
+					sfxBreak(w)
+					break // one crunch per frame even if several broke at once
+				}
+			}
 		}
+		if cap(entDead) < len(v.ents) {
+			entDead = make([]bool, len(v.ents))
+		}
+		entDead = entDead[:len(v.ents)]
+		for i := range v.ents {
+			entDead[i] = v.ents[i].Dead
+		}
+		lastFlagsLeft = v.flagsLeft
 		lastSelfHP, lastSelfKills, lastSelfDeadSfx = p.HP, p.Kills, p.Dead
 		if oneShot && oneShotAt.IsZero() {
 			// The level is decided when the match ends, or the moment the player
@@ -5787,7 +5838,7 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 		case gm.PhaseCountdown:
 			drawCountdown(w, cols, rows, v)
 		case gm.PhaseEnded:
-			drawScoreboard(w, cols, rows, v, lastResult, resultRank)
+			drawScoreboard(w, cols, rows, v, lastResult, resultRank, forgiving)
 		case gm.PhaseLobby:
 			drawLobby(w, cols, rows, v, voteMode)
 		default:

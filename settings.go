@@ -20,6 +20,8 @@ type userSettings struct {
 	soundTested  bool // whether the first-run sound check has been done (else: ask)
 	colorMode    int  // colorTrue/color256/color16 (see color.go)
 	campaignBest int  // highest campaign level cleared (0 = never)
+	flagTier     int  // highest FLAG RUN tier unlocked (0 = onboarding; 1 = competitive...)
+	flagT0Done   int  // highest TIER 0 level completed (1-based; 0 = none) - the resume point
 
 	// Custom controls (see controls.go). keyBinds maps a game action -> its key
 	// (0 = explicitly unbound); absent = the default key.
@@ -86,6 +88,12 @@ func loadUserSettings(dropfile string) userSettings {
 	}
 	if n, ok := atoiOK(ini["campaignbest"]); ok {
 		s.campaignBest = n
+	}
+	if n, ok := atoiOK(ini["flagtier"]); ok {
+		s.flagTier = n
+	}
+	if n, ok := atoiOK(ini["flagt0done"]); ok {
+		s.flagT0Done = n
 	}
 	switch strings.ToLower(ini["aimassist"]) {
 	case "off", "false", "0", "no":
@@ -157,6 +165,12 @@ func saveUserSettings(dropfile string, s userSettings) {
 	body := fmt.Sprintf("difficulty = %s\naimassist = %s\nsound = %s\nsoundtested = %s\ncolormode = %s\n", s.difficulty.String(), aa, snd, stested, colorModeSlug(s.colorMode))
 	if s.campaignBest > 0 {
 		body += fmt.Sprintf("campaignbest = %d\n", s.campaignBest)
+	}
+	if s.flagTier > 0 {
+		body += fmt.Sprintf("flagtier = %d\n", s.flagTier)
+	}
+	if s.flagT0Done > 0 {
+		body += fmt.Sprintf("flagt0done = %d\n", s.flagT0Done)
 	}
 	if len(s.keyBinds) > 0 {
 		var parts []string

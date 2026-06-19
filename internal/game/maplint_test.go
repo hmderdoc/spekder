@@ -31,6 +31,33 @@ func openedUp(w *World, src, dst V3) bool {
 	return ok && g.astar(start, goal) != nil
 }
 
+// servedByMechanism reports whether an authored traversal mechanic delivers a
+// player to pos: a trampoline whose bounce pad sits on reachable ground near pos's
+// column (you launch up to it), or a teleporter on reachable ground whose dest
+// lands near pos (you warp in). Either is authored design - a flag on a high deck
+// or sealed in a vault is reached on purpose, not stranded.
+func servedByMechanism(w *World, g *navGrid, start int, pos V3) bool {
+	reachable := func(at V3) bool {
+		cx, cy := g.cellAt(at.X, at.Z)
+		s, ok := g.snapOpen(cy*g.n+cx, at.Y)
+		return ok && g.astar(start, s) != nil
+	}
+	near := func(a V3) bool {
+		dx, dz := a.X-pos.X, a.Z-pos.Z
+		return dx*dx+dz*dz <= 36 // within ~6 units horizontally of the target column
+	}
+	for i := range w.entities {
+		e := &w.entities[i]
+		switch {
+		case e.Bounce != nil && near(e.Pos) && reachable(e.Pos):
+			return true
+		case e.Teleport != nil && near(e.Teleport.Dest) && reachable(e.Pos):
+			return true
+		}
+	}
+	return false
+}
+
 // TestMapsNavigable lints every embedded map (campaign levels included): from
 // the first spawn, the nav grid must reach every other spawn, every flag,
 // every zone, and every authored pickup spot. A failure here means authored
@@ -85,27 +112,35 @@ func TestMapsNavigable(t *testing.T) {
 				y = f // legacy spots author y=0 even on platform tops
 			}
 			goal, ok := g.snapOpen(cy*g.n+cx, y)
-			if !ok {
-				t.Errorf("%s: %s at %v has no walkable cell nearby", m.Name, p.name, p.pos)
+			if ok && g.astar(start, goal) != nil {
+				continue // plainly reachable on foot
+			}
+			// Not foot-reachable (no walkable cell, or no route): allow the authored
+			// exceptions - a jump-bonus perch, a destructible gate, or a traversal
+			// mechanic (trampoline / teleporter) that delivers you there.
+			if p.bonus && ok && g.floor[goal] > g.floor[start]+stepUp {
+				t.Logf("%s: %s at %v is a jump-only bonus spot", m.Name, p.name, p.pos)
 				continue
 			}
-			if g.astar(start, goal) == nil {
-				// A pickup perched on top of geometry is a deliberate jump-bonus
-				// (ASCENT's corner platforms, CITADEL's wall-top crown): the
-				// clearance ring keeps box tops out of the path graph, so
-				// they're reachable by jumping, not by route.
-				if p.bonus && g.floor[goal] > g.floor[start]+stepUp {
-					t.Logf("%s: %s at %v is a jump-only bonus spot", m.Name, p.name, p.pos)
-					continue
-				}
-				// Behind a destructible? Retry with breakables dead: a POI that
-				// opens up once a gate falls is authored design, not a defect.
-				if openedUp(w, m.Spawns[0], p.pos) {
-					t.Logf("%s: %s at %v is gated by a destructible", m.Name, p.name, p.pos)
-					continue
-				}
-				t.Errorf("%s: %s at %v unreachable from spawn[0]", m.Name, p.name, p.pos)
+			if openedUp(w, m.Spawns[0], p.pos) {
+				t.Logf("%s: %s at %v is gated by a destructible", m.Name, p.name, p.pos)
+				continue
 			}
+			if servedByMechanism(w, g, start, p.pos) {
+				t.Logf("%s: %s at %v is reached by a trampoline/teleporter", m.Name, p.name, p.pos)
+				continue
+			}
+			// A level whose forced pilot can fly, leap, or wall-climb reaches flags
+			// that foot-pathing can't - in open air, over a wall, or inside a sealed
+			// box. That traversal IS the lesson (falcon/butterfly fly, mantis/etc.
+			// leap, insect climbs).
+			if m.Intro != nil {
+				if bd := bodyDefFor(m.Intro.Body); bd.fly || bd.leap || bd.climb {
+					t.Logf("%s: %s at %v is reachable by the pilot's flight/leap/climb", m.Name, p.name, p.pos)
+					continue
+				}
+			}
+			t.Errorf("%s: %s at %v unreachable from spawn[0]", m.Name, p.name, p.pos)
 		}
 	}
 }

@@ -141,8 +141,11 @@ func (s *offlineSession) changeChar(body int, color [3]float64) {
 // by the editor's playtest, which temporarily appends the working map to gm.Maps).
 func newOfflineOnMap(mapIdx, numBots int, mode gm.Mode, diff gm.Difficulty, aimAssist bool, name string, color [3]float64, body int) *offlineSession {
 	if mapIdx >= 0 && mapIdx < len(gm.Maps) { // a scripted map can fix its own fill-bot count
-		if r := gm.Maps[mapIdx].Rules; r != nil && r.Bots >= 0 {
-			numBots = r.Bots
+		if r := gm.Maps[mapIdx].Rules; r != nil {
+			if r.Bots >= 0 {
+				numBots = r.Bots
+			}
+			numBots += r.Allies // allied collectors are extra bots that join the player's side
 		}
 		// And a capped map trims the fill so player + bots fit its size.
 		if c := gm.MapCapacity(gm.Maps[mapIdx]); c > 0 && numBots > c-1 {

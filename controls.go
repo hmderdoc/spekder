@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"strings"
 )
 
 // Rebindable in-game controls. The reader maps an incoming byte -> game action via
@@ -52,13 +53,67 @@ var cruiseEvent = map[int]menuKey{
 func bindLabel(s *userSettings, r bindRow) string {
 	k := effectiveKey(s, r.act)
 	switch {
-	case r.arrow != "" && k != 0:
+	case r.arrow != "" && k != 0 && k != ',' && k != '.':
+		// arrow-aliased control with a MEANINGFUL custom key: show both. The default
+		// ,/. aim keys are hidden - the arrows are the canonical aim controls.
 		return r.arrow + " / " + keyLabel(k)
 	case r.arrow != "":
 		return r.arrow
 	default:
 		return keyLabel(k)
 	}
+}
+
+// tipKey is a clean, in-sentence key label for tooltips: bare letter, or SPACE /
+// ENTER for those, unlike keyLabel which quotes letters for the CONTROLS list.
+func tipKey(b byte) string {
+	switch b {
+	case 0:
+		return "(unbound)"
+	case ' ':
+		return "SPACE"
+	case '\r', '\n':
+		return "ENTER"
+	}
+	return string(b)
+}
+
+// resolveTip substitutes {action} placeholders in a TIER 0 tooltip with the
+// player's LIVE key bindings, so a remap is reflected and we never show a wrong
+// key. Slugs are the bindable control slugs (forward, jump, fire, secondary, ...);
+// {aim} always resolves to "arrows" (they aim regardless of binds) and {cruise} to
+// "Shift". An unknown placeholder is left verbatim so authoring typos are visible.
+func resolveTip(tip string, s *userSettings) string {
+	var b strings.Builder
+	for {
+		i := strings.IndexByte(tip, '{')
+		if i < 0 {
+			b.WriteString(tip)
+			break
+		}
+		b.WriteString(tip[:i])
+		rest := tip[i:]
+		j := strings.IndexByte(rest, '}')
+		if j < 0 {
+			b.WriteString(rest)
+			break
+		}
+		slug := rest[1:j]
+		switch slug {
+		case "aim":
+			b.WriteString("arrows")
+		case "cruise":
+			b.WriteString("Shift")
+		default:
+			if act, ok := slugToAct(slug); ok {
+				b.WriteString(tipKey(effectiveKey(s, act)))
+			} else {
+				b.WriteString("{" + slug + "}") // unknown: leave it visible
+			}
+		}
+		tip = tip[i+j+1:]
+	}
+	return b.String()
 }
 
 func slugToAct(slug string) (int, bool) {
