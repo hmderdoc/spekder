@@ -42,7 +42,7 @@ func matchResultFrom(v viewState, player string, dur float64) matchResult {
 }
 
 // Per-BBS-user stats: cumulative totals (the player card) + per-mode high scores,
-// stored next to the binary under data/spekder-<handle>.stats (JSON). See SCORING.md.
+// stored next to the binary under data/spekder-<handle>.stats (JSON). See docs/SCORING.md.
 
 type modeStat struct {
 	Games, Wins, Best int
@@ -132,7 +132,7 @@ func difficultyMul(d gm.Difficulty) float64 {
 	return 1.0 // Normal
 }
 
-// scoreMatch is the points formula (transparent, mode-aware). See SCORING.md.
+// scoreMatch is the points formula (transparent, mode-aware). See docs/SCORING.md.
 func scoreMatch(r matchResult) int {
 	s := r.Kills*10 - r.Deaths*4 + r.Pickups*2
 	s += r.DmgDealt / 25         // chip damage / assists

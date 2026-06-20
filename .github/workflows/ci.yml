@@ -49,5 +49,5 @@ jobs:
           GOARM: ${{ matrix.goarm }}
           CGO_ENABLED: "0"
         run: |
-          go build -o /dev/null .
+          go build -o /dev/null ./cmd/spekder
           go build -o /dev/null ./cmd/server

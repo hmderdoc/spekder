@@ -74,7 +74,7 @@ type Entity struct {
 	Trigger  *TriggerTrait
 	Payload  *PayloadTrait
 
-	// --- event-driven behavior (authored; see EVENTS.md) ---
+	// --- event-driven behavior (authored; see docs/EVENTS.md) ---
 	Tag       string     // author name, referenced by actions/conditions as #tag
 	Watch     []float64  // HP% thresholds that emit hp_below when crossed (needs Destruct)
 	Behaviors []Behavior // rules this entity subscribes to / emits
@@ -183,7 +183,7 @@ type Map struct {
 	Pickups   []MapPickup
 	Entities  []Entity
 	Rules     *MapRules      // optional per-map victory conditions (nil = implied by objectives)
-	Vars      map[string]int // initial blackboard values (event system; see EVENTS.md)
+	Vars      map[string]int // initial blackboard values (event system; see docs/EVENTS.md)
 	Logic     []Behavior     // map-level "director" rules (source = world, -1)
 	Paths     []Path         // named waypoint paths (for the move action / escort)
 	Actors    []Actor        // named tank templates with behaviors (mobile bosses)
@@ -770,10 +770,14 @@ const (
 	// if the aim passes within these capture radii of a valid target on both axes,
 	// it LOCKS onto the target (snap + hold) so you can fire - catching small/fast-
 	// passing targets that discrete key steps overshoot. Holding still keeps the
-	// lock; turning for assistLockBreak sec releases it; Recenter / target-loss clear it.
+	// lock; turning for the break time releases it; Recenter / target-loss clear it.
+	// The break time is per-tier: easy holds sticky (you barely have to aim); harder
+	// tiers release on a quick flick, so you're never fought when you want off.
 	assistCaptureYaw   = 0.22 // rad (~12.5 deg) lock-on radius
 	assistCapturePitch = 0.22
-	assistLockBreak    = 0.40 // sec of sustained turn to break a lock
+	assistLockBreak    = 0.40 // easy/beginner: sec of sustained turn to break a sticky lock
+	assistQuickBreak   = 0.12 // normal+: a brief turn (a flick) releases the lock - not a fight
+	assistGrace        = 0.22 // normal+: sec after a catch where the sweep's turn momentum is absorbed (> the 200ms input held-decay)
 	assistBreakCool    = 0.50 // sec after a break before assist re-acquires
 	fireDelay          = 0.55
 	jumpSpeed          = 8.5  // upward launch velocity (units/sec)
@@ -820,7 +824,7 @@ const (
 )
 
 // WinKind / BotSpawn / ObjKind are fixed palettes a Ruleset composes (palette,
-// not scripting). See PHASE_B.md.
+// not scripting). See docs/PHASE_B.md.
 type WinKind int
 
 const (
@@ -855,7 +859,7 @@ type WinCond struct {
 	Count int
 }
 
-// Ruleset is a game mode expressed as data (see PHASE_B.md). Timeout is implicit
+// Ruleset is a game mode expressed as data (see docs/PHASE_B.md). Timeout is implicit
 // when TimeLimit>0: the clock expiring ends the match and the winner is resolved
 // by scoring.
 type Ruleset struct {
@@ -940,6 +944,17 @@ func (w *World) rules() Ruleset {
 		base.Win = win
 	}
 	return base
+}
+
+// MaxLives is the effective life count for the match (0 = no lives system). It
+// reflects map/campaign overrides, so the HUD can show LIVES only where it
+// applies - unlike the per-tank lives field, which defaults nonzero everywhere so
+// the infinite-respawn modes keep respawning.
+func (w *World) MaxLives() int {
+	if w.campLives > 0 {
+		return w.campLives // campaign: the run's shared life pool
+	}
+	return w.rules().Lives
 }
 
 type Phase int
@@ -1043,7 +1058,7 @@ func (t *Tank) veh() Vehicle {
 	return v
 }
 
-// Difficulty indexes the BotProfile table. See DIFFICULTY.md.
+// Difficulty indexes the BotProfile table. See docs/DIFFICULTY.md.
 type Difficulty int
 
 const (
@@ -1256,7 +1271,8 @@ type Tank struct {
 	bufferHP float64
 	hookT    float64
 
-	healFlash float64 // brief timer after being healed by an ally (drives the mend halo)
+	healFlash   float64 // brief timer after being healed by an ally (drives the mend halo)
+	bounceFlash float64 // brief timer after a trampoline launch (drives the client's boing SFX)
 
 	// one damage-over-time slot (poison/burn; the latest application wins):
 	// remaining time, HP/sec, fractional carry, the shooter (kill credit; leech
@@ -1311,11 +1327,14 @@ type Tank struct {
 
 	// aim-assist lock (human players): kind 0 none / 1 tank / 2 entity, idx into
 	// that slice; lockBreak accumulates sustained turn input to release the lock;
-	// lockCool suppresses re-acquire after a break so a held turn carries you off.
+	// lockCool suppresses re-acquire after a break so a held turn carries you off;
+	// lockGrace absorbs the sweep's turn momentum (input held-decay) right after a
+	// catch so the residual turn can't break it / carry the aim off before parking.
 	lockKind  int
 	lockIdx   int
 	lockBreak float64
 	lockCool  float64
+	lockGrace float64
 
 	healTgt int // bot healer's committed heal target (-1/none); gives the pick hysteresis
 
@@ -1376,6 +1395,7 @@ type TankSnap struct {
 	Charges                int     // charge-weapon: remaining stock
 	MaxCharges             int     // charge-weapon: capacity (0 = cooldown weapon)
 	Slip                   bool    // EffSlip: no steering, helpless slide (client predicts it)
+	Bounced                bool    // just launched off a trampoline (one-shot client boing SFX)
 	HoldScore              int     // King of the Hill (FFA): hold-points
 }
 
@@ -1491,7 +1511,7 @@ func visForDelivery(d Delivery) byte {
 }
 
 // ---------------------------------------------------------------------------
-// Weapons & effects (data-driven; see WEAPONS.md). A weapon is a palette entry
+// Weapons & effects (data-driven; see docs/WEAPONS.md). A weapon is a palette entry
 // referenced by index (synced like Rulesets/Maps); a projectile carries the
 // weapon's effect payload, resolved server-side on hit.
 // ---------------------------------------------------------------------------
@@ -1878,7 +1898,7 @@ type World struct {
 	// a human), and it renders as the player's default tank.
 	demoHero int
 
-	// event-driven behavior runtime (see behavior.go / EVENTS.md)
+	// event-driven behavior runtime (see behavior.go / docs/EVENTS.md)
 	tickT     float64        // accumulator for the periodic `tick` signal
 	vars      map[string]int // per-match blackboard
 	logic     []Behavior     // active map's director rules
@@ -4775,6 +4795,10 @@ const regenHitPause = 3.0
 // healFlashDur is how long the mend halo shows after an ally heal lands.
 const healFlashDur = 0.6
 
+// bounceFlashDur holds the trampoline-launch flag long enough that the client is
+// guaranteed to sample it (it diffs the rising edge into a one-shot boing).
+const bounceFlashDur = 0.15
+
 // Minotaur barrier tuning.
 const (
 	minoShieldMax     = 220.0 // barrier HP pool
@@ -5054,6 +5078,7 @@ func (w *World) stepBounce(e *Entity) {
 		}
 		if t.Pos.Y <= padTop+0.25 && t.vy <= 0.1 {
 			t.vy = e.Bounce.Power
+			t.bounceFlash = bounceFlashDur // one-shot signal for the client's boing SFX
 		}
 	}
 }
@@ -5677,6 +5702,9 @@ func (w *World) simulate(dt float64, inputs map[int]Input) {
 		if w.Tanks[i].healFlash > 0 {
 			w.Tanks[i].healFlash -= dt
 		}
+		if w.Tanks[i].bounceFlash > 0 {
+			w.Tanks[i].bounceFlash -= dt
+		}
 		if max := w.Tanks[i].veh().AmmoMax; w.Tanks[i].ammo < max { // regenerate ammo
 			if w.Tanks[i].ammo += w.Tanks[i].veh().AmmoRegen * dt; w.Tanks[i].ammo > max {
 				w.Tanks[i].ammo = max
@@ -5785,19 +5813,30 @@ func (w *World) aimAssistStep(i int, turning, elevating bool, dt float64) {
 	// instant break self-cancels the lock before it can ever hold.
 	if t.lockKind != 0 {
 		if p, ok := w.lockPoint(i); ok {
-			if turning || elevating {
-				if t.lockBreak += dt; t.lockBreak >= assistLockBreak {
-					// deliberate turn-away: release + suppress instant re-acquire
-					t.lockKind, t.lockBreak, t.lockCool = 0, 0, assistBreakCool
+			if t.lockGrace > 0 {
+				t.lockGrace -= dt // wind down the post-catch grace (real time, turning or not)
+			}
+			breakTime := assistLockBreak // easy/beginner: sticky hold
+			if !w.aimLockOn() {
+				breakTime = assistQuickBreak // normal+: a quick flick releases it
+			}
+			switch {
+			case t.lockGrace > 0:
+				// Grace: the turn right after a catch is the sweep's input-decay
+				// momentum, not intent. Absorb it - aimAt below parks the reticle on
+				// the target and the residual turn can't break it or carry you off.
+			case turning || elevating:
+				if t.lockBreak += dt; t.lockBreak >= breakTime {
+					t.lockKind, t.lockBreak, t.lockCool = 0, 0, assistBreakCool // deliberate turn-away
 					return
 				}
-			} else {
+			default:
 				t.lockBreak = 0 // holding still keeps the lock indefinitely
 			}
 			w.aimAt(t, p)
 			return
 		}
-		t.lockKind, t.lockBreak = 0, 0 // target gone
+		t.lockKind, t.lockBreak, t.lockGrace = 0, 0, 0 // target gone
 	}
 	if (!turning && !elevating) || t.lockCool > 0 {
 		return // acquire only while actively aiming, and not during break cooldown
@@ -5849,8 +5888,14 @@ func (w *World) aimAssistStep(i int, turning, elevating bool, dt float64) {
 		return
 	}
 	w.aimAt(t, bestP)
-	if w.aimLockOn() { // easy tiers: establish a tracking lock. harder tiers get only this one-time snap (standard auto-aim)
-		t.lockKind, t.lockIdx, t.lockBreak = bestKind, bestIdx, 0
+	// Lock + hold on EVERY tier - the hold IS the targeting (you stay on the foe to
+	// fire). Tiers differ only in how easily a turn breaks it: easy is sticky, harder
+	// tiers release on a quick flick (assistQuickBreak), so you target AND stay free.
+	// Harder tiers also get a grace window so the sweep's turn momentum (the 200ms
+	// input held-decay) is absorbed and the catch parks instead of sliding past.
+	t.lockKind, t.lockIdx, t.lockBreak = bestKind, bestIdx, 0
+	if !w.aimLockOn() {
+		t.lockGrace = assistGrace
 	}
 }
 
@@ -6058,8 +6103,8 @@ func (w *World) applyInput(i int, in Input, dt float64) {
 		t.TurretPitch = clampPitch(t.TurretPitch - pitchRate*dt)
 	}
 	if in.Recenter {
-		t.TurretYaw, t.TurretPitch = 0, 0 // snap turret to hull-forward and level
-		t.lockKind, t.lockBreak = 0, 0    // clear any aim lock
+		t.TurretYaw, t.TurretPitch = 0, 0              // snap turret to hull-forward and level
+		t.lockKind, t.lockBreak, t.lockGrace = 0, 0, 0 // clear any aim lock
 	} else {
 		w.aimAssistStep(i, in.TurretL || in.TurretR, in.AimUp || in.AimDown, dt)
 	}
@@ -8422,7 +8467,7 @@ func (w *World) Snapshot() ([]TankSnap, []ShotSnap, []FlagSnap, []PickupSnap) {
 			KillsHuman: t.killsHuman, KillsBot: t.killsBot, Captures: t.captures,
 			Lives: t.lives, Team: t.Team, Carrying: t.Carrying >= 0,
 			Kills: t.Kills, Deaths: t.Deaths, RespawnIn: t.respawn, Reload: reload, Ammo: ammoFrac,
-			Reload2: reload2, Charges: charges, MaxCharges: maxCharges, Slip: t.slipT > 0,
+			Reload2: reload2, Charges: charges, MaxCharges: maxCharges, Slip: t.slipT > 0, Bounced: t.bounceFlash > 0,
 			HoldScore: t.holdScore,
 		})
 	}

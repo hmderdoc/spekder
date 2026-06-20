@@ -225,14 +225,14 @@ Requires Go (see `go.mod` for the version). No CGO, no external build tools.
 git clone https://github.com/hmderdoc/spekder
 cd spekder
 go test ./...
-go build -o spekder .
+go build -o spekder ./cmd/spekder
 go build -o spekder-server ./cmd/server
 ```
 
 Cross-compile for any target the usual Go way, e.g. 32-bit Windows:
 
 ```
-CGO_ENABLED=0 GOOS=windows GOARCH=386 go build -o spekder.exe .
+CGO_ENABLED=0 GOOS=windows GOARCH=386 go build -o spekder.exe ./cmd/spekder
 ```
 
 Tagged releases are built automatically for all supported platforms by GitHub

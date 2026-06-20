@@ -142,6 +142,13 @@ func sfxGo(w *bufio.Writer)   { emitMusic(w, "T200L8O5C") }
 // up an octave - a cheerful "got it!" distinct from the lower kill arpeggio.
 func sfxFlag(w *bufio.Writer) { emitMusic(w, "T220O5L16CEGE>L8C") }
 
+// sfxPickup is a quick, bright two-note blip for grabbing a power-up/ammo/repair -
+// shorter and lighter than the flag jingle so the two don't read alike.
+func sfxPickup(w *bufio.Writer) { emitMusic(w, "T240O5L16CE") }
+
+// sfxBounce is a fast rising run - a "whoop" launch - for hitting a trampoline.
+func sfxBounce(w *bufio.Writer) { emitMusic(w, "T255O2L32CEGO3CEG") }
+
 // sfxBreak is a low, short descending "crunch" for a destructible wall/item
 // shattering - down in the bass so it reads as rubble, not a tune.
 func sfxBreak(w *bufio.Writer) { emitMusic(w, "T240O2L16ECO1L8G") }

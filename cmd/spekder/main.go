@@ -958,6 +958,39 @@ func (in *input) reader(t Term) {
 // tty / door plumbing
 // ---------------------------------------------------------------------------
 
+// bodyShorts maps a character body to a 3-char scoreboard tag, so a glance at the
+// standings shows which character skins are in play (e.g. tgr = tiger).
+var bodyShorts = [gm.BodyKinds]string{
+	gm.BodyTank: "tnk", gm.BodyQuad: "tgr", gm.BodyInsect: "ins", gm.BodyHumanoid: "hmn",
+	gm.BodyScorpion: "scp", gm.BodySerpent: "srp", gm.BodyCrab: "crb", gm.BodyOctopod: "oct",
+	gm.BodyButterfly: "bfl", gm.BodyMantis: "mnt", gm.BodyTurtle: "trt", gm.BodyTrex: "rex",
+	gm.BodyGorilla: "gor", gm.BodyElephant: "elp", gm.BodyFalcon: "flc", gm.BodyStag: "stg",
+	gm.BodyMinotaur: "min", gm.BodySpider: "spd", gm.BodyTripod: "tri", gm.BodyDrone: "drn",
+}
+
+func bodyShort(body int) string {
+	if body >= 0 && body < len(bodyShorts) && bodyShorts[body] != "" {
+		return bodyShorts[body]
+	}
+	return "???"
+}
+
+// contrastText picks black or white for legible text over a swatch background.
+func contrastText(c [3]float64) (r, g, b byte) {
+	if 0.299*c[0]+0.587*c[1]+0.114*c[2] > 0.55 {
+		return 0, 0, 0
+	}
+	return 255, 255, 255
+}
+
+// charSwatch is the standings tag: the body's 3-char shorthand on the tank's
+// accent color (so you read the character AND its skin at a glance).
+func charSwatch(body int, color [3]float64) string {
+	ac := accentColor(color)
+	tr, tg, tb := contrastText(ac)
+	return "\x1b[" + barCellSGR(tr, tg, tb, clampB(ac[0]*255), clampB(ac[1]*255), clampB(ac[2]*255)) + "m" + bodyShort(body) + "\x1b[0m"
+}
+
 // drawLeaderboard overlays a live, color-coded standings list down the left
 // edge: a swatch in each tank's color + kills-deaths, sorted by kills, with your
 // row marked. Colors ARE the identity (same scheme as the tanks/radar).
@@ -996,14 +1029,12 @@ func drawLeaderboard(w *bufio.Writer, cols, rows int, v viewState, recentKill ma
 		if recentKill[t.ID] > 0 { // just scored: a brief light-green +1
 			plus = "\x1b[1;92m+1\x1b[0m "
 		}
-		ac := accentColor(t.Color) // accent swatch; the name carries the primary color
 		stat := fmt.Sprintf("\x1b[0;37m%2d-%d", t.Kills, t.Deaths)
 		if koth { // hold-points are the operative score
 			stat = fmt.Sprintf("\x1b[1;93m%2dh\x1b[0;90m%d-%d", t.HoldScore, t.Kills, t.Deaths)
 		}
-		fmt.Fprintf(w, "\x1b[%d;1H%s%s\xdb\xdb %s \x1b[%sm%-12s\x1b[0m %s",
-			3+i, mark,
-			fgEsc(clampB(ac[0]*255), clampB(ac[1]*255), clampB(ac[2]*255)),
+		fmt.Fprintf(w, "\x1b[%d;1H%s%s %s \x1b[%sm%-12s\x1b[0m %s",
+			3+i, mark, charSwatch(t.Body, t.Color),
 			stat, tankSGR(t.Color), name, plus)
 	}
 }
@@ -1224,10 +1255,11 @@ func drawStatus(w *bufio.Writer, cols int, v viewState, p *gm.TankSnap) {
 	if r.Bots == gm.BotWaves {
 		fmt.Fprintf(&b, "  WAVE %d", v.wave)
 	}
-	// Lives-based play: the base ruleset (survival, elimination) or a per-map /
-	// campaign override (base Flag Run has no lives, so r.Lives misses those -
-	// but the player snapshot only carries lives when the system is active).
-	if r.Lives > 0 || p.Lives > 0 {
+	// Lives-based play only (survival, elimination, the campaign). v.maxLives is the
+	// EFFECTIVE life count (map/campaign overrides included); gate on it, not on
+	// p.Lives - that defaults nonzero in every mode so infinite-respawn play keeps
+	// respawning, and reading it here leaked a bogus LIVES count into DEATHMATCH.
+	if v.maxLives > 0 {
 		lv := p.Lives
 		if lv < 0 {
 			lv = 0
@@ -1680,6 +1712,150 @@ func halfCell(top, bottom int) string {
 	return "\x1b[" + barCellSGR(tr, tg, tb, br, bg, bb) + "m\xdf"
 }
 
+// musicVizWindow picks the keybed window (a span of semitones) for a viz of the
+// given cell-width: fill the width with keys, capped at a full 88, centered on the
+// song's range (minP..maxP) and always wide enough to contain it.
+func musicVizWindow(gw, minP, maxP int) (dispLo, dispHi int) {
+	keys := gw
+	if keys > 88 {
+		keys = 88
+	}
+	if keys < maxP-minP+1 {
+		keys = maxP - minP + 1
+	}
+	dispLo = (minP+maxP)/2 - keys/2
+	if dispLo < 0 {
+		dispLo = 0
+	}
+	return dispLo, dispLo + keys - 1
+}
+
+// musicVizGrid builds the falling-note piano-roll as a sub-cell grid at 2x vertical
+// resolution: subH rows (two per terminal row) x gw columns, of cell ids - -1 blank,
+// 0..11 pitch class, 13 onset flash, 14 white key, 15 black key. dispLo..dispHi is
+// the keybed window. Shared by the SOUND TEST and the main-menu background layer.
+func musicVizGrid(gw, subH int, tl []fallNote, elapsed float64, dispLo, dispHi int) [][]int {
+	sub := make([][]int, subH)
+	for i := range sub {
+		sub[i] = make([]int, gw)
+		for j := range sub[i] {
+			sub[i][j] = -1
+		}
+	}
+	if gw < 1 || subH < 2 {
+		return sub
+	}
+	keybedSub, landSub := subH-1, subH-2
+	off := 0
+	if rangeW := dispHi - dispLo + 1; rangeW < gw {
+		off = (gw - rangeW) / 2 // center the keybed; one column per semitone
+	}
+	lane := func(p int) int {
+		c := off + (p - dispLo)
+		if c < 0 {
+			c = 0
+		}
+		if c > gw-1 {
+			c = gw - 1
+		}
+		return c
+	}
+	for c := 0; c < gw; c++ { // the keybed along the bottom (inverse of lane)
+		p := dispLo + (c - off)
+		if p < dispLo || p > dispHi {
+			continue
+		}
+		if id := 14; isBlackKey(p) {
+			sub[keybedSub][c] = 15
+		} else {
+			sub[keybedSub][c] = id
+		}
+	}
+	const lookahead = 2.4
+	fallSpeed := float64(landSub) / lookahead // sub-rows per second
+	for _, n := range tl {
+		startDt, endDt := n.at-elapsed, n.at+n.dur-elapsed
+		if endDt < -0.05 || startDt > lookahead {
+			continue
+		}
+		bottom := landSub - int(startDt*fallSpeed+0.5) // onset (leads, lowest)
+		top := landSub - int(endDt*fallSpeed+0.5)      // tail (highest)
+		if bottom > landSub {
+			bottom = landSub
+		}
+		if top < 0 {
+			top = 0
+		}
+		cls, c := ((n.pitch%12)+12)%12, lane(n.pitch)
+		playing := startDt <= 0.05 && endDt > -0.02
+		for r := top; r <= bottom; r++ {
+			id := cls
+			if r == landSub && playing {
+				id = 13 // flash on the struck key
+			}
+			sub[r][c] = id
+		}
+	}
+	return sub
+}
+
+// musicViz caches the live song's note timeline (rebuilt only when the song
+// changes) so the main-menu background can paint the piano-roll into the 3D
+// framebuffer every frame without re-parsing the MML.
+type musicViz struct {
+	lastStart      time.Time
+	tl             []fallNote
+	dispLo, dispHi int
+	have           bool
+}
+
+// fill paints the falling-note visualizer across the whole framebuffer as the
+// menu's background layer, at far depth so a character rasterized afterward wins
+// the z-test (its empty space leaves the viz showing - "black is transparent").
+func (m *musicViz) fill(r *Renderer) {
+	if song, start, ok := nowPlayingSong(); ok && !start.Equal(m.lastStart) {
+		m.lastStart, m.tl, m.have = start, songTimeline(song), true
+		minP, maxP := 127, 0
+		for _, n := range m.tl {
+			if n.pitch < minP {
+				minP = n.pitch
+			}
+			if n.pitch > maxP {
+				maxP = n.pitch
+			}
+		}
+		if maxP <= minP {
+			minP, maxP = 36, 84
+		}
+		m.dispLo, m.dispHi = musicVizWindow(r.W, minP, maxP)
+	}
+	if !m.have {
+		r.clearBlack()
+		return
+	}
+	sub := musicVizGrid(r.W, r.H, m.tl, time.Since(m.lastStart).Seconds(), m.dispLo, m.dispHi)
+	for y := 0; y < r.H; y++ {
+		for x := 0; x < r.W; x++ {
+			var cr, cg, cb byte
+			if id := sub[y][x]; id >= 0 {
+				cr, cg, cb = idRGB(id)
+			}
+			o := (y*r.W + x) * 3
+			r.fb[o], r.fb[o+1], r.fb[o+2] = cr, cg, cb
+			r.zb[y*r.W+x] = 0 // far: a character drawn next overwrites it
+		}
+	}
+}
+
+// rainbowColor cycles a saturated hue (t in turns) for the menu character's skin.
+func rainbowColor(t float64) [3]float64 { return hsv2rgb(t-math.Floor(t), 1, 1) }
+
+// randomMenuBody picks a random playable character to show spinning on the menu.
+func randomMenuBody() int {
+	e := vehicleEntries()
+	return e[rand.Intn(len(e))].body
+}
+
 // runSongTest is the SOUND TEST: a playground for the procedural song generator.
 // Pick a KEY / TEMPO / SCALE and GENERATE that song, or SHUFFLE a random one; the
 // background music loop plays the request immediately. Forces sound on for the
@@ -1753,24 +1929,6 @@ func runSongTest(w *bufio.Writer, cols, rows int, ip *input) {
 		}
 	}
 	lastNowDesc := ""
-	// laneOff centers the song's pitch range in the grid - ONE COLUMN PER SEMITONE
-	// (a true piano grid), not the whole range stretched across the full width.
-	laneOff := func() int {
-		if rangeW := dispHi - dispLo + 1; rangeW < gw {
-			return (gw - rangeW) / 2
-		}
-		return 0
-	}
-	lane := func(p int) int {
-		c := gridLeft + laneOff() + (p - dispLo)
-		if c < gridLeft {
-			c = gridLeft
-		}
-		if c > gridRight {
-			c = gridRight
-		}
-		return c
-	}
 	drawParams := func() {
 		fmt.Fprintf(w, "\x1b[2;2H\x1b[1;96mSONG GENERATOR\x1b[0m")
 		txt := []string{
@@ -1815,22 +1973,7 @@ func runSongTest(w *bufio.Writer, cols, rows int, ip *input) {
 			if maxP <= minP {
 				minP, maxP = 36, 84
 			}
-			// Keybed window: fill the grid width with keys (one column per semitone),
-			// capped at a full 88-key piano, centered on the song so the music sits
-			// in the middle. Always wide enough to contain the song.
-			keys := gw
-			if keys > 88 {
-				keys = 88
-			}
-			if keys < maxP-minP+1 {
-				keys = maxP - minP + 1
-			}
-			center := (minP + maxP) / 2
-			dispLo = center - keys/2
-			if dispLo < 0 {
-				dispLo = 0
-			}
-			dispHi = dispLo + keys - 1
+			dispLo, dispHi = musicVizWindow(gw, minP, maxP)
 		}
 		// now-playing caption: repaint only when it changes (no per-frame flicker).
 		if nowDesc != lastNowDesc {
@@ -1841,69 +1984,14 @@ func runSongTest(w *bufio.Writer, cols, rows int, ip *input) {
 			}
 			fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;95m%-*s\x1b[0m", gridTop-1, gridLeft, gw, cap)
 		}
-		// Build this frame's SUB-cell grid at 2x vertical resolution (two half-block
-		// sub-rows per terminal row) so fast notes don't collapse onto one row.
-		// -1 blank, 0..11 pitch, 12 now-line, 13 flash.
+		// Build this frame's sub-cell grid (2 sub-rows per terminal row) via the shared
+		// helper, then compose terminal cells from sub-row pairs - emit only what changed.
 		subH := 2 * gh
-		keybedSub := subH - 1 // bottom sub-row = the virtual piano keybed
-		landSub := subH - 2   // notes land here, one half-block above the keys
-		if landSub < 0 {
-			landSub = 0
+		elapsed := 0.0
+		if ok {
+			elapsed = time.Since(start).Seconds()
 		}
-		sub := make([][]int, subH)
-		for i := range sub {
-			sub[i] = make([]int, gw)
-			for j := range sub[i] {
-				sub[i][j] = -1
-			}
-		}
-		// Virtual keybed along the bottom: one column per semitone (inverse of
-		// lane) - naturals white, sharps black, blank margins outside the range.
-		off := laneOff()
-		for c := 0; c < gw; c++ {
-			p := dispLo + (c - off) // inverse of lane()
-			if p < dispLo || p > dispHi {
-				continue // outside the keybed window: leave blank
-			}
-			id := 14
-			if isBlackKey(p) {
-				id = 15
-			}
-			sub[keybedSub][c] = id
-		}
-		if ok && len(timeline) > 0 {
-			elapsed := time.Since(start).Seconds()
-			const lookahead = 2.4
-			fallSpeed := float64(landSub) / lookahead // sub-rows per second
-			for _, n := range timeline {
-				startDt, endDt := n.at-elapsed, n.at+n.dur-elapsed
-				if endDt < -0.05 || startDt > lookahead {
-					continue
-				}
-				bottom := landSub - int(startDt*fallSpeed+0.5) // onset (leads, lowest)
-				top := landSub - int(endDt*fallSpeed+0.5)      // tail (highest)
-				if bottom > landSub {
-					bottom = landSub
-				}
-				if top < 0 {
-					top = 0
-				}
-				cls := ((n.pitch % 12) + 12) % 12
-				c := lane(n.pitch) - gridLeft
-				if c < 0 || c >= gw {
-					continue
-				}
-				playing := startDt <= 0.05 && endDt > -0.02 // sounding right now
-				for r := top; r <= bottom; r++ {
-					id := cls
-					if r == landSub && playing {
-						id = 13 // flash sits on top of the struck key
-					}
-					sub[r][c] = id
-				}
-			}
-		}
-		// Compose terminal cells from sub-row pairs; emit only what changed.
+		sub := musicVizGrid(gw, subH, timeline, elapsed, dispLo, dispHi)
 		var b strings.Builder
 		for r := 0; r < gh; r++ {
 			for c := 0; c < gw; c++ {
@@ -2368,7 +2456,7 @@ func orDash(s string) string {
 }
 
 // runPlayerCard shows the caller's cumulative record (local stats; see
-// SCORING.md): a styled card grouped by record / combat / career / bests /
+// docs/SCORING.md): a styled card grouped by record / combat / career / bests /
 // favorites, then a per-mode table. Zero-valued stats are omitted so the card
 // only shows what the player has actually done.
 func runPlayerCard(w *bufio.Writer, cols, rows int, ip *input, dropfile string) {
@@ -2944,11 +3032,9 @@ func drawDemoScoreboard(w *bufio.Writer, tanks []gm.TankSnap, m gm.MatchSnap, ma
 		if name == "" {
 			name = "BOT"
 		}
-		ac := accentColor(t.Color) // accent swatch; the name carries the primary color
 		fmt.Fprintf(w, "\x1b[%d;2H\x1b[0;90m%d.\x1b[0m", row, i+1)
-		fmt.Fprintf(w, "\x1b[%d;4H%s\xdb\xdb\x1b[0m", row,
-			fgEsc(clampB(ac[0]*255), clampB(ac[1]*255), clampB(ac[2]*255)))
-		fmt.Fprintf(w, "\x1b[%d;7H\x1b[%sm%-8.8s\x1b[0m", row, tankSGR(t.Color), name)
+		fmt.Fprintf(w, "\x1b[%d;4H%s", row, charSwatch(t.Body, t.Color))
+		fmt.Fprintf(w, "\x1b[%d;8H\x1b[%sm%-8.8s\x1b[0m", row, tankSGR(t.Color), name)
 		if koth { // hold-points (operative) then small frags
 			fmt.Fprintf(w, "\x1b[%d;16H\x1b[1;93m%2d\x1b[0;90mh\x1b[0;37m %d-%-2d\x1b[0m", row, t.HoldScore, t.Kills, t.Deaths)
 		} else {
@@ -3096,6 +3182,14 @@ func runDemo(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 	last := start
 	worldStart := start
 	worldCap := capFor(world.Match().Mode)
+	// Demo runtime is tied to the music, not a flat clock: run at least demoMinRun,
+	// then hand back to the menu the moment the current song ends, so the menu's
+	// visualizer re-appears freshly synced to a brand-new song. demoMaxRun caps it in
+	// case no song boundary ever arrives (e.g. sound is off).
+	const demoMinRun = 90 * time.Second
+	const demoMaxRun = 3 * time.Minute
+	var demoWatch time.Time // the song we're waiting to finish, locked in past the floor
+	demoWatching := false
 	budget := time.Second / 20
 	pace := linkPace{budget: budget}
 	// Arena poll: chat + presence, off-loop so a slow dial can't hitch the render.
@@ -3120,6 +3214,21 @@ func runDemo(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 		case <-ip.runes:
 			return false
 		default:
+		}
+		switch {
+		case time.Since(start) >= demoMaxRun:
+			return false // hard cap (no song boundary arrived, e.g. sound off)
+		case time.Since(start) >= demoMinRun:
+			// Past the floor: exit on the next song boundary so the menu's visualizer
+			// comes back synced to a fresh song. false = the keypress path, so the
+			// caller resets the short idle delay and relaunches the demo after ~30s.
+			if _, songStart, ok := nowPlayingSong(); ok {
+				if !demoWatching {
+					demoWatch, demoWatching = songStart, true // lock onto what's playing now
+				} else if !songStart.Equal(demoWatch) {
+					return false // that song finished and a new one began
+				}
+			}
 		}
 		if haveArena && !pollBusy && time.Since(lastPoll) >= 5*time.Second {
 			pollBusy = true
@@ -3417,7 +3526,31 @@ func runMenu(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 	descCol := artCol0 + 80 - descW
 	blurbRow := menuTop + len(items) + 1
 	shimmerPhase := 0 // animation clock for the single-player mode selector
-	drawOptions := func() {
+	// Layered animated backdrop (replaces the static .bin): layer 1 = the music
+	// visualizer painted into the 3D framebuffer (when sound is on), layer 2 = a
+	// rotating rainbow-skinned character composited on top (its empty space lets the
+	// viz show through - "black is transparent" via the z-buffer), layer 3 = the menu
+	// items riding over it through a skip-mask so the text never flickers as the
+	// backdrop animates. Mirrors the lobby's spinning-map-under-overlay pattern.
+	viz := &musicViz{}
+	menuMask := make([]bool, rows*cols)
+	var panelPrev []byte
+	menuStart, lastFrame := time.Now(), time.Now()
+	angle, hue, rerollT := 0.0, 0.0, 20.0
+	curBody := randomMenuBody()
+	markCell := func(row, col, vis int) {
+		for i := 0; i < vis; i++ {
+			if c := col + i; row >= 1 && row <= rows && c >= 1 && c <= cols {
+				menuMask[(row-1)*cols+(c-1)] = true
+			}
+		}
+	}
+	drawOverlay := func() {
+		// Layer 4 placeholder: a plain title until the real font-stencil graphic.
+		title := "S P E K D E R"
+		tcol := (cols-len(title)-2)/2 + 1
+		fmt.Fprintf(w, "\x1b[2;%dH\x1b[1;96;40m %s \x1b[0m", tcol, title)
+		markCell(2, tcol, len(title)+2)
 		for i, it := range items {
 			label := it.name
 			if !it.ready {
@@ -3437,8 +3570,9 @@ func runMenu(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 				style = "\x1b[0;37;40m" // single-player: white on black
 			}
 			fmt.Fprintf(w, "\x1b[%d;%dH%s %-*s\x1b[0m", menuTop+i, menuCol, style, menuW-1, label)
+			markCell(menuTop+i, menuCol, menuW)
 		}
-		// Blurb (2 lines) + note, right-aligned on a black strip so they read over art.
+		// Blurb (2 lines) + note on a black strip so they read over the backdrop.
 		blurb := items[sel].blurb
 		if items[sel].single { // show + cycle the chosen single-player mode
 			name, desc := spCarousel(spMode, campBlurb)
@@ -3451,6 +3585,7 @@ func runMenu(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 				line = bl[j]
 			}
 			fmt.Fprintf(w, "\x1b[%d;%dH\x1b[0;37;40m%-*s\x1b[0m", blurbRow+j, descCol, descW, line)
+			markCell(blurbRow+j, descCol, descW)
 		}
 		if items[sel].single { // recolor the mode selector over the plain line
 			spName, _ := spCarousel(spMode, campBlurb)
@@ -3461,14 +3596,36 @@ func runMenu(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 			noteTxt = note
 		}
 		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;31;40m%-*s\x1b[0m", blurbRow+3, descCol, descW, noteTxt)
-		drawChat(w, cols, rows, chat, nil)
+		markCell(blurbRow+3, descCol, descW)
+		drawChat(w, cols, rows, chat, markCell)
+	}
+	// renderScene composites the backdrop into the framebuffer and emits it. full =
+	// a fresh frame (full blit + the overlay repainted, rebuilding the mask); else a
+	// masked delta blit that animates the backdrop without touching the menu text.
+	renderScene := func(full bool) {
+		if soundOn.Load() {
+			viz.fill(rnd) // layer 1: the piano-roll, or black if nothing is playing
+		} else {
+			rnd.clearBlack()
+		}
+		clock := time.Since(menuStart).Seconds()
+		tank := gm.TankSnap{Body: curBody, Color: rainbowColor(hue)}
+		tris := appendTank(nil, &tank, clock) // layer 2: the rainbow character
+		rnd.noFog = true
+		rnd.drawTris(fitCam(tris, rnd.W, rnd.H, angle, 1.0/0.7), tris, clock)
+		if full {
+			panelPrev = blitPanel(w, rnd, nil, 1, 1)
+			for i := range menuMask {
+				menuMask[i] = false
+			}
+			drawOverlay()
+		} else {
+			panelPrev = blitPanelMasked(w, rnd, panelPrev, 1, 1, menuMask)
+		}
 		w.Flush()
 	}
-	draw := func() { // full repaint: backdrop + menu (used on entry / after submenus)
-		w.WriteString("\x1b[2J\x1b[H")
-		drawBin(w, splashBin, artCol0, 0)
-		drawOptions()
-	}
+	draw := func() { renderScene(true) }        // full repaint (entry / after submenus)
+	drawOptions := func() { renderScene(true) } // overlay changed -> full repaint + remask
 	mySession := presenceSession(dropfile)
 	followParty := false // set when a party-mate is in the arena and we should follow
 	refreshOnline := func() {
@@ -3495,12 +3652,13 @@ func runMenu(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 		items[onlineIdx].blurb = blurb
 		drawOptions()
 	}
+	w.WriteString("\x1b[2J\x1b[H") // one clear; the composite blit owns the screen after
 	draw()
 	tick := time.NewTicker(5 * time.Second)
 	defer tick.Stop()
 	chatTick := time.NewTicker(1 * time.Second)
 	defer chatTick.Stop()
-	animTick := time.NewTicker(120 * time.Millisecond) // mode-selector shimmer
+	animTick := time.NewTicker(66 * time.Millisecond) // ~15fps backdrop (viz + spinning character)
 	defer animTick.Stop()
 	resizeTick := time.NewTicker(1500 * time.Millisecond) // live terminal-resize polling
 	defer resizeTick.Stop()
@@ -3542,9 +3700,21 @@ func runMenu(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 				return menuChoice{relayout: true} // re-enter the menu at the new size
 			}
 		case <-animTick.C:
-			// Animate just the selector line (a few dozen bytes); skip while the
-			// transcript box overlays the center of the screen.
-			if items[sel].single && !chat.transcript {
+			// Animate the backdrop: spin the character, cycle its rainbow skin, and
+			// re-roll to a new character every 20s. The transcript box freezes it (a
+			// full-screen modal that isn't mask-aware).
+			if chat.transcript {
+				continue
+			}
+			dt := time.Since(lastFrame).Seconds()
+			lastFrame = time.Now()
+			angle += 0.7 * dt
+			hue += 0.06 * dt // a slow rainbow (~17s per full cycle)
+			if rerollT -= dt; rerollT <= 0 {
+				curBody, rerollT = randomMenuBody(), 20.0
+			}
+			renderScene(false)
+			if items[sel].single { // keep the mode-selector gleam moving (over the masked backdrop)
 				shimmerPhase++
 				spName, _ := spCarousel(spMode, campBlurb)
 				drawSPMode(w, descCol, blurbRow, spName, spMode, shimmerPhase)
@@ -5527,7 +5697,7 @@ func drawLobbyOverlay(w *bufio.Writer, cols, rows int, v viewState, selIdx, comm
 // an achievement line (new personal best / placed #N / deepest wave), the score
 // earned, and a compact points breakdown. Nothing shows for matches that weren't
 // recorded (res == nil, e.g. a playtest).
-func drawResultBanner(w *bufio.Writer, cols, rows int, res *matchResult, rank scoreRank) {
+func drawResultBanner(w *bufio.Writer, cols, rows int, res *matchResult, rank scoreRank, mark func(row, col, vis int)) {
 	if res == nil {
 		return
 	}
@@ -5535,7 +5705,9 @@ func drawResultBanner(w *bufio.Writer, cols, rows int, res *matchResult, rank sc
 		if s == "" {
 			return
 		}
-		fmt.Fprintf(w, "\x1b[%d;%dH%s%s\x1b[0m", row, (cols-len(s))/2+1, sgr, s)
+		col := (cols-len(s))/2 + 1
+		fmt.Fprintf(w, "\x1b[%d;%dH%s%s\x1b[0m", row, col, sgr, s)
+		mark(row, col, len(s))
 	}
 	// Achievement line (only the strongest one).
 	switch {
@@ -5550,7 +5722,51 @@ func drawResultBanner(w *bufio.Writer, cols, rows int, res *matchResult, rank sc
 	center(rows-2, "\x1b[0;90m", scoreBreakdown(*res))
 }
 
-func drawScoreboard(w *bufio.Writer, cols, rows int, v viewState, res *matchResult, rank scoreRank, forgiving bool) {
+// winnerTank picks the model to spotlight on the end screen: the FFA winner, the
+// top-fragger on the winning team, or - in solo objective modes (Flag Run /
+// Survival) and as a fallback - the caller's own tank.
+func winnerTank(v viewState) gm.TankSnap {
+	if v.winnerID >= 0 {
+		for _, t := range v.tanks {
+			if t.ID == v.winnerID {
+				return t
+			}
+		}
+	}
+	if v.winnerTeam >= 0 {
+		best, ok := gm.TankSnap{}, false
+		for _, t := range v.tanks {
+			if t.Team == v.winnerTeam && (!ok || t.Kills > best.Kills) {
+				best, ok = t, true
+			}
+		}
+		if ok {
+			return best
+		}
+	}
+	return v.self
+}
+
+// renderWinnerCircle replaces the frozen arena behind the end-of-match scoreboard
+// with the winner's character model, slowly spinning - players recognize the
+// dominant skin even when they don't know the name. Composited like the menu: the
+// model on black, scoreboard text rides over it.
+func renderWinnerCircle(rnd *Renderer, v viewState, t float64) {
+	rnd.clearBlack()
+	wt := winnerTank(v)
+	tank := gm.TankSnap{Body: wt.Body, Color: wt.Color}
+	tris := appendTank(nil, &tank, t)
+	rnd.noFog = true
+	// Bigger than the menu character (the transparent overlay no longer covers it).
+	rnd.drawTris(fitCam(tris, rnd.W, rnd.H, t*0.6, 1.0/0.82), tris, t)
+}
+
+// drawScoreboard is the end-of-match overlay riding over the winner's-circle
+// model (renderWinnerCircle). It is a TRANSPARENT overlay: it draws only compact,
+// offset runs of text - title up top, a winner callout, a short standings list in
+// the lower third - and reports every cell it touches through mark, so the spinning
+// model is blitted everywhere the text isn't. No full-width slabs over the model.
+func drawScoreboard(w *bufio.Writer, cols, rows int, v viewState, res *matchResult, rank scoreRank, forgiving bool, mark func(row, col, vis int)) {
 	rs := gm.RulesetFor(v.mode)
 	won := v.winnerID == v.me
 	title, fg := "GAME OVER", 4 // CGA red
@@ -5570,54 +5786,73 @@ func drawScoreboard(w *bufio.Writer, cols, rows int, v viewState, res *matchResu
 	} else if v.mode == gm.ModeFlagRun {
 		title = "TIME UP"
 	}
+	// The title is the transparent TDF font, so the model already shows between its
+	// strokes - it's redrawn opaque each frame and isn't masked (the model fills the
+	// gaps for free).
 	if f, ok := tdf.Fit(title, cols-2, "union", "untx", "block"); ok {
 		w.WriteString(f.RenderCentered(title, cols, 1, tdf.RenderOpts{Recolor: true, FG: fg, Transparent: true}))
 	}
-	drawResultBanner(w, cols, rows, res, rank)
+	drawResultBanner(w, cols, rows, res, rank, mark)
+	// centered draws a single masked run of text at row, returning nothing.
+	centered := func(row int, sgr, s string) {
+		col := (cols-len(s))/2 + 1
+		fmt.Fprintf(w, "\x1b[%d;%dH%s%s\x1b[0m", row, col, sgr, s)
+		mark(row, col, len(s))
+	}
+	// Winner's circle callout: name the champion + their character, gold under the title.
+	if v.winnerID >= 0 || v.winnerTeam >= 0 {
+		wt := winnerTank(v)
+		wname := wt.Name
+		if wname == "" {
+			wname = "BOT"
+		}
+		crown := fmt.Sprintf(" WINNER  %s  [%s] ", wname, strings.ToUpper(bodyShort(wt.Body)))
+		if len(crown) <= cols {
+			centered(7, "\x1b[1;30;43m", crown)
+		}
+	}
 	if v.mode == gm.ModeFlagRun {
-		line := fmt.Sprintf("collected %d of %d flags", v.flagsTotal-v.flagsLeft, v.flagsTotal)
-		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;97m%s\x1b[0m", rows/2, (cols-len(line))/2+1, line)
+		centered(rows/2, "\x1b[1;97;40m", fmt.Sprintf(" collected %d of %d flags ", v.flagsTotal-v.flagsLeft, v.flagsTotal))
 		return
 	}
 	if rs.Teams == 2 {
 		red := fmt.Sprintf("RED %d", v.teamScore[0])
 		blu := fmt.Sprintf("BLU %d", v.teamScore[1])
-		plain := red + "   -   " + blu
-		colStart := (cols-len(plain))/2 + 1
-		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;91m%s\x1b[0;37m   -   \x1b[1;94m%s\x1b[0m",
-			rows/2, colStart, red, blu)
+		plain := " " + red + "   -   " + blu + " "
+		col := (cols-len(plain))/2 + 1
+		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[40m \x1b[1;91;40m%s\x1b[0;37;40m   -   \x1b[1;94;40m%s\x1b[40m \x1b[0m",
+			rows/2, col, red, blu)
+		mark(rows/2, col, len(plain))
 		return
 	}
-	listTop := rows / 2
+	// FFA standings: a short list pushed into the lower third so the model's head and
+	// torso stay clear above it; compact rows (no padding slab), each one masked.
+	listTop := rows/2 + 2
 	if v.mode == gm.ModeSurvival {
-		line := fmt.Sprintf("you survived to WAVE %d", v.wave)
-		fmt.Fprintf(w, "\x1b[%d;%dH\x1b[1;97m%s\x1b[0m", rows/2-1, (cols-len(line))/2+1, line)
-		listTop = rows/2 + 1
+		centered(rows/2, "\x1b[1;97;40m", fmt.Sprintf(" you survived to WAVE %d ", v.wave))
+		listTop = rows/2 + 2
 	}
 	ranked := append([]gm.TankSnap(nil), v.tanks...)
 	sort.Slice(ranked, func(a, b int) bool { return ranked[a].Kills > ranked[b].Kills })
 	for i, t := range ranked {
-		if i >= 8 {
+		if i >= 6 { // top 6 keeps the winner model visible behind the list
 			break
 		}
 		name := t.Name
 		if name == "" {
 			name = "BOT"
 		}
-		if len(name) > 12 {
-			name = name[:12]
+		if len(name) > 10 {
+			name = name[:10]
 		}
-		style := "\x1b[0;37m"
+		style := "\x1b[1;37;40m"
 		if t.ID == v.me {
-			style = "\x1b[1;97m" // your row is bright
+			style = "\x1b[1;93;40m" // your row pops in yellow
 		}
-		body := fmt.Sprintf("%-12s  %2d frags   %2d deaths", name, t.Kills, t.Deaths)
-		// color swatch in the tank's color, then the body
-		col := (cols-(len(body)+3))/2 + 1
-		fmt.Fprintf(w, "\x1b[%d;%dH%s\xdb\xdb\x1b[0m %s%s\x1b[0m",
-			listTop+i, col,
-			fgEsc(clampB(t.Color[0]*255), clampB(t.Color[1]*255), clampB(t.Color[2]*255)),
-			style, body)
+		txt := fmt.Sprintf(" %-10s %2dK %2dD ", name, t.Kills, t.Deaths)
+		col := (cols-(3+len(txt)))/2 + 1
+		fmt.Fprintf(w, "\x1b[%d;%dH%s%s%s\x1b[0m", listTop+i, col, charSwatch(t.Body, t.Color), style, txt)
+		mark(listTop+i, col, 3+len(txt))
 	}
 }
 
@@ -5974,6 +6209,25 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 	frameBudget := time.Second / time.Duration(targetFPS)
 	pace := linkPace{budget: frameBudget}
 	var prev []byte
+	// Winner's circle (PhaseEnded): the champion's model spins as the background
+	// while the scoreboard rides over it through a skip-mask, so the transparent
+	// overlay never fights the animation (no flicker, character shows through the
+	// gaps). endMask is rebuilt by drawScoreboard each frame; endPrev is its own
+	// delta buffer (the masked blit, not the match's encode()).
+	endMask := make([]bool, rows*cols)
+	var endPrev []byte
+	endInit := false
+	markEnd := func(row, col, vis int) {
+		for k := 0; k < vis; k++ {
+			c := col + k
+			if row < 1 || row > rows || c < 1 || c > cols {
+				continue
+			}
+			if idx := (row-1)*cols + (c - 1); idx >= 0 && idx < len(endMask) {
+				endMask[idx] = true
+			}
+		}
+	}
 	lastSig := ""
 	start := time.Now()
 	last := start
@@ -6024,6 +6278,8 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 	lastSelfKills := -1      // local kills last frame: a rise = we scored a frag (SFX)
 	lastSelfDeadSfx := false // local dead state last frame: false->true = death stinger
 	lastFlagsLeft := -1      // flags remaining last frame: a drop = a flag was collected (pickup jingle)
+	lastSelfPickups := -1    // local pickups last frame: a rise = we grabbed a power-up (SFX)
+	lastBounced := false     // local trampoline-launch flag last frame: false->true = boing
 	var entDead []bool       // per-entity Dead state last frame: a false->true = a breakable just shattered
 	lastCount := 0           // last countdown number beeped (0 = not counting down)
 	matchStart := time.Now() // reset when a match goes Active; used for stats duration
@@ -6057,6 +6313,8 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 			curMapSig = "?"                   // rebuild the arena geometry buffer
 			lv.sig = ""                       // repaint the lobby preview
 			lv.mask = make([]bool, rows*cols) // mask tracks the new grid
+			endMask = make([]bool, rows*cols) // winner's-circle mask tracks it too
+			endPrev, endInit = nil, false
 		}
 		if now.Sub(lastPresence) >= 10*time.Second {
 			updatePresence(dropfile, presenceState, presenceDetail)
@@ -6439,6 +6697,12 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 			if lastFlagsLeft >= 0 && v.flagsLeft < lastFlagsLeft {
 				sfxFlag(w) // a flag was just collected (by you or an ally): cheerful jingle
 			}
+			if lastSelfPickups >= 0 && p.Pickups > lastSelfPickups {
+				sfxPickup(w) // grabbed a power-up / ammo / repair
+			}
+			if p.Bounced && !lastBounced {
+				sfxBounce(w) // launched off a trampoline
+			}
 			for i := range v.ents { // a destructible just shattered (alive -> dead)
 				if i < len(entDead) && !entDead[i] && v.ents[i].Dead {
 					sfxBreak(w)
@@ -6454,6 +6718,7 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 			entDead[i] = v.ents[i].Dead
 		}
 		lastFlagsLeft = v.flagsLeft
+		lastSelfPickups, lastBounced = p.Pickups, p.Bounced
 		lastSelfHP, lastSelfKills, lastSelfDeadSfx = p.HP, p.Kills, p.Dead
 		if oneShot && oneShotAt.IsZero() {
 			// The level is decided when the match ends, or the moment the player
@@ -6633,11 +6898,26 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 		case p.Rapid:
 			reticle = [3]byte{230, 170, 40}
 		}
-		rnd.renderWorld(cam, now.Sub(start).Seconds(), rtanks, rshots, rflags, rpickups, v.gmap.Entities, rents, v.zones, renderMe, flash, topdown, v.phase == gm.PhaseCountdown, reticle, v.viewTurret)
-		frame, cur := encode(rnd, cols, rows3d, prev)
-		prev = cur
+		if v.phase == gm.PhaseEnded {
+			renderWinnerCircle(rnd, v, now.Sub(start).Seconds()) // winner's circle: the champion's model, spinning
+		} else {
+			rnd.renderWorld(cam, now.Sub(start).Seconds(), rtanks, rshots, rflags, rpickups, v.gmap.Entities, rents, v.zones, renderMe, flash, topdown, v.phase == gm.PhaseCountdown, reticle, v.viewTurret)
+		}
 		wstart := time.Now()
-		w.Write(frame)
+		if v.phase == gm.PhaseEnded {
+			// Blit the spinning model but SKIP the scoreboard's glyph cells (endMask,
+			// rebuilt by drawScoreboard below), so the overlay never fights the
+			// animation - the character shows through everywhere there's no text.
+			if !endInit {
+				w.WriteString("\x1b[2J") // wipe the match HUD/world once on entry
+				endInit = true
+			}
+			endPrev = blitPanelMasked(w, rnd, endPrev, 1, 1, endMask)
+		} else {
+			frame, cur := encode(rnd, cols, rows3d, prev)
+			prev = cur
+			w.Write(frame)
+		}
 
 		// HUD overlays (drawn over the top-left sky; no bottom bar anymore)
 		frames++
@@ -6663,7 +6943,10 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 		case gm.PhaseCountdown:
 			drawCountdown(w, cols, rows, v)
 		case gm.PhaseEnded:
-			drawScoreboard(w, cols, rows, v, lastResult, resultRank, forgiving)
+			for i := range endMask {
+				endMask[i] = false
+			}
+			drawScoreboard(w, cols, rows, v, lastResult, resultRank, forgiving, markEnd)
 		case gm.PhaseLobby:
 			drawLobby(w, cols, rows, v, voteMode, humansOnlyVote)
 		default:

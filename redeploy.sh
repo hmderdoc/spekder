@@ -19,8 +19,8 @@ LDFLAGS="-X main.version=${VERSION}"
 echo "==> version ${VERSION}"
 
 echo "==> build door"
-go build -buildvcs=false -ldflags "$LDFLAGS" -o spekder .
-go build -buildvcs=false -ldflags "$LDFLAGS" -o door .
+go build -buildvcs=false -ldflags "$LDFLAGS" -o spekder ./cmd/spekder
+go build -buildvcs=false -ldflags "$LDFLAGS" -o door ./cmd/spekder
 
 echo "==> build server"
 go build -buildvcs=false -ldflags "$LDFLAGS" -o spekder-server ./cmd/server

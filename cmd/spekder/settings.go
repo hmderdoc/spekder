@@ -11,7 +11,7 @@ import (
 
 // Per-BBS-user settings (offline difficulty + aim assist). Keyed by a sanitized
 // DOOR32 handle so each caller's preferences are their own; stored next to the
-// binary under data/. See DIFFICULTY.md.
+// binary under data/. See docs/DIFFICULTY.md.
 
 type userSettings struct {
 	difficulty   gm.Difficulty

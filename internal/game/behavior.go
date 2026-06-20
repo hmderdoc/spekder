@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// Event-driven behaviors (see EVENTS.md). A map author wires Signals -> Conditions
+// Event-driven behaviors (see docs/EVENTS.md). A map author wires Signals -> Conditions
 // -> Actions on entities and on a map-level "logic" director, backed by a per-match
 // integer blackboard (Vars). The engine is server-authoritative and runs in the
 // normal tick; effects (spawns, stat changes, messages) replicate via the snapshot.

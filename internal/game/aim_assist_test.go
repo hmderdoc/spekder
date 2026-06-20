@@ -122,20 +122,63 @@ func TestAimLockHoldsThenBreaksOnSustainedTurn(t *testing.T) {
 	}
 }
 
-// TestStandardAutoAimNoStickyLock: at the harder tiers the assist snaps onto a
-// target you're aiming near but does NOT form a tracking lock (you stay free).
-func TestStandardAutoAimNoStickyLock(t *testing.T) {
+// TestStandardAutoAimQuickRelease: the harder tiers DO lock + snap (the lock's
+// hold is what keeps you on a foe to fire), and the lock holds while you're still,
+// but a BRIEF turn - much shorter than the easy tier's sticky break - releases it,
+// so you can pull off responsively instead of being fought.
+func TestStandardAutoAimQuickRelease(t *testing.T) {
 	w, me, tgt := twoPlayerOpen(t)
 	w.SetDifficulty(DiffHard)
 	w.SetAimAssist(true)
 	w.Tanks[tgt].Pos, w.Tanks[tgt].cloakT = V3{X: 1, Z: 10}, 0
 	want := math.Atan2(1, 10)
-	w.aimAssistStep(me, true, false, 1.0/30)
-	if w.Tanks[me].lockKind != 0 {
-		t.Fatal("harder tiers should not form a sticky lock")
+	const dt = 1.0 / 30
+	w.aimAssistStep(me, true, false, dt) // sweep onto it: snap + lock
+	if w.Tanks[me].lockKind == 0 {
+		t.Fatal("harder tiers should lock (the hold is what keeps you on the target)")
 	}
 	if aim := w.Tanks[me].HullYaw + w.Tanks[me].TurretYaw; math.Abs(aim-want) > 1e-6 {
-		t.Fatalf("standard auto-aim should still snap onto the target (%v), got %v", want, aim)
+		t.Fatalf("should snap onto the target (%v), got %v", want, aim)
+	}
+	for i := 0; i < 10; i++ { // hold still ~0.33s: lock stays AND the grace expires
+		w.aimAssistStep(me, false, false, dt)
+	}
+	if w.Tanks[me].lockKind == 0 {
+		t.Fatal("holding still must keep the lock")
+	}
+	if assistQuickBreak >= assistLockBreak { // it must be a *quick* release vs. easy
+		t.Fatal("the harder-tier break must be shorter than the sticky easy break")
+	}
+	for i := 0; i < 6; i++ { // ~0.2s of deliberate turning on a mature lock, past the 0.12s break
+		w.aimAssistStep(me, true, false, dt)
+	}
+	if w.Tanks[me].lockKind != 0 {
+		t.Fatal("a brief turn on a mature lock should release it")
+	}
+}
+
+// TestStandardAutoAimSurvivesTurnMomentum: the residual turn from the sweep that
+// caught the target (the ~200ms input held-decay) must NOT break the catch - the
+// grace absorbs it and the reticle parks on the target rather than sliding past.
+func TestStandardAutoAimSurvivesTurnMomentum(t *testing.T) {
+	w, me, tgt := twoPlayerOpen(t)
+	w.SetDifficulty(DiffHard)
+	w.SetAimAssist(true)
+	w.Tanks[tgt].Pos, w.Tanks[tgt].cloakT = V3{X: 1, Z: 10}, 0
+	want := math.Atan2(1, 10)
+	const dt = 1.0 / 30
+	w.aimAssistStep(me, true, false, dt) // sweep onto it: catch
+	if w.Tanks[me].lockKind == 0 {
+		t.Fatal("should lock")
+	}
+	for i := 0; i < 6; i++ { // ~0.2s of residual "turning" (the held-decay momentum)
+		w.aimAssistStep(me, true, false, dt)
+	}
+	if w.Tanks[me].lockKind == 0 {
+		t.Fatal("turn momentum must NOT break the catch (grace should absorb it)")
+	}
+	if aim := w.Tanks[me].HullYaw + w.Tanks[me].TurretYaw; math.Abs(aim-want) > 1e-6 {
+		t.Fatalf("aim should park on the target (%v) through the momentum, got %v", want, aim)
 	}
 }
 

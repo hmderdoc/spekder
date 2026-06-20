@@ -1303,6 +1303,9 @@ func EncodeState(tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, shots []gm.Sh
 		if t.Slip {
 			fl2 |= 32
 		}
+		if t.Bounced {
+			fl2 |= 64
+		}
 		w.u8(fl2)
 		w.u8(c255(t.ShieldFrac)) // minotaur barrier charge 0..1 (HUD gauge + fade)
 		w.u16(t.Kills)
@@ -1439,6 +1442,7 @@ func DecodeState(p []byte) (tick uint32, m gm.MatchSnap, tanks []gm.TankSnap, sh
 		t.Bleeding = fl2&8 != 0
 		t.Healing = fl2&16 != 0
 		t.Slip = fl2&32 != 0
+		t.Bounced = fl2&64 != 0
 		t.ShieldFrac = float64(r.ru8()) / 255
 		t.Kills = r.ru16()
 		t.Deaths = r.ru16()

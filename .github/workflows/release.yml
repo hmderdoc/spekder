@@ -47,7 +47,7 @@ jobs:
           mkdir -p "$OUT"
 
           LDFLAGS="-s -w -X main.version=${VERSION}"
-          go build -trimpath -ldflags "$LDFLAGS" -o "$OUT/spekder$EXT" .
+          go build -trimpath -ldflags "$LDFLAGS" -o "$OUT/spekder$EXT" ./cmd/spekder
           go build -trimpath -ldflags "$LDFLAGS" -o "$OUT/spekder-server$EXT" ./cmd/server
 
           cp README.md spekder.ini.example "$OUT/"

@@ -5,16 +5,16 @@
 #
 # Read at launch, so edits apply to the next caller with no BBS restart.
 
-# Arena server to connect to. Remove/comment "server" for offline play.
-# If set but unreachable, the door waits briefly then falls back to local play.
-# server = spekder.example.com
-# port   = 7700
-# token  = CHANGE_ME      ; must match the arena server's -token
-
 # Source-board name shown on the GLOBAL high-score table next to your players, so
 # scores from different BBSes are distinguishable. Defaults to the DOOR32 BBS id.
 # When "server" is set, finished matches (single-player too) submit to the board.
 # bbsname = Cheese BBS
+
+# Arena server to connect to. Remove/comment "server" for offline play.
+# If set but unreachable, the door waits briefly then falls back to local play.
+server = futureland.today
+port   = 7700
+token  = c5749f8ef3daa48167f469e1580eb388
 
 # Pin OFFLINE single-player to one map by name or index (no rotation). Handy for
 # testing a specific layout; online play uses the arena server's map. The

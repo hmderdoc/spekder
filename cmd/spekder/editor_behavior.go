@@ -9,7 +9,7 @@ import (
 	gm "spekder/internal/game"
 )
 
-// In-editor authoring for the event system (EVENTS.md Phase 2). A set of small
+// In-editor authoring for the event system (docs/EVENTS.md Phase 2). A set of small
 // modal screens that build Behaviors (signal -> conditions -> actions) on an entity
 // or the map's director, so authors never touch JSON. Most fields are chosen from a
 // fixed vocabulary; only names/messages are typed.

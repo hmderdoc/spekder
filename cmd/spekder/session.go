@@ -48,6 +48,7 @@ type viewState struct {
 	events     []string           // author toast messages this tick (event system)
 	mapIdx     int                // active map index
 	wave       int                // Survival: current wave
+	maxLives   int                // effective lives for this match (0 = no lives system; gates the HUD's LIVES)
 	teamScore  [2]int             // CTF: captures per team
 	winnerTeam int                // CTF: winning team (-1 = tie/none)
 	payloadPct int                // ESCORT: payload progress 0-100
@@ -124,7 +125,7 @@ func (s *offlineSession) step(dt float64, in gm.Input) viewState {
 		camPos: self.Pos, camYaw: self.HullYaw + self.TurretYaw, viewTurret: self.TurretYaw, viewPitch: self.TurretPitch,
 		mode: m.Mode, phase: m.Phase, timer: m.Timer, winnerID: m.WinnerID,
 		flags: flags, pickups: pickups, ents: ents, zones: zones, flagsLeft: m.FlagsLeft, flagsTotal: m.FlagsTotal, mapIdx: m.MapIdx,
-		wave: m.Wave, teamScore: m.TeamScore, winnerTeam: m.WinnerTeam, payloadPct: m.PayloadPct, myTeam: self.Team,
+		wave: m.Wave, maxLives: s.w.MaxLives(), teamScore: m.TeamScore, winnerTeam: m.WinnerTeam, payloadPct: m.PayloadPct, myTeam: self.Team,
 		kills: m.Kills, events: m.Events, gmap: s.w.ActiveMap(),
 	}
 }
