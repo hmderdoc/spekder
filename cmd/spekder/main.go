@@ -610,6 +610,15 @@ type input struct {
 	winCols  int            // latest reported terminal size (guarded by mu); 0 = unknown
 	winRows  int
 	escMenu  bool // lone Esc emits mkEsc instead of quitting (set during matches)
+
+	// Mouse aim (opt-in; see OPTIONS -> MOUSE AIM). When on, SGR mouse reports
+	// drive the turret/elevation at the same rate the arrow keys do, and a click
+	// fires. mouseX/Y is the last reported cursor cell (absolute, 1-based) so the
+	// per-tick edge-push can keep turning while the cursor sits at a screen edge.
+	mouseAim  bool
+	mouseX    int
+	mouseY    int
+	mouseHave bool // a prior cursor position has been seen (so deltas are valid)
 }
 
 // setEscMenu switches what a lone Esc does: false (default) quits the door,
@@ -792,6 +801,7 @@ func (in *input) held(a int) bool {
 
 // snapshot translates the current held-key state into one tick of game input.
 func (in *input) snapshot() gm.Input {
+	in.mouseEdge() // keep turning while the cursor is parked at a screen edge
 	return gm.Input{
 		Throttle: in.held(aThrottle),
 		Reverse:  in.held(aReverse),
@@ -808,6 +818,105 @@ func (in *input) snapshot() gm.Input {
 		AimUp:    in.held(aAimUp),
 		AimDown:  in.held(aAimDown),
 		Vote:     -1, // overridden by the loop during the lobby
+	}
+}
+
+// mouseEdgeIdle bounds the "edge push": it stays live only while the session is
+// active, so a cursor flung to a screen edge and then abandoned doesn't spin the
+// turret forever. Any input (key or mouse byte) refreshes in.any and keeps it alive.
+const mouseEdgeIdle = 5 * time.Second
+
+// Terminal mouse reporting: any-event tracking (1003) so we see free-look motion,
+// with SGR coordinates (1006) so positions aren't capped at column/row 223.
+const (
+	mouseReportOn  = "\x1b[?1003;1006h"
+	mouseReportOff = "\x1b[?1003;1006l"
+)
+
+// setMouseAim toggles mouse aiming. The caller is responsible for emitting the
+// terminal enable/disable sequence (mouseReportOn / mouseReportOff); this just
+// gates the parser and clears any stale cursor position.
+func (in *input) setMouseAim(on bool) {
+	in.mu.Lock()
+	in.mouseAim = on
+	if !on {
+		in.mouseHave = false
+	}
+	in.mu.Unlock()
+}
+
+// onMouse decodes one SGR mouse report (params = "b;x;y" from ESC[<b;x;yM/m) into
+// aim + fire actions. Motion drives the turret/elevation by direction at the same
+// rate the arrow keys do (magnitude is rate-based, not 1:1); a left/right click
+// fires the main/secondary weapon. Edge-push (cursor parked at a screen edge) is
+// applied per-tick in mouseEdge, since a parked cursor reports no further motion.
+func (in *input) onMouse(params []byte, press bool) {
+	f := strings.Split(string(params), ";")
+	if len(f) != 3 {
+		return
+	}
+	b, e1 := strconv.Atoi(f[0])
+	x, e2 := strconv.Atoi(f[1])
+	y, e3 := strconv.Atoi(f[2])
+	if e1 != nil || e2 != nil || e3 != nil {
+		return
+	}
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	if !in.mouseAim {
+		return
+	}
+	motion := b&0x20 != 0 // xterm motion flag
+	wheel := b&0x40 != 0  // scroll-wheel buttons (ignored for aim/fire)
+	now := time.Now()
+	if in.mouseHave && motion {
+		if x > in.mouseX {
+			in.last[aTurretR] = now
+		} else if x < in.mouseX {
+			in.last[aTurretL] = now
+		}
+		if y > in.mouseY {
+			in.last[aAimDown] = now
+		} else if y < in.mouseY {
+			in.last[aAimUp] = now
+		}
+	}
+	in.mouseX, in.mouseY, in.mouseHave = x, y, true
+	if press && !motion && !wheel {
+		switch b & 0x03 {
+		case 0: // left button -> fire main gun
+			in.last[aFire] = now
+		case 2: // right button -> fire secondary
+			in.last[aFire2] = now
+		}
+	}
+}
+
+// mouseEdge applies the edge-push half of mouse aim: while the cursor sits at a
+// screen edge (where the terminal reports no further motion), keep feeding the
+// turn/elevation action so the view keeps swinging. Called once per game tick,
+// before snapshot reads the held state. Writes last[] directly (it holds mu, so
+// it can't go through hit(), which would re-lock).
+func (in *input) mouseEdge() {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	if !in.mouseAim || !in.mouseHave || time.Since(in.any) > mouseEdgeIdle {
+		return
+	}
+	now := time.Now()
+	if in.winCols > 0 {
+		if in.mouseX <= 1 {
+			in.last[aTurretL] = now
+		} else if in.mouseX >= in.winCols {
+			in.last[aTurretR] = now
+		}
+	}
+	if in.winRows > 0 {
+		if in.mouseY <= 1 {
+			in.last[aAimUp] = now
+		} else if in.mouseY >= in.winRows {
+			in.last[aAimDown] = now
+		}
 	}
 }
 
@@ -890,6 +999,16 @@ func (in *input) reader(t Term) {
 							in.cprPong()
 						case 't': // xterm window report ESC[8;rows;cols;t -> live resize
 							in.onWindowReport(params)
+						case '<': // SGR mouse report ESC[<b;x;yM (press/move) or m (release)
+							var mb []byte
+							mf, mok := in.escNext(t, buf, n, &i)
+							for mok && mf != 'M' && mf != 'm' {
+								mb = append(mb, mf)
+								mf, mok = in.escNext(t, buf, n, &i)
+							}
+							if mok {
+								in.onMouse(mb, mf == 'M')
+							}
 						default:
 							in.csiFinal(fin)
 						}
@@ -3877,6 +3996,7 @@ func runOptions(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *inpu
 	const (
 		iDiff = iota
 		iAssist
+		iMouse
 		iSound
 		iColor
 		iEditor
@@ -3884,9 +4004,9 @@ func runOptions(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *inpu
 		iVersion
 		iBack
 	)
-	names := []string{"DIFFICULTY", "AIM ASSIST", "SOUND", "COLOR", "MAP EDITOR", "CONTROLS", "VERSION INFO", "BACK"}
-	blurbs := []string{"", "", "", "", "Build and edit arenas.", "Remap your key bindings.", "Your version, the arena's, and any update.", "Return to the main menu."}
-	dim := []bool{false, false, false, false, false, false, false, false}
+	names := []string{"DIFFICULTY", "AIM ASSIST", "MOUSE AIM", "SOUND", "COLOR", "MAP EDITOR", "CONTROLS", "VERSION INFO", "BACK"}
+	blurbs := []string{"", "", "", "", "", "Build and edit arenas.", "Remap your key bindings.", "Your version, the arena's, and any update.", "Return to the main menu."}
+	dim := []bool{false, false, false, false, false, false, false, false, false}
 	onOff := func(b bool) string {
 		if b {
 			return "ON"
@@ -3897,10 +4017,12 @@ func runOptions(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *inpu
 	draw := func() {
 		names[iDiff] = "DIFFICULTY: " + s.difficulty.String()
 		names[iAssist] = "AIM ASSIST: " + onOff(s.aimAssist)
+		names[iMouse] = "MOUSE AIM: " + onOff(s.mouseAim)
 		names[iSound] = "SOUND"
 		names[iColor] = "COLOR: " + colorModeName(s.colorMode)
 		blurbs[iDiff] = "Bot skill level."
 		blurbs[iAssist] = "Sticky aim: ease onto a target your reticle is near."
+		blurbs[iMouse] = "Look with the mouse: move to aim, edges keep turning, click to fire. Needs a mouse-aware terminal."
 		blurbs[iSound] = "Effects, in-game music, and a sound test (ANSI music; needs a supporting terminal)."
 		blurbs[iColor] = "TRUECOLOR looks best; 256 is lighter on slow links; 16 suits classic terminals."
 		drawListMenu(w, cols, rows, "OPTIONS", names, blurbs, dim, sel)
@@ -3938,6 +4060,17 @@ func runOptions(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *inpu
 					draw()
 				case iAssist:
 					s.aimAssist = !s.aimAssist
+					saveUserSettings(dropfile, *s)
+					draw()
+				case iMouse:
+					s.mouseAim = !s.mouseAim
+					ip.setMouseAim(s.mouseAim)
+					if s.mouseAim { // toggle terminal mouse reporting live
+						w.WriteString(mouseReportOn)
+					} else {
+						w.WriteString(mouseReportOff)
+					}
+					w.Flush()
 					saveUserSettings(dropfile, *s)
 					draw()
 				case iSound:
@@ -5977,7 +6110,7 @@ func main() {
 		restore()
 		// Cut any still-queued music and restore the screen, through the locked
 		// writer so it can't collide with the music goroutine.
-		io.WriteString(lw, "\x1b[|MBT255L64O2C\x0e\x1b[?7h\x1b[0m\x1b[?25h\x1b[2J\x1b[H")
+		io.WriteString(lw, mouseReportOff+"\x1b[|MBT255L64O2C\x0e\x1b[?7h\x1b[0m\x1b[?25h\x1b[2J\x1b[H")
 	}
 	sigCh = make(chan os.Signal, 1)
 	signal.Notify(sigCh, shutdownSignals...)
@@ -5993,7 +6126,12 @@ func main() {
 	settings := loadUserSettings(dropfile)
 	colorMode = settings.colorMode                 // output palette (also covers the pre-login demo)
 	ip.setBinds(effectiveBinds(settings.keyBinds)) // apply custom controls
-	startUpdateCheck()                             // background GitHub probe for a newer client
+	if settings.mouseAim {                         // opt-in: turn on terminal mouse reporting
+		ip.setMouseAim(true)
+		w.WriteString(mouseReportOn)
+		w.Flush()
+	}
+	startUpdateCheck() // background GitHub probe for a newer client
 	_, playerName := door32Identity(dropfile)      // the caller's handle, for scoreboards
 	// Sound: an anonymous / no-dropfile launch (e.g. login.js attract straight into
 	// the demo) stays silent; a real first-time user gets a one-off sound check whose

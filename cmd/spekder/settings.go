@@ -16,6 +16,7 @@ import (
 type userSettings struct {
 	difficulty   gm.Difficulty
 	aimAssist    bool
+	mouseAim     bool // opt-in: aim/look with the mouse (terminal mouse reporting)
 	sound        bool // master: ANSI-music sound effects + music; opt-out
 	soundTested  bool // whether the first-run sound check has been done (else: ask)
 	gameAudio    int  // in-game audio: gameAudioSFX (default) / gameAudioMusic / gameAudioOff (mutually exclusive - one mono beeper)
@@ -115,6 +116,12 @@ func loadUserSettings(dropfile string) userSettings {
 	case "on", "true", "1", "yes":
 		s.aimAssist = true
 	}
+	switch strings.ToLower(ini["mouseaim"]) {
+	case "off", "false", "0", "no":
+		s.mouseAim = false
+	case "on", "true", "1", "yes":
+		s.mouseAim = true
+	}
 	switch strings.ToLower(ini["sound"]) {
 	case "off", "false", "0", "no":
 		s.sound = false
@@ -177,6 +184,10 @@ func saveUserSettings(dropfile string, s userSettings) {
 	if s.aimAssist {
 		aa = "on"
 	}
+	ma := "off"
+	if s.mouseAim {
+		ma = "on"
+	}
 	snd := "off"
 	if s.sound {
 		snd = "on"
@@ -192,7 +203,7 @@ func saveUserSettings(dropfile string, s userSettings) {
 	case gameAudioOff:
 		ga = "off"
 	}
-	body := fmt.Sprintf("difficulty = %s\naimassist = %s\nsound = %s\nsoundtested = %s\ngameaudio = %s\ncolormode = %s\n", s.difficulty.String(), aa, snd, stested, ga, colorModeSlug(s.colorMode))
+	body := fmt.Sprintf("difficulty = %s\naimassist = %s\nmouseaim = %s\nsound = %s\nsoundtested = %s\ngameaudio = %s\ncolormode = %s\n", s.difficulty.String(), aa, ma, snd, stested, ga, colorModeSlug(s.colorMode))
 	if s.campaignBest > 0 {
 		body += fmt.Sprintf("campaignbest = %d\n", s.campaignBest)
 	}
