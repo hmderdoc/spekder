@@ -194,13 +194,14 @@ func (r *Renderer) Resize(w, h int) {
 }
 
 // pollResize keeps a render loop's dimensions in step with the live terminal. It
-// asks the terminal for its size every ~1.5s (ESC[18t, written into w so it's
-// serialized with the loop's own output - works over telnet, not just a TTY) and
+// asks the terminal for its size every ~1.5s (a parked-cursor CPR probe written
+// into w so it's serialized with the loop's own output - works over telnet, not
+// just a TTY, and is answered by SyncTERM/CTerm where ESC[18t is not) and
 // applies any reported change to *cols/*rows/*rows3d + the renderer. Returns true
 // when the size changed this call, so the caller can force a full repaint.
 func pollResize(w *bufio.Writer, ip *input, rnd *Renderer, cols, rows, rows3d *int, lastPoll *time.Time, now time.Time) bool {
 	if now.Sub(*lastPoll) >= 1500*time.Millisecond {
-		w.WriteString("\x1b[18t")
+		sendSizeProbe(w)
 		*lastPoll = now
 	}
 	select {
@@ -671,6 +672,46 @@ func (in *input) onWindowReport(params []byte) {
 	}
 }
 
+// onCursorSize parses a cursor-position report (params "rows;cols") produced by
+// a parked-cursor size probe (see sendSizeProbe) and routes the dimensions to
+// the render loop for a live resize. CTerm/SyncTERM has no XTWINOPS (ESC[18t)
+// responder, so a CPR after parking the cursor at the far corner -- where the
+// terminal clamps it to the real size -- is the only size query it answers.
+func (in *input) onCursorSize(params []byte) {
+	f := strings.Split(string(params), ";")
+	if len(f) != 2 {
+		return
+	}
+	rows, err1 := strconv.Atoi(f[0])
+	cols, err2 := strconv.Atoi(f[1])
+	if err1 != nil || err2 != nil || cols < 20 || rows < 8 || cols > 1000 || rows > 1000 {
+		return
+	}
+	in.mu.Lock()
+	in.winCols, in.winRows = cols, rows
+	in.mu.Unlock()
+	// Replace any stale pending report with the latest, non-blocking.
+	select {
+	case <-in.resizeCh:
+	default:
+	}
+	select {
+	case in.resizeCh <- [2]int{cols, rows}:
+	default:
+	}
+}
+
+// sendSizeProbe asks the terminal its size the only way SyncTERM/CTerm answers:
+// park the cursor at the far corner (the terminal clamps it to the real size),
+// request a cursor-position report, then restore the cursor. The reply
+// ESC[rows;colsR is handled by the reader via onCursorSize. The older ESC[18t
+// window-report probe is silently dropped by CTerm on every SyncTERM build
+// (Mac and Windows alike -- CTerm implements no XTWINOPS), so responsive
+// resizing previously only worked by luck of the one-shot startup CPR probe.
+func sendSizeProbe(w *bufio.Writer) {
+	w.WriteString("\x1b7\x1b[999;999H\x1b[6n\x1b8")
+}
+
 // winSize returns the latest terminal size from a window report (0,0 if none yet).
 func (in *input) winSize() (int, int) {
 	in.mu.Lock()
@@ -995,9 +1036,10 @@ func (in *input) reader(t Term) {
 					}
 					if ok {
 						switch fin {
-						case 'R': // cursor-position report: the info panel's ping reply
+						case 'R': // cursor-position report: clocks the info-panel ping AND carries a parked size probe (live resize)
 							in.cprPong()
-						case 't': // xterm window report ESC[8;rows;cols;t -> live resize
+							in.onCursorSize(params)
+						case 't': // legacy xterm window report ESC[8;rows;cols;t (CTerm never sends it; kept for real-xterm fallback)
 							in.onWindowReport(params)
 						case '<': // SGR mouse report ESC[<b;x;yM (press/move) or m (release)
 							var mb []byte
@@ -2495,7 +2537,7 @@ func runParty(w *bufio.Writer, cols, rows int, ip *input, dropfile string) {
 			}
 			paintTitle()
 		case <-resizeTick.C:
-			w.WriteString("\x1b[18t") // request a window report (telnet-safe live resize)
+			sendSizeProbe(w) // parked-cursor CPR probe (telnet-safe live resize; SyncTERM ignores ESC[18t)
 			w.Flush()
 			if c, r := ip.winSize(); c >= 20 && r >= 8 && (c != cols || r != rows) {
 				cols, rows = c, r
@@ -3813,7 +3855,7 @@ func runMenu(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input, 
 				draw()
 			}
 		case <-resizeTick.C:
-			w.WriteString("\x1b[18t") // ask the terminal for its size (telnet-safe)
+			sendSizeProbe(w) // ask the terminal for its size (telnet-safe parked-cursor CPR)
 			w.Flush()
 			if c, r := ip.winSize(); c >= 20 && r >= 8 && (c != cols || r != rows) {
 				return menuChoice{relayout: true} // re-enter the menu at the new size
@@ -4035,7 +4077,7 @@ func runOptions(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *inpu
 		case <-ip.quitCh:
 			return // propagate quit; the main menu will exit
 		case <-resizeTick.C:
-			w.WriteString("\x1b[18t")
+			sendSizeProbe(w)
 			w.Flush()
 			if c, r := ip.winSize(); c >= 20 && r >= 8 && (c != cols || r != rows) {
 				cols, rows, rows3d = c, r, r
@@ -4131,7 +4173,7 @@ func runDifficulty(w *bufio.Writer, cols, rows int, ip *input, cur gm.Difficulty
 		case <-ip.quitCh:
 			return cur
 		case <-resizeTick.C:
-			w.WriteString("\x1b[18t")
+			sendSizeProbe(w)
 			w.Flush()
 			if c, r := ip.winSize(); c >= 20 && r >= 8 && (c != cols || r != rows) {
 				cols, rows = c, r
@@ -4322,7 +4364,7 @@ func runVehicleMenu(w *bufio.Writer, cols, rows int, ip *input, s *userSettings,
 		}
 		now := time.Now()
 		if now.Sub(lastSizePoll) >= 1500*time.Millisecond {
-			w.WriteString("\x1b[18t") // request a window report (telnet-safe live resize)
+			sendSizeProbe(w) // parked-cursor CPR probe (telnet-safe live resize; SyncTERM ignores ESC[18t)
 			lastSizePoll = now
 		}
 		if c, r := ip.winSize(); c >= 20 && r >= 8 && (c != cols || r != rows) {
@@ -4887,7 +4929,7 @@ func runVehicleMenuSimple(w *bufio.Writer, cols, rows int, ip *input, s *userSet
 		case <-ip.quitCh:
 			return 0, [3]float64{}, false, true
 		case <-resizeTick.C:
-			w.WriteString("\x1b[18t")
+			sendSizeProbe(w)
 			w.Flush()
 			if c, r := ip.winSize(); c >= 20 && r >= 8 && (c != cols || r != rows) {
 				cols, rows = c, r
@@ -5270,7 +5312,7 @@ func runMapPicker(w *bufio.Writer, cols, rows int, ip *input, mode gm.Mode) (idx
 		}
 		now := time.Now()
 		if now.Sub(lastSizePoll) >= 1500*time.Millisecond {
-			w.WriteString("\x1b[18t") // request a window report (telnet-safe live resize)
+			sendSizeProbe(w) // parked-cursor CPR probe (telnet-safe live resize; SyncTERM ignores ESC[18t)
 			lastSizePoll = now
 		}
 		if c, r := ip.winSize(); c >= 20 && r >= 8 && (c != cols || r != rows) {
@@ -7122,7 +7164,7 @@ func playMatch(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *input
 		}
 		drawChat(w, cols, rows, chat, nil)
 		if infoPanel && !pingWait && now.Sub(lastPing) >= 2*time.Second {
-			w.WriteString("\x1b[6n") // CPR ping rides this frame; reader clocks the reply
+			sendSizeProbe(w) // parked CPR rides this frame: reader clocks the ping reply AND tracks live size
 			pingSent, lastPing, pingWait = time.Now(), now, true
 		}
 		w.Flush()

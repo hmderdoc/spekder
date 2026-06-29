@@ -104,6 +104,70 @@ func TestReaderArrow(t *testing.T) {
 	}
 }
 
+// A cursor-position report (the parked-cursor size probe's reply, ESC[rows;colsR)
+// drives a live resize: cols/rows arrive on resizeCh as {cols,rows}. This is the
+// path that makes the view responsive on SyncTERM, which ignores ESC[18t.
+func TestReaderCursorSizeReportResizes(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer w.Close()
+	in := &input{
+		quitCh:   make(chan struct{}),
+		events:   make(chan menuKey, 32),
+		runes:    make(chan rune, 64),
+		cpr:      make(chan time.Time, 1),
+		resizeCh: make(chan [2]int, 1),
+	}
+	in.setBinds(effectiveBinds(nil))
+	go in.reader(pipeTerm{r: r})
+	// Terminal reports 36 rows x 120 cols in response to the parked CPR.
+	if _, err := w.Write([]byte("\x1b[36;120R")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	select {
+	case sz := <-in.resizeCh:
+		if sz[0] != 120 || sz[1] != 36 {
+			t.Fatalf("expected {cols,rows}={120,36}, got %v", sz)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("a cursor-position report should drive a resize on resizeCh")
+	}
+	// The same report also clocks the info-panel ping.
+	select {
+	case <-in.cpr:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("a cursor-position report should also pong the latency clock")
+	}
+}
+
+// A degenerate/too-small cursor report is rejected (no resize, no panic).
+func TestReaderCursorSizeReportRejectsTiny(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer w.Close()
+	in := &input{
+		quitCh:   make(chan struct{}),
+		events:   make(chan menuKey, 32),
+		runes:    make(chan rune, 64),
+		cpr:      make(chan time.Time, 1),
+		resizeCh: make(chan [2]int, 1),
+	}
+	in.setBinds(effectiveBinds(nil))
+	go in.reader(pipeTerm{r: r})
+	if _, err := w.Write([]byte("\x1b[2;5R")); err != nil { // 5 rows x 2 cols: below the 8x20 floor
+		t.Fatalf("write: %v", err)
+	}
+	select {
+	case sz := <-in.resizeCh:
+		t.Fatalf("a sub-minimum size report must not resize, got %v", sz)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
 // Uppercase W/A/S/D are cruise-control keys (distinct events from menu nav).
 func TestReaderCruiseKeys(t *testing.T) {
 	in, w := newReaderOnBytes(t, []byte("W"))
