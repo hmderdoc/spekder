@@ -21,6 +21,7 @@ type userSettings struct {
 	soundTested  bool // whether the first-run sound check has been done (else: ask)
 	gameAudio    int  // in-game audio: gameAudioSFX (default) / gameAudioMusic / gameAudioOff (mutually exclusive - one mono beeper)
 	colorMode    int  // colorTrue/color256/color16 (see color.go)
+	colorPinned  bool // user picked a color in OPTIONS (or a board default is set): skip the startup auto-probe
 	campaignBest int  // highest campaign level cleared (0 = never)
 	flagTier     int  // highest FLAG RUN tier unlocked (0 = onboarding; 1 = competitive...)
 	flagT0Done   int  // highest TIER 0 level completed (1-based; 0 = none) - the resume point
@@ -93,6 +94,7 @@ func loadUserSettings(dropfile string) userSettings {
 	// callers are mostly on classic terminals); the user's own pick overrides it.
 	if m, ok := parseColorMode(loadINI(defaultINIPath())["color_mode"]); ok {
 		s.colorMode = m
+		s.colorPinned = true // an explicit board-wide default; honor it, don't auto-probe over it
 	}
 	ini := loadINI(userSettingsPath(dropfile))
 	if d, ok := gm.ParseDifficulty(ini["difficulty"]); ok {
@@ -100,6 +102,13 @@ func loadUserSettings(dropfile string) userSettings {
 	}
 	if m, ok := parseColorMode(ini["colormode"]); ok {
 		s.colorMode = m
+	}
+	// Only a flag the user explicitly set (OPTIONS > COLOR) pins the mode. A bare
+	// colormode from an older build's auto-save does NOT count, so existing users
+	// still get auto-detected on their next connect.
+	switch strings.ToLower(ini["colorpinned"]) {
+	case "on", "true", "1", "yes":
+		s.colorPinned = true
 	}
 	if n, ok := atoiOK(ini["campaignbest"]); ok {
 		s.campaignBest = n
@@ -203,7 +212,11 @@ func saveUserSettings(dropfile string, s userSettings) {
 	case gameAudioOff:
 		ga = "off"
 	}
-	body := fmt.Sprintf("difficulty = %s\naimassist = %s\nmouseaim = %s\nsound = %s\nsoundtested = %s\ngameaudio = %s\ncolormode = %s\n", s.difficulty.String(), aa, ma, snd, stested, ga, colorModeSlug(s.colorMode))
+	cp := "off"
+	if s.colorPinned {
+		cp = "on"
+	}
+	body := fmt.Sprintf("difficulty = %s\naimassist = %s\nmouseaim = %s\nsound = %s\nsoundtested = %s\ngameaudio = %s\ncolormode = %s\ncolorpinned = %s\n", s.difficulty.String(), aa, ma, snd, stested, ga, colorModeSlug(s.colorMode), cp)
 	if s.campaignBest > 0 {
 		body += fmt.Sprintf("campaignbest = %d\n", s.campaignBest)
 	}

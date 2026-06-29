@@ -216,6 +216,34 @@ func pollResize(w *bufio.Writer, ip *input, rnd *Renderer, cols, rows, rows3d *i
 	return false
 }
 
+// settleTermSize is a one-shot startup helper for callers whose latency made the
+// pre-reader probeSize miss: it re-sends the size probe and waits for the reader
+// to report a CPR reply (ip.cpr), so the FIRST visible screen (sound check, demo,
+// menu) is already at the real size instead of the 80x25 fallback - no keypress
+// needed to kick it. Returns as soon as a reply lands, or after a short grace if
+// the terminal never answers (the per-screen resize tickers still catch up later).
+func settleTermSize(w *bufio.Writer, ip *input, cols, rows, rows3d *int, rnd *Renderer) {
+	select { // drop any stale pong so we only react to our own probe
+	case <-ip.cpr:
+	default:
+	}
+	deadline := time.Now().Add(1200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		sendSizeProbe(w)
+		w.Flush()
+		select {
+		case <-ip.cpr: // a CPR reply arrived; winSize is authoritative now
+			if c, r := ip.winSize(); c >= 20 && r >= 8 && (c != *cols || r != *rows) {
+				*cols, *rows, *rows3d = c, r, r
+				rnd.Resize(c, 2*r)
+			}
+			return
+		case <-time.After(250 * time.Millisecond):
+			// no answer yet; probe again until the deadline
+		}
+	}
+}
+
 func clampB(f float64) byte {
 	if f <= 0 {
 		return 0
@@ -1037,8 +1065,8 @@ func (in *input) reader(t Term) {
 					if ok {
 						switch fin {
 						case 'R': // cursor-position report: clocks the info-panel ping AND carries a parked size probe (live resize)
+							in.onCursorSize(params) // update winSize first, so a cpr waiter sees the fresh size
 							in.cprPong()
-							in.onCursorSize(params)
 						case 't': // legacy xterm window report ESC[8;rows;cols;t (CTerm never sends it; kept for real-xterm fallback)
 							in.onWindowReport(params)
 						case '<': // SGR mouse report ESC[<b;x;yM (press/move) or m (release)
@@ -4120,6 +4148,7 @@ func runOptions(w *bufio.Writer, cols, rows, rows3d int, rnd *Renderer, ip *inpu
 					draw()
 				case iColor:
 					s.colorMode = (s.colorMode + 1) % colorModes
+					s.colorPinned = true    // an explicit pick: stop auto-detecting from now on
 					colorMode = s.colorMode // applies immediately (next encode)
 					saveUserSettings(dropfile, *s)
 					draw()
@@ -6096,14 +6125,17 @@ func main() {
 	// The probe MUST run before the reader goroutine starts so it can read the
 	// ESC[..R reply. Explicit "<cols> <rows>" args override everything.
 	cols, rows := 80, 25
+	sizeKnown := false // false => 80x25 fallback; settle the size before the first screen renders
 	if c, r, ok := localTermSize(); ok {
 		cols, rows = c, r
+		sizeKnown = true
 		logf("term size from OS: %dx%d", c, r)
 	} else if c, r, ok := probeSize(term, 600*time.Millisecond); ok {
 		cols, rows = c, r
+		sizeKnown = true
 		logf("term size from ANSI probe: %dx%d", c, r)
 	} else {
-		logf("term size unknown; default 80x25")
+		logf("term size unknown; default 80x25 (will settle after reader starts)")
 	}
 	if len(pos) >= 2 {
 		if c, e := strconv.Atoi(pos[0]); e == nil {
@@ -6112,6 +6144,7 @@ func main() {
 		if r, e := strconv.Atoi(pos[1]); e == nil {
 			rows = r
 		}
+		sizeKnown = true // explicit operator override: don't second-guess it
 		logf("term size overridden by args: %dx%d", cols, rows)
 	}
 	if cols < 20 {
@@ -6120,6 +6153,21 @@ func main() {
 	if rows < 8 {
 		rows = 8
 	}
+
+	// Per-user prefs (incl. any saved color mode). Loaded here, before the reader
+	// goroutine, so the color probe below can read its DECRQSS reply.
+	settings := loadUserSettings(dropfile)
+	// Auto-detect color depth unless the caller pinned a choice (OPTIONS > COLOR)
+	// or the board set a default: a terminal that can't hold 24-bit gets 256
+	// instead of truecolor mush; silent/truecolor terminals stay truecolor. Runs
+	// after probeSize and before the reader goroutine (same ordering constraint).
+	if !settings.colorPinned {
+		if m, ok := probeColorDepth(term, 400*time.Millisecond); ok && m != settings.colorMode {
+			logf("color depth from probe: %s", colorModeName(m))
+			settings.colorMode = m
+		}
+	}
+
 	rows3d := rows // 3D scene now owns every row (HUD is drawn over the top-left sky)
 
 	rnd := newRenderer(cols, 2*rows3d)
@@ -6146,6 +6194,14 @@ func main() {
 	lw := &lockedWriter{w: &countWriter{w: term}}
 	w := bufio.NewWriterSize(lw, 1<<16)
 
+	// If the one-shot startup probe missed (a high-latency caller), actively
+	// settle the real size now that the reader is running - so the first screen
+	// (sound check / demo / menu) shows at the right size without needing a
+	// keypress to wake the per-screen resize ticker.
+	if !sizeKnown {
+		settleTermSize(w, ip, &cols, &rows, &rows3d, rnd)
+	}
+
 	cleanup := func() {
 		clearPresence(dropfile)
 		suspendMusic(true) // stop the music goroutine emitting
@@ -6165,8 +6221,7 @@ func main() {
 
 	// The menu drives everything: pick a single-player mode, join the arena, or
 	// open OPTIONS. Preferences are loaded per-BBS-user and editable in OPTIONS.
-	settings := loadUserSettings(dropfile)
-	colorMode = settings.colorMode                 // output palette (also covers the pre-login demo)
+	colorMode = settings.colorMode                 // output palette (auto-probed/pinned above; also covers the pre-login demo)
 	ip.setBinds(effectiveBinds(settings.keyBinds)) // apply custom controls
 	if settings.mouseAim {                         // opt-in: turn on terminal mouse reporting
 		ip.setMouseAim(true)

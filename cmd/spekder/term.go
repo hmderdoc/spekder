@@ -99,6 +99,62 @@ func probeWith(t Term, query []byte, parse func([]byte) (int, int, bool), timeou
 	return 0, 0, false
 }
 
+// probeColorDepth asks whether the caller's terminal really supports 24-bit
+// color, via the DECRQSS "set an odd truecolor SGR, then read the current SGR
+// back" round-trip. It only ever reports a DOWNGRADE: a terminal that echoes our
+// 24-bit value back -- or stays silent (most BBS terminals never answer DECRQSS)
+// -- is left at truecolor; one that quantized it to 38;5;N is reported as
+// color256. That lets a 256-color client (e.g. NetRunner) drop out of truecolor
+// mush automatically, while iTerm2/SyncTERM/ftelnet (silent or truecolor) keep
+// truecolor untouched.
+//
+// MUST run before the reader goroutine starts (like probeSize) AND after it, so
+// the size reply can't be mistaken for this one.
+func probeColorDepth(t Term, timeout time.Duration) (mode int, ok bool) {
+	// Set FG to an odd 24-bit value (no natural palette entry), ask DECRQSS for
+	// the active SGR, then reset. Nothing is drawn, so there is no visible mark.
+	if _, err := t.Write([]byte("\x1b[38;2;1;2;3m\x1bP$qm\x1b\\\x1b[0m")); err != nil {
+		return 0, false
+	}
+	deadline := time.Now().Add(timeout)
+	buf := make([]byte, 0, 128)
+	scratch := make([]byte, 64)
+	for time.Now().Before(deadline) && len(buf) < 256 {
+		rem := time.Until(deadline)
+		if rem > 50*time.Millisecond {
+			rem = 50 * time.Millisecond
+		}
+		n, err := t.ReadTimeout(scratch, rem)
+		if n > 0 {
+			buf = append(buf, scratch[:n]...)
+			if m, found := parseColorReadback(buf); found {
+				return m, true
+			}
+		} else if err != nil {
+			break
+		}
+	}
+	return 0, false
+}
+
+// parseColorReadback classifies a DECRQSS SGR reply (ESC P 1 $ r <sgr> m ESC \).
+// Our set color returns as 38;2;... / 38:2:... when the terminal kept 24-bit
+// (truecolor), or 38;5;N / 38:5:N when it quantized (256). Only a DECRQSS-shaped
+// reply ("$r") is trusted; anything else counts as "no answer" -> stay truecolor.
+func parseColorReadback(buf []byte) (mode int, ok bool) {
+	s := string(buf)
+	if !strings.Contains(s, "$r") {
+		return 0, false
+	}
+	if strings.Contains(s, "38;5") || strings.Contains(s, "38:5") {
+		return color256, true
+	}
+	if strings.Contains(s, "38;2") || strings.Contains(s, "38:2") {
+		return colorTrue, true
+	}
+	return 0, false
+}
+
 // parseCursorReport scans for ESC [ <rows> ; <cols> R (DSR cursor report).
 func parseCursorReport(buf []byte) (rows, cols int, ok bool) {
 	for i := 0; i+4 < len(buf); i++ {
