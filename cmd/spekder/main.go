@@ -167,18 +167,21 @@ type Cam struct {
 var lightDir = V3{0.4, 1.0, 0.3}.Norm()
 
 type Renderer struct {
-	W, H   int       // pixel grid (cols x 2*rows3d)
-	fb     []byte    // rgb
-	zb     []float64 // inverse depth (1/z); larger = nearer
-	focal  float64
-	fogCol [3]float64
-	noFog  bool // top-down tactical view: the whole floor sits in the fog band,
+	W, H       int       // pixel grid (cols x 2*rows3d)
+	fb         []byte    // rgb
+	zb         []float64 // inverse depth (1/z); larger = nearer
+	layer      []byte    // 3dBBS text-depth layer per sub-cell pixel
+	paintLayer byte      // layer assigned by the current raster pass
+	focal      float64
+	fogCol     [3]float64
+	noFog      bool // top-down tactical view: the whole floor sits in the fog band,
 	// which muds the map - fatally so once the palette modes quantize it
 }
 
 func newRenderer(w, h int) *Renderer {
-	return &Renderer{W: w, H: h, fb: make([]byte, w*h*3), zb: make([]float64, w*h),
-		focal: float64(w) / 2, fogCol: [3]float64{0.04, 0.05, 0.09}}
+	return &Renderer{W: w, H: h, fb: make([]byte, w*h*3), zb: make([]float64, w*h), layer: make([]byte, w*h),
+		paintLayer: scene3DLayerWorld,
+		focal:      float64(w) / 2, fogCol: [3]float64{0.04, 0.05, 0.09}}
 }
 
 // Resize re-fits the renderer's buffers to new pixel dimensions, in place so every
@@ -190,6 +193,8 @@ func (r *Renderer) Resize(w, h int) {
 	r.W, r.H = w, h
 	r.fb = make([]byte, w*h*3)
 	r.zb = make([]float64, w*h)
+	r.layer = make([]byte, w*h)
+	r.paintLayer = scene3DLayerWorld
 	r.focal = float64(w) / 2
 }
 
@@ -261,7 +266,9 @@ func (r *Renderer) clearBlack() {
 	}
 	for i := range r.zb {
 		r.zb[i] = 0
+		r.layer[i] = scene3DLayerBackdrop
 	}
+	r.paintLayer = scene3DLayerWorld
 }
 
 func (r *Renderer) clear() {
@@ -278,7 +285,9 @@ func (r *Renderer) clear() {
 	}
 	for i := range r.zb {
 		r.zb[i] = 0
+		r.layer[i] = scene3DLayerBackdrop
 	}
+	r.paintLayer = scene3DLayerWorld
 }
 
 // camera-space vertex with screen projection
@@ -391,6 +400,7 @@ func (r *Renderer) fillTri(sx, sy, iz [3]float64, col [3]float64) {
 			r.fb[o] = clampB((col[0]*(1-fg) + r.fogCol[0]*fg) * 255)
 			r.fb[o+1] = clampB((col[1]*(1-fg) + r.fogCol[1]*fg) * 255)
 			r.fb[o+2] = clampB((col[2]*(1-fg) + r.fogCol[2]*fg) * 255)
+			r.layer[idx] = r.paintLayer
 		}
 	}
 }
@@ -415,6 +425,7 @@ func (r *Renderer) drawEdge(ax, ay, aiz, bx, by, biz float64, col [3]float64) {
 		r.fb[o] = clampB((col[0]*(1-fg) + r.fogCol[0]*fg) * 255)
 		r.fb[o+1] = clampB((col[1]*(1-fg) + r.fogCol[1]*fg) * 255)
 		r.fb[o+2] = clampB((col[2]*(1-fg) + r.fogCol[2]*fg) * 255)
+		r.layer[idx] = r.paintLayer
 	}
 }
 
@@ -474,11 +485,14 @@ func max3(a, b, c float64) float64 { return math.Max(a, math.Max(b, c)) }
 
 func encode(r *Renderer, cols, rows3d int, prev []byte) ([]byte, []byte) {
 	var b strings.Builder
-	cur := make([]byte, rows3d*cols*6)
+	const cellBytes = 7 // top RGB + bottom RGB + 3dBBS layer
+	cur := make([]byte, rows3d*cols*cellBytes)
 	if prev == nil {
+		b.WriteString(scene3DSelectSeq(scene3DLayerBackdrop))
 		b.WriteString("\x1b[2J\x1b[H")
 	}
 	lastSGR := ""
+	lastLayer := -1
 	curX := -1
 	curY := -1
 	mode := colorMode
@@ -486,9 +500,14 @@ func encode(r *Renderer, cols, rows3d int, prev []byte) ([]byte, []byte) {
 		for x := 0; x < cols; x++ {
 			tp := ((2*y)*cols + x) * 3
 			bp := ((2*y+1)*cols + x) * 3
-			ci := (y*cols + x) * 6
+			ci := (y*cols + x) * cellBytes
 			quantCell(mode, cur[ci:ci+6], r.fb, tp, bp, x, y)
-			if prev != nil && string(prev[ci:ci+6]) == string(cur[ci:ci+6]) {
+			layer := r.layer[(2*y)*cols+x]
+			if lower := r.layer[(2*y+1)*cols+x]; lower < layer {
+				layer = lower // one half-block cell: its nearer sub-pixel wins
+			}
+			cur[ci+6] = layer
+			if prev != nil && string(prev[ci:ci+cellBytes]) == string(cur[ci:ci+cellBytes]) {
 				continue
 			}
 			if y == rows3d-1 && x == cols-1 {
@@ -497,6 +516,10 @@ func encode(r *Renderer, cols, rows3d int, prev []byte) ([]byte, []byte) {
 			}
 			if curY != y || curX != x {
 				fmt.Fprintf(&b, "\x1b[%d;%dH", y+1, x+1)
+			}
+			if scene3DActive && int(layer) != lastLayer {
+				b.WriteString(scene3DSelectSeq(int(layer)))
+				lastLayer = int(layer)
 			}
 			sgr, glyph := cellSGR(mode, cur[ci:ci+6])
 			if sgr != lastSGR {
@@ -509,6 +532,7 @@ func encode(r *Renderer, cols, rows3d int, prev []byte) ([]byte, []byte) {
 			curY, curX = y, x+1
 		}
 	}
+	b.WriteString(scene3DSelectSeq(scene3DLayerUI))
 	return []byte(b.String()), cur
 }
 
@@ -631,12 +655,13 @@ type input struct {
 	binds    map[byte]int      // remappable byte -> game action (see controls.go)
 	any      time.Time         // last time any byte arrived (for "press any key")
 	quitCh   chan struct{}
-	quitOnce sync.Once      // guards close(quitCh): reader EOF and the idle watchdog can both fire
-	events   chan menuKey   // discrete nav events for menus (buffered; drops if full)
-	runes    chan rune      // printable chars (for editor text entry; buffered, best-effort)
-	cpr      chan time.Time // cursor-position-report arrivals (the info panel's ping pong)
-	resizeCh chan [2]int    // {cols,rows} from a terminal window report (ESC[8;h;w;t)
-	winCols  int            // latest reported terminal size (guarded by mu); 0 = unknown
+	quitOnce sync.Once           // guards close(quitCh): reader EOF and the idle watchdog can both fire
+	events   chan menuKey        // discrete nav events for menus (buffered; drops if full)
+	runes    chan rune           // printable chars (for editor text entry; buffered, best-effort)
+	cpr      chan time.Time      // cursor-position-report arrivals (the info panel's ping pong)
+	resizeCh chan [2]int         // {cols,rows} from a terminal window report (ESC[8;h;w;t)
+	scene3d  chan scene3DVersion // private 3dBBS APC version replies during startup detection
+	winCols  int                 // latest reported terminal size (guarded by mu); 0 = unknown
 	winRows  int
 	escMenu  bool // lone Esc emits mkEsc instead of quitting (set during matches)
 
@@ -669,6 +694,19 @@ func (in *input) escAsKey() bool {
 func (in *input) cprPong() {
 	select {
 	case in.cpr <- time.Now():
+	default:
+	}
+}
+
+// onAPC accepts only the private 3dBBS identification reply. Other APC payloads
+// are consumed but ignored; importantly, they are not mistaken for a lone Esc.
+func (in *input) onAPC(payload []byte) {
+	v, ok := parseScene3DVersion(payload)
+	if !ok {
+		return
+	}
+	select {
+	case in.scene3d <- v:
 	default:
 	}
 }
@@ -1008,6 +1046,32 @@ func (in *input) escNext(t Term, buf []byte, n int, i *int) (byte, bool) {
 	return 0, false
 }
 
+// readAPC collects an APC payload after ESC _, through its ESC \ string
+// terminator. The 3dBBS reply is short; the cap prevents a malformed terminal
+// sequence from monopolizing the reader indefinitely.
+func (in *input) readAPC(t Term, buf []byte, n int, i *int) ([]byte, bool) {
+	payload := make([]byte, 0, 24)
+	for len(payload) < 128 {
+		c, ok := in.escNext(t, buf, n, i)
+		if !ok {
+			return nil, false
+		}
+		if c != 0x1b {
+			payload = append(payload, c)
+			continue
+		}
+		end, ok := in.escNext(t, buf, n, i)
+		if !ok {
+			return nil, false
+		}
+		if end == '\\' {
+			return payload, true
+		}
+		payload = append(payload, 0x1b, end)
+	}
+	return nil, false
+}
+
 // csiFinal maps an arrow sequence's final byte to its aim action + menu event.
 func (in *input) csiFinal(c byte) {
 	switch c {
@@ -1053,6 +1117,12 @@ func (in *input) reader(t Term) {
 			}
 			if c == 27 { // Esc: an arrow/SS3 sequence (ESC [ x / ESC O x), or a lone Esc = quit
 				nb, have := in.escNext(t, buf, n, &i)
+				if have && nb == '_' { // APC: 3dBBS startup reply (ESC _ ... ESC \)
+					if payload, ok := in.readAPC(t, buf, n, &i); ok {
+						in.onAPC(payload)
+					}
+					continue
+				}
 				if have && (nb == '[' || nb == 'O') {
 					fin, ok := in.escNext(t, buf, n, &i)
 					var params []byte
@@ -1464,6 +1534,8 @@ func drawStatus(w *bufio.Writer, cols int, v viewState, p *gm.TankSnap) {
 // TheDraw block that swallowed most of the view.) The change-character hint sits
 // on the last row, well clear of the replay.
 func drawDeathBanner(w *bufio.Writer, cols, rows int, respawnIn float64, deathBy, hint string) {
+	w.WriteString(scene3DSelectSeq(scene3DLayerAlert))
+	defer w.WriteString(scene3DSelectSeq(scene3DLayerUI))
 	title := "*** DESTROYED ***"
 	fmt.Fprintf(w, "\x1b[1;%dH\x1b[1;91m%s\x1b[0m", (cols-len(title))/2+1, title)
 	row := 2
@@ -1480,6 +1552,8 @@ func drawDeathBanner(w *bufio.Writer, cols, rows int, respawnIn float64, deathBy
 
 // drawKillBanner shows a transient "KILLED X" under the HP bar (top-center).
 func drawKillBanner(w *bufio.Writer, cols int, text string) {
+	w.WriteString(scene3DSelectSeq(scene3DLayerAlert))
+	defer w.WriteString(scene3DSelectSeq(scene3DLayerUI))
 	fmt.Fprintf(w, "\x1b[3;%dH\x1b[1;92m%s\x1b[0m", (cols-len(text))/2+1, clip(text, cols-2))
 }
 
@@ -1487,6 +1561,8 @@ func drawKillBanner(w *bufio.Writer, cols int, text string) {
 // on row 5 (under the kill banner and info strip), auto-dismissed after a few
 // seconds if unanswered.
 func drawEscConfirm(w *bufio.Writer, cols int) {
+	w.WriteString(scene3DSelectSeq(scene3DLayerAlert))
+	defer w.WriteString(scene3DSelectSeq(scene3DLayerUI))
 	const t = " LEAVE MATCH?  Y yes / N no "
 	fmt.Fprintf(w, "\x1b[5;%dH\x1b[1;30;43m%s\x1b[0m", (cols-len(t))/2+1, t)
 }
@@ -1531,6 +1607,8 @@ func drawInfoPanel(w *bufio.Writer, cols, fps int, tx int64, wr time.Duration, s
 // drawToast shows a transient author message (event system) centered near the top,
 // bright yellow on black so it reads over the world.
 func drawToast(w *bufio.Writer, cols int, text string) {
+	w.WriteString(scene3DSelectSeq(scene3DLayerAlert))
+	defer w.WriteString(scene3DSelectSeq(scene3DLayerUI))
 	text = clip(text, cols-4)
 	fmt.Fprintf(w, "\x1b[2;%dH\x1b[1;33;40m %s \x1b[0m", (cols-len(text)-2)/2+1, text)
 }
@@ -2031,9 +2109,12 @@ func (m *musicViz) fill(r *Renderer) {
 			}
 			o := (y*r.W + x) * 3
 			r.fb[o], r.fb[o+1], r.fb[o+2] = cr, cg, cb
-			r.zb[y*r.W+x] = 0 // far: a character drawn next overwrites it
+			idx := y*r.W + x
+			r.zb[idx] = 0 // far: a character drawn next overwrites it
+			r.layer[idx] = scene3DLayerBackdrop
 		}
 	}
+	r.paintLayer = scene3DLayerWorld // the character drawn next sits in front
 }
 
 // rainbowColor cycles a saturated hue (t in turns) for the menu character's skin.
@@ -4883,18 +4964,25 @@ func blitPanel(w *bufio.Writer, r *Renderer, prev []byte, col0, row0 int) []byte
 // repaint, so an unmasked cell is always rewritten cleanly the same frame).
 func blitPanelMasked(w *bufio.Writer, r *Renderer, prev []byte, col0, row0 int, skip []bool) []byte {
 	prows := r.H / 2
-	cur := make([]byte, prows*r.W*6)
+	const cellBytes = 7 // top RGB + bottom RGB + 3dBBS layer
+	cur := make([]byte, prows*r.W*cellBytes)
 	var b strings.Builder
 	lastSGR := ""
+	lastLayer := -1
 	curX, curY := -1, -1
 	mode := colorMode
 	for y := 0; y < prows; y++ {
 		for x := 0; x < r.W; x++ {
 			tp := ((2*y)*r.W + x) * 3
 			bp := ((2*y+1)*r.W + x) * 3
-			ci := (y*r.W + x) * 6
+			ci := (y*r.W + x) * cellBytes
 			quantCell(mode, cur[ci:ci+6], r.fb, tp, bp, x, y)
-			if prev != nil && string(prev[ci:ci+6]) == string(cur[ci:ci+6]) {
+			layer := r.layer[(2*y)*r.W+x]
+			if lower := r.layer[(2*y+1)*r.W+x]; lower < layer {
+				layer = lower
+			}
+			cur[ci+6] = layer
+			if prev != nil && string(prev[ci:ci+cellBytes]) == string(cur[ci:ci+cellBytes]) {
 				continue
 			}
 			if skip != nil && skip[y*r.W+x] {
@@ -4908,6 +4996,10 @@ func blitPanelMasked(w *bufio.Writer, r *Renderer, prev []byte, col0, row0 int, 
 			if curY != ry || curX != rx {
 				fmt.Fprintf(&b, "\x1b[%d;%dH", ry, rx)
 			}
+			if scene3DActive && int(layer) != lastLayer {
+				b.WriteString(scene3DSelectSeq(int(layer)))
+				lastLayer = int(layer)
+			}
 			sgr, glyph := cellSGR(mode, cur[ci:ci+6])
 			if sgr != lastSGR {
 				b.WriteString("\x1b[")
@@ -4919,6 +5011,7 @@ func blitPanelMasked(w *bufio.Writer, r *Renderer, prev []byte, col0, row0 int, 
 			curY, curX = ry, rx+1
 		}
 	}
+	b.WriteString(scene3DSelectSeq(scene3DLayerUI))
 	w.WriteString(b.String())
 	return cur
 }
@@ -5384,6 +5477,8 @@ func drawCenterNote(w *bufio.Writer, cols, rows int, s string) {
 
 // drawCountdown overlays the big count-in number (or GO) plus the mode name.
 func drawCountdown(w *bufio.Writer, cols, rows int, v viewState) {
+	w.WriteString(scene3DSelectSeq(scene3DLayerAlert))
+	defer w.WriteString(scene3DSelectSeq(scene3DLayerUI))
 	n := int(math.Ceil(v.timer))
 	word, fg := fmt.Sprintf("%d", n), 14 // yellow
 	if n <= 0 {
@@ -6175,9 +6270,14 @@ func main() {
 	// Raw mode is set inside openTerm. The input reader blocks in its own
 	// goroutine; Term.Read tolerates the non-blocking inherited door socket.
 	fmt.Fprint(term, "\x1b[?25l\x1b[?7l\x1b>") // hide cursor, disable auto-wrap, normal keypad (numpad Enter = CR, not SS3)
-	ip := &input{quitCh: make(chan struct{}), events: make(chan menuKey, 32), runes: make(chan rune, 64), cpr: make(chan time.Time, 1), resizeCh: make(chan [2]int, 1)}
+	ip := &input{quitCh: make(chan struct{}), events: make(chan menuKey, 32), runes: make(chan rune, 64), cpr: make(chan time.Time, 1), resizeCh: make(chan [2]int, 1), scene3d: make(chan scene3DVersion, 1)}
 	ip.winCols, ip.winRows = cols, rows // seed the live size with the startup detection
 	go ip.reader(term)
+	if v, ok := detectScene3D(term, ip.scene3d, 350*time.Millisecond); ok {
+		logf("3dBBS protocol %d.%d: text-depth layers enabled", v.major, v.minor)
+	} else if v != (scene3DVersion{}) {
+		logf("3dBBS protocol %d.%d: text-depth layers unavailable (need 0.3+)", v.major, v.minor)
+	}
 	// Backstop a vanished client (half-open socket): disconnect after this long with
 	// no input so the door exits and Synchronet reclaims the node. 0 disables.
 	idleLimit := 10 * time.Minute
@@ -6208,7 +6308,7 @@ func main() {
 		restore()
 		// Cut any still-queued music and restore the screen, through the locked
 		// writer so it can't collide with the music goroutine.
-		io.WriteString(lw, mouseReportOff+"\x1b[|MBT255L64O2C\x0e\x1b[?7h\x1b[0m\x1b[?25h\x1b[2J\x1b[H")
+		io.WriteString(lw, mouseReportOff+"\x1b[|MBT255L64O2C\x0e"+scene3DResetSeq()+"\x1b[?7h\x1b[0m\x1b[?25h\x1b[2J\x1b[H")
 	}
 	sigCh = make(chan os.Signal, 1)
 	signal.Notify(sigCh, shutdownSignals...)
@@ -6228,8 +6328,8 @@ func main() {
 		w.WriteString(mouseReportOn)
 		w.Flush()
 	}
-	startUpdateCheck() // background GitHub probe for a newer client
-	_, playerName := door32Identity(dropfile)      // the caller's handle, for scoreboards
+	startUpdateCheck()                        // background GitHub probe for a newer client
+	_, playerName := door32Identity(dropfile) // the caller's handle, for scoreboards
 	// Sound: an anonymous / no-dropfile launch (e.g. login.js attract straight into
 	// the demo) stays silent; a real first-time user gets a one-off sound check whose
 	// result is persisted so it's never asked again.

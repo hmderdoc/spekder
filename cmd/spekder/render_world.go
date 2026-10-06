@@ -430,8 +430,10 @@ func (r *Renderer) putPx(x, y int, col [3]byte) {
 	if x < 0 || y < 0 || x >= r.W || y >= r.H {
 		return
 	}
-	o := (y*r.W + x) * 3
+	idx := y*r.W + x
+	o := idx * 3
 	r.fb[o], r.fb[o+1], r.fb[o+2] = col[0], col[1], col[2]
+	r.layer[idx] = r.paintLayer
 }
 
 // tintRed blends the framebuffer toward red by alpha (capped) for the damage flash.
@@ -569,6 +571,7 @@ func (r *Renderer) renderWorld(cam Cam, t float64, tanks []gm.TankSnap, shots []
 	if topdown {
 		return // overhead view is its own map; no radar/reticle
 	}
+	r.paintLayer = scene3DLayerUI // instrumentation floats in front of the world
 	r.drawRadar(cam, tanks, flags, pickups, entT, entS, zones, me)
 	if reticle != ([3]byte{}) { // a zero reticle suppresses the crosshair (demo/spectator)
 		r.drawReticle(reticle, selfTurret)

@@ -199,6 +199,12 @@ truecolor SGR (`ESC[38;2;r;g;b m`). Modern truecolor terminals (Windows
 Terminal, xterm, iTerm2, and truecolor-capable web terminals like fTelnet) work
 well; strictly 16-color clients will render but the 3D shading will band badly.
 
+On the Nintendo 3DS **3dBBS** client, Spekder automatically negotiates text
+depth protocol 0.3 or newer. The sky/backdrop, arena geometry, radar/reticle,
+HUD, and urgent overlays are assigned separate stereoscopic planes; there is no
+setting to enable. Other terminals ignore the private detection query and stay
+on the normal 2-D terminal path without receiving layer controls.
+
 ---
 
 ## Controls

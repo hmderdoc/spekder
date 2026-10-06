@@ -197,6 +197,12 @@ func chatLine(m proto.ChatMessage) string {
 // keep the chat from flickering. The normal game path passes nil.
 func drawChat(w *bufio.Writer, cols, rows int, c *chatUI, mark func(row, col, vis int)) {
 	c.prune()
+	// Chat is transient foreground information. On 3dBBS it sits at the glass,
+	// clearly separated from the animated arena/menu it overlays.
+	if c.transcript || c.active || len(c.toasts) > 0 {
+		w.WriteString(scene3DSelectSeq(scene3DLayerAlert))
+		defer w.WriteString(scene3DSelectSeq(scene3DLayerUI))
+	}
 	if c.transcript {
 		drawChatTranscript(w, cols, rows, c, mark)
 		return
