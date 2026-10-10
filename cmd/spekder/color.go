@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"strings"
+
+	"github.com/hmderdoc/shadecell"
 )
 
 // Output color depth for everything we draw. Truecolor is the renderer's
@@ -130,6 +132,18 @@ func xterm256(r, g, b byte) byte {
 	return byte(16 + 36*cr + 6*cg + cb)
 }
 
+// shadeQ is the process-wide 16-colour quantizer (one door, one caller; the
+// render loop is the only user).
+var shadeQ = shadecell.New()
+
+// ibmToAnsi maps an IBM palette index (1=blue, 4=red; bright +8), the order
+// of cgaRGB, nearest16 and shadecell, to the ANSI SGR digit order (1=red,
+// 4=blue) that sgr16 and fgSGR emit. The swap is its own inverse.
+func ibmToAnsi(i byte) byte {
+	const swap = "\x00\x04\x02\x06\x01\x05\x03\x07"
+	return swap[i&7] | i&8
+}
+
 // packCell16 resolves a half-block cell (top/bottom palette indexes) into
 // classic-ANSI fg/bg/glyph. Classic backgrounds only span the 8 dark colors
 // (no iCE color assumption), so a bright bottom half flips the glyph to the
@@ -178,9 +192,15 @@ func quantCell(mode int, dst, fb []byte, tp, bp, x, y int) {
 		dst[0] = xterm256(fb[tp], fb[tp+1], fb[tp+2])
 		dst[1] = xterm256(fb[bp], fb[bp+1], fb[bp+2])
 	case color16:
-		t16 := nearest16(fb[tp], fb[tp+1], fb[tp+2], x, 2*y)
-		b16 := nearest16(fb[bp], fb[bp+1], fb[bp+2], x, 2*y+1)
-		dst[0], dst[1], dst[2] = packCell16(t16, b16)
+		// Perceptual shade quantizer (github.com/hmderdoc/shadecell): per cell
+		// the space / full block / shade glyph / half block whose fg+bg mix is
+		// closest in Oklab, so 16 colours give a few hundred tones instead of
+		// dithered bands. Its indexes are IBM palette order; sgr16 wants the
+		// ANSI digit order, so swap on the way in.
+		c := shadeQ.Pair(
+			shadecell.RGB{R: fb[tp], G: fb[tp+1], B: fb[tp+2]},
+			shadecell.RGB{R: fb[bp], G: fb[bp+1], B: fb[bp+2]})
+		dst[0], dst[1], dst[2] = ibmToAnsi(c.Fg()), ibmToAnsi(c.Bg()), c.Ch
 	default:
 		copy(dst[0:3], fb[tp:tp+3])
 		copy(dst[3:6], fb[bp:bp+3])
@@ -207,7 +227,7 @@ func fgSGR(r, g, b byte) string {
 	case color256:
 		return fmt.Sprintf("38;5;%d", xterm256(r, g, b))
 	case color16:
-		i := nearest16(r, g, b, 0, 0)
+		i := ibmToAnsi(nearest16(r, g, b, 0, 0))
 		if i < 8 {
 			return fmt.Sprintf("0;3%d", i)
 		}
@@ -228,7 +248,7 @@ func barCellSGR(fr, fg, fb, br, bg, bb byte) string {
 	case color256:
 		return fmt.Sprintf("38;5;%d;48;5;%d", xterm256(fr, fg, fb), xterm256(br, bg, bb))
 	case color16:
-		return sgr16(nearest16(fr, fg, fb, 0, 0), nearest16(br, bg, bb, 0, 0)&7)
+		return sgr16(ibmToAnsi(nearest16(fr, fg, fb, 0, 0)), ibmToAnsi(nearest16(br, bg, bb, 0, 0))&7)
 	}
 	return fmt.Sprintf("38;2;%d;%d;%d;48;2;%d;%d;%d", fr, fg, fb, br, bg, bb)
 }

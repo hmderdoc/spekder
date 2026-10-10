@@ -1117,8 +1117,11 @@ func (in *input) reader(t Term) {
 			}
 			if c == 27 { // Esc: an arrow/SS3 sequence (ESC [ x / ESC O x), or a lone Esc = quit
 				nb, have := in.escNext(t, buf, n, &i)
-				if have && nb == '_' { // APC: 3dBBS startup reply (ESC _ ... ESC \)
-					if payload, ok := in.readAPC(t, buf, n, &i); ok {
+				// APC: 3dBBS startup reply (ESC _ ... ESC \). DCS: a late reply to
+				// the startup color probe (XTVERSION / DECRQSS); read through its
+				// terminator and drop it so it can never register as keys or a quit.
+				if have && (nb == '_' || nb == 'P') {
+					if payload, ok := in.readAPC(t, buf, n, &i); ok && nb == '_' {
 						in.onAPC(payload)
 					}
 					continue
@@ -1126,8 +1129,8 @@ func (in *input) reader(t Term) {
 				if have && (nb == '[' || nb == 'O') {
 					fin, ok := in.escNext(t, buf, n, &i)
 					var params []byte
-					if nb == '[' { // collect CSI parameter bytes (e.g. a CPR ESC[24;80R or a window report ESC[8;h;w;t)
-						for ok && fin >= '0' && fin <= ';' {
+					if nb == '[' { // collect CSI parameter bytes (e.g. a CPR ESC[24;80R or a window report ESC[8;h;w;t); a private prefix (ESC[?..c / ESC[=..c DA replies) rides along so a late probe reply never leaks keys
+						for ok && ((fin >= '0' && fin <= ';') || fin == '?' || fin == '=' || fin == '>') {
 							params = append(params, fin)
 							fin, ok = in.escNext(t, buf, n, &i)
 						}
@@ -1149,6 +1152,7 @@ func (in *input) reader(t Term) {
 							if mok {
 								in.onMouse(mb, mf == 'M')
 							}
+						case 'c', 'S': // late Device Attributes / XTSMGRAPHICS replies to the startup color probe: ignore
 						default:
 							in.csiFinal(fin)
 						}
@@ -6250,16 +6254,19 @@ func main() {
 	}
 
 	// Per-user prefs (incl. any saved color mode). Loaded here, before the reader
-	// goroutine, so the color probe below can read its DECRQSS reply.
+	// goroutine, so the color probe below can read the terminal's replies.
 	settings := loadUserSettings(dropfile)
 	// Auto-detect color depth unless the caller pinned a choice (OPTIONS > COLOR)
-	// or the board set a default: a terminal that can't hold 24-bit gets 256
-	// instead of truecolor mush; silent/truecolor terminals stay truecolor. Runs
-	// after probeSize and before the reader goroutine (same ordering constraint).
+	// or the board set a default. The terminal is asked in band; a terminal
+	// that answers nothing is a 16-color one (NetRunner, Linux console), so
+	// silence lands on 16 rather than truecolor mush. Runs after probeSize and
+	// before the reader goroutine (same ordering constraint).
 	if !settings.colorPinned {
-		if m, ok := probeColorDepth(term, 400*time.Millisecond); ok && m != settings.colorMode {
-			logf("color depth from probe: %s", colorModeName(m))
-			settings.colorMode = m
+		m, res := probeColorDepth(term, 400*time.Millisecond)
+		logf("color depth from probe: %s -> %s", res, colorModeName(m))
+		settings.colorMode = m
+		if len(res.Leftover) > 0 {
+			term = &pushbackTerm{Term: term, pending: res.Leftover}
 		}
 	}
 
